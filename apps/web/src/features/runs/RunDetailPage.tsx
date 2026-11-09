@@ -11,7 +11,7 @@ import { buttonVariants } from "@heroui/styles";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useParams, useSearchParams } from "react-router-dom";
 
 import { useAuth } from "../auth/AuthProvider";
 import { RunContextPanel } from "../context/RunContextPanel";
@@ -58,7 +58,8 @@ function RunDetailContent({ runId }: { runId: string }) {
   const [accessRevoked, setAccessRevoked] = useState(false);
   const revoked = useRef(false);
   const [streamState, setStreamState] = useState("正在连接实时事件");
-  const [activeTab, setActiveTab] = useState("overview");
+  const [searchParams] = useSearchParams();
+  const [activeTab, setActiveTab] = useState(() => searchParams.get("tab") === "delivery" ? "delivery" : "overview");
   const [cancelOpen, setCancelOpen] = useState(false);
   const detailNavigation = useRef<HTMLElement>(null);
   const [events, setEvents] = useState<RunEvent[]>([]);
@@ -307,6 +308,11 @@ function RunDetailContent({ runId }: { runId: string }) {
         </div>
         <div className="run-actions">
           <RunStatusTag status={run.status} />
+          {run.task_id && (
+            <Link className={buttonVariants({ variant: "outline" })} to={`/tasks/${run.task_id}`}>
+              任务协作
+            </Link>
+          )}
           <Button onClick={() => void query.refetch()}>刷新状态</Button>
           {["RECOVERY_REQUIRED", "WAITING_CONTEXT"].includes(run.status) ? (
             <Button

@@ -175,6 +175,11 @@ class IdentityService:
         async with self._uow_factory() as uow:
             return await uow.store.get_principal_by_user_id(user_id, workspace_id=workspace_id)
 
+    async def workspace_member_names(self, principal: PrincipalRecord) -> list[tuple[UUID, str]]:
+        """任务选择器只获取活动成员的 ID 与显示名。"""
+        async with self._uow_factory() as uow:
+            return await uow.store.workspace_member_names(principal.workspace_id)
+
     async def authorize_write(
         self,
         *,

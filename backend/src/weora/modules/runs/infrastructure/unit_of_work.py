@@ -64,6 +64,7 @@ def _record(model: RunModel) -> RunRecord:
         output_text=model.output_text,
         failure_code=model.failure_code,
         recovery_read_only=model.recovery_read_only,
+        collaboration_context=model.collaboration_context,
     )
 
 
@@ -102,6 +103,7 @@ class SqlAlchemyRunStore:
                 created_at=run.created_at,
                 updated_at=run.updated_at,
                 execution_profile=asdict(run.execution_profile) if run.execution_profile is not None else None,
+                collaboration_context=run.collaboration_context,
             )
         )
         await self._session.flush()
@@ -139,8 +141,12 @@ class SqlAlchemyRunStore:
         return [_record(row) for row in rows]
 
     async def active_task_run(self, *, actor: RunActor, task_id: UUID) -> RunRecord | None:
+        return await self.active_run_for_task(actor.workspace_id, task_id)
+
+    async def active_run_for_task(self, workspace_id: UUID, task_id: UUID) -> RunRecord | None:
+        """供已完成任务鉴权的用例查询；活跃约束跨执行主体。"""
         row = await self._session.scalar(select(RunModel).where(
-            RunModel.workspace_id == actor.workspace_id, RunModel.created_by == actor.user_id,
+            RunModel.workspace_id == workspace_id,
             RunModel.task_id == task_id, RunModel.status.not_in(["SUCCEEDED", "FAILED", "CANCELLED"]),
         ))
         return _record(row) if row else None

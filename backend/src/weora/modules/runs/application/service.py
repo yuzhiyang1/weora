@@ -188,6 +188,8 @@ class RunService:
         if not instruction or len(instruction) > 16000:
             raise RunIdempotencyConflictError
         detail = await self.get(actor=actor, workspace_id=actor.workspace_id, run_id=run_id)
+        if detail.run.collaboration_context is not None:
+            raise RunNotFoundError
         if (detail.task.audience == "group") != (origin_metadata is not None):
             # Console 私有输入不能借已有群任务转发到群。
             raise RunNotFoundError
@@ -220,6 +222,11 @@ class RunService:
             try:
                 async with self._uow_factory() as uow:
                     await uow.tasks.lock_private(actor.workspace_id, detail.task.id, actor.user_id)
+                    collaboration = await uow.tasks.collaboration(actor.workspace_id, detail.task.id)
+                    if collaboration and (
+                        collaboration.assignment or collaboration.pending or collaboration.status == "in_review"
+                    ):
+                        raise RunNotFoundError
                     existing = await uow.tasks.input_by_key(actor.workspace_id, actor.user_id, idempotency_key)
                     if existing:
                         if existing.request_sha256 != digest:
@@ -306,6 +313,14 @@ class RunService:
             inputs = await uow.tasks.inputs(item.workspace_id, item.task_id, item.created_by)
             selected = next((entry for entry in inputs if entry.status == "PENDING"), None)
             if selected is None:
+                return None
+            collaboration = await uow.tasks.collaboration(item.workspace_id, item.task_id)
+            if collaboration and (
+                collaboration.assignment or collaboration.pending or collaboration.status == "in_review"
+            ):
+                # 指派或提交验收后，旧发起人的排队输入不得重新启动任务。
+                await uow.tasks.reject_input(selected)
+                await uow.commit()
                 return None
             latest = await uow.store.task_runs(actor=actor, task_id=task.id, limit=1)
             if latest and latest[0].status == "CANCELLED":
@@ -502,7 +517,16 @@ class RunService:
                 before = await uow.store.get_private(actor=actor, run_id=before_id)
                 if before is None:
                     raise RunNotFoundError
-            return await uow.store.list_private(actor=actor, limit=limit, before=before)
+            visible: list[RunRecord] = []
+            while len(visible) < limit:
+                batch = await uow.store.list_private(actor=actor, limit=limit, before=before)
+                for run in batch:
+                    if run.collaboration_context is None or await self._task_for_run(uow, run) is not None:
+                        visible.append(run)
+                if len(batch) < limit:
+                    break
+                before = batch[-1]
+            return visible[:limit]
 
     async def events(
         self,
@@ -519,6 +543,8 @@ class RunService:
             run = await uow.store.get_private(actor=actor, run_id=run_id)
             if run is None:
                 raise RunNotFoundError
+            if run.collaboration_context is not None:
+                await self._detail(uow, actor, run_id)
             # 限定到先读取的高水位，避免并发追加导致同页边界自相矛盾。
             events = await uow.store.list_events(actor=actor, run_id=run_id, after=after, limit=limit)
             return [event for event in events if event.sequence <= run.last_sequence], run.last_sequence
@@ -558,14 +584,9 @@ class RunService:
         run = await uow.store.get_private(actor=actor, run_id=run_id)
         if run is None:
             raise RunNotFoundError
-        task = await uow.tasks.get_private(
-            workspace_id=actor.workspace_id,
-            task_id=run.task_id,
-            user_id=actor.user_id,
-        )
+        task = await self._task_for_run(uow, run)
         if task is None:
             raise RunNotFoundError
-        task = await uow.tasks.for_run(task, run_id)
         if self._content_authorizer and not await self._content_authorizer(actor, run, task):
             raise RunNotFoundError
         return RunDetail(run, task)
@@ -576,10 +597,19 @@ class RunService:
             run = await uow.store.get_private(actor=actor, run_id=run_id)
             if run is None:
                 return None
-            task = await uow.tasks.get_private(
-                workspace_id=actor.workspace_id, task_id=run.task_id, user_id=actor.user_id
+            task = await self._task_for_run(uow, run)
+            return RunDetail(run, task) if task else None
+
+    @staticmethod
+    async def _task_for_run(uow: RunsUnitOfWork, run: RunRecord) -> TaskRecord | None:
+        if run.collaboration_context is not None:
+            return await uow.tasks.for_collaboration_run(
+                run.workspace_id, run.task_id, run.created_by, run.collaboration_context,
             )
-            return RunDetail(run, await uow.tasks.for_run(task, run_id)) if task else None
+        task = await uow.tasks.get_private(
+            workspace_id=run.workspace_id, task_id=run.task_id, user_id=run.created_by,
+        )
+        return await uow.tasks.for_run(task, run.id) if task else None
 
     @staticmethod
     def _require_workspace(actor: RunActor, workspace_id: UUID) -> None:

@@ -14,23 +14,42 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    delete,
     func,
+    or_,
     select,
     update,
 )
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Mapped, mapped_column
 
-from weora.modules.collaboration.application.tasks import TaskInput, TaskRecord
+from weora.modules.collaboration.application.tasks import (
+    TaskAssignment,
+    TaskCollaboration,
+    TaskInput,
+    TaskRecord,
+    TaskStatus,
+)
+from weora.modules.collaboration.infrastructure.inbox import archive_task_inbox, notify_task, touch_inbox
 from weora.shared.infrastructure.database import Base
 
 
 class TaskModel(Base):
-    """用户目标与固定私有受众，暂不提供转为群聊或共享任务的入口。"""
+    """原始目标和渠道受众独立于显式发布的控制台协作区。"""
 
     __tablename__ = "collaboration_tasks"
     __table_args__ = (
         UniqueConstraint("id", "workspace_id", "created_by", name="uq_tasks_private_owner"),
+        UniqueConstraint("id", "workspace_id", name="uq_tasks_workspace"),
+        CheckConstraint(
+            "status IN ('backlog', 'todo', 'in_progress', 'in_review', 'blocked', 'done', 'cancelled')",
+            name="ck_tasks_status",
+        ),
+        CheckConstraint(
+            "(assignee_type IS NULL AND assignee_id IS NULL) OR "
+            "(assignee_type IS NOT NULL AND assignee_type IN ('member', 'agent') AND assignee_id IS NOT NULL)",
+            name="ck_tasks_assignee",
+        ),
         CheckConstraint(
             "(origin = 'console' AND audience = 'private') OR "
             "(origin IN ('feishu', 'code_hosting') AND audience = 'group')",
@@ -48,6 +67,64 @@ class TaskModel(Base):
     origin_metadata: Mapped[dict[str, object] | None] = mapped_column(JSON(), nullable=True)
     project_context: Mapped[dict[str, object] | None] = mapped_column(JSON(), nullable=True)
     input_sequence: Mapped[int] = mapped_column(Integer(), default=0, server_default="0")
+    collaboration_title: Mapped[str | None] = mapped_column(String(160))
+    collaboration_summary: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[TaskStatus] = mapped_column(String(16), default="backlog", server_default="backlog")
+    assignee_type: Mapped[str | None] = mapped_column(String(16))
+    assignee_id: Mapped[UUID | None] = mapped_column()
+    assignee_name: Mapped[str | None] = mapped_column(String(120))
+    assignee_version: Mapped[str | None] = mapped_column(String(64))
+    collaboration_manager_id: Mapped[UUID | None] = mapped_column()
+    # 仅用于结清旧版已受理的交接请求。
+    collaboration_pending: Mapped[dict[str, object] | None] = mapped_column(JSON(none_as_null=True))
+    collaboration_revision: Mapped[int] = mapped_column(default=0, server_default="0")
+
+
+class TaskParticipantModel(Base):
+    """显式获准访问协作摘要的工作空间成员。"""
+
+    __tablename__ = "task_participants"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["task_id", "workspace_id"], ["collaboration_tasks.id", "collaboration_tasks.workspace_id"],
+        ),
+        Index("ix_task_participants_member", "workspace_id", "user_id"),
+    )
+
+    task_id: Mapped[UUID] = mapped_column(primary_key=True)
+    workspace_id: Mapped[UUID] = mapped_column(primary_key=True)
+    user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"), primary_key=True)
+
+
+class TaskActivityModel(Base):
+    """协作动作的审计记录与任务修订号保持一致。"""
+
+    __tablename__ = "task_activities"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["task_id", "workspace_id"], ["collaboration_tasks.id", "collaboration_tasks.workspace_id"],
+        ),
+    )
+
+    task_id: Mapped[UUID] = mapped_column(primary_key=True)
+    workspace_id: Mapped[UUID] = mapped_column(primary_key=True)
+    revision: Mapped[int] = mapped_column(primary_key=True)
+    event: Mapped[dict[str, object]] = mapped_column(JSON)
+
+
+def _assignment(data: dict[str, object] | None) -> TaskAssignment | None:
+    if data is None:
+        return None
+    version = data.get("version")
+    return TaskAssignment(
+        str(data["kind"]), UUID(str(data["id"])), str(data["name"]), str(version) if version else None,
+    )
+
+
+def _assignment_data(item: TaskAssignment | None) -> dict[str, object] | None:
+    if item is None:
+        return None
+    return {"kind": item.kind, "id": str(item.id), "name": item.name, "version": item.version}
 
 
 class TaskInputModel(Base):
@@ -113,6 +190,119 @@ class SqlAlchemyTaskStore:
 
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
+
+    async def collaboration(self, workspace_id: UUID, task_id: UUID, *, lock: bool = False) -> TaskCollaboration | None:
+        scope = (TaskModel.workspace_id == workspace_id, TaskModel.id == task_id)
+        if lock:
+            # 与私有续接使用同一行写锁，兼容 PostgreSQL 和 SQLite。
+            await self._session.execute(update(TaskModel).where(*scope).values(input_sequence=TaskModel.input_sequence))
+        model = await self._session.scalar(select(TaskModel).where(*scope).execution_options(populate_existing=True))
+        return await self._collaboration(model) if model else None
+
+    async def _collaboration(self, model: TaskModel) -> TaskCollaboration:
+        members = await self._session.scalars(select(TaskParticipantModel.user_id).where(
+            TaskParticipantModel.task_id == model.id, TaskParticipantModel.workspace_id == model.workspace_id,
+        ).order_by(TaskParticipantModel.user_id))
+        pending = model.collaboration_pending
+        assignment = (
+            TaskAssignment(model.assignee_type, model.assignee_id, model.assignee_name or "", model.assignee_version)
+            if model.assignee_type and model.assignee_id else None
+        )
+        return TaskCollaboration(
+            model.id, model.workspace_id, model.created_by, model.collaboration_title, model.collaboration_summary,
+            tuple(members), assignment, model.collaboration_manager_id,
+            _assignment(pending),
+            UUID(str(pending["actor_id"])) if pending else None, model.collaboration_revision,
+            model.status,
+        )
+
+    async def list_collaborations(self, workspace_id: UUID, user_id: UUID) -> list[TaskCollaboration]:
+        member_tasks = select(TaskParticipantModel.task_id).where(
+            TaskParticipantModel.workspace_id == workspace_id, TaskParticipantModel.user_id == user_id,
+        )
+        rows = await self._session.scalars(select(TaskModel).where(
+            TaskModel.workspace_id == workspace_id, TaskModel.collaboration_title.is_not(None),
+            or_(TaskModel.created_by == user_id, TaskModel.id.in_(member_tasks)),
+        ).order_by(TaskModel.created_at.desc(), TaskModel.id.desc()).limit(100))
+        return [await self._collaboration(model) for model in rows]
+
+    async def save_collaboration(self, state: TaskCollaboration) -> None:
+        pending = _assignment_data(state.pending)
+        if pending:
+            pending["actor_id"] = str(state.pending_by)
+        assignment = state.assignment
+        await self._session.execute(update(TaskModel).where(
+            TaskModel.workspace_id == state.workspace_id, TaskModel.id == state.task_id,
+        ).values(
+            collaboration_title=state.title, collaboration_summary=state.summary,
+            assignee_type=assignment.kind if assignment else None,
+            assignee_id=assignment.id if assignment else None,
+            assignee_name=assignment.name if assignment else None,
+            assignee_version=assignment.version if assignment else None,
+            collaboration_manager_id=state.manager_id,
+            collaboration_pending=pending, collaboration_revision=state.revision, status=state.status,
+        ))
+        scope = (TaskParticipantModel.task_id == state.task_id, TaskParticipantModel.workspace_id == state.workspace_id)
+        existing = set(await self._session.scalars(select(TaskParticipantModel.user_id).where(*scope)))
+        removed = existing.difference(state.participants)
+        if removed:
+            await self._session.execute(delete(TaskParticipantModel).where(
+                *scope, TaskParticipantModel.user_id.in_(removed),
+            ))
+        self._session.add_all([
+            TaskParticipantModel(task_id=state.task_id, workspace_id=state.workspace_id, user_id=user_id)
+            for user_id in sorted(set(state.participants) - existing)
+        ])
+
+    async def add_activity(self, state: TaskCollaboration, event: dict[str, object]) -> None:
+        self._session.add(TaskActivityModel(
+            task_id=state.task_id, workspace_id=state.workspace_id, revision=state.revision,
+            event=event | {"at": datetime.now(UTC).isoformat()},
+        ))
+        workspace_id, task_id = state.workspace_id, state.task_id
+        action = event["action"]
+        recipients: set[UUID] = set()
+        if action == "review_submitted":
+            recipients |= await archive_task_inbox(self._session, workspace_id, task_id, "review_returned")
+            await notify_task(self._session, workspace_id, task_id, state.owner_id, "review")
+            recipients.add(state.owner_id)
+        elif action in ("review_accepted", "review_returned"):
+            recipients |= await archive_task_inbox(self._session, workspace_id, task_id, "review")
+            recipient = state.manager_id or state.owner_id
+            if action == "review_returned" and str(recipient) != event["actor_id"]:
+                await notify_task(self._session, workspace_id, task_id, recipient, "review_returned")
+                recipients.add(recipient)
+        elif event.get("assignment_changed"):
+            recipients |= await archive_task_inbox(self._session, workspace_id, task_id, "assignment")
+            target = state.assignment
+            if target and target.kind == "member" and str(target.id) != event["actor_id"]:
+                await notify_task(self._session, workspace_id, task_id, target.id, "assignment")
+                recipients.add(target.id)
+        await touch_inbox(self._session, workspace_id, recipients)
+
+    async def activities(self, workspace_id: UUID, task_id: UUID) -> list[dict[str, object]]:
+        rows = await self._session.scalars(select(TaskActivityModel.event).where(
+            TaskActivityModel.workspace_id == workspace_id, TaskActivityModel.task_id == task_id,
+        ).order_by(TaskActivityModel.revision.desc()).limit(30))
+        return list(rows)
+
+    async def pending_collaborations(self, limit: int) -> list[tuple[UUID, UUID]]:
+        rows = await self._session.execute(select(TaskModel.workspace_id, TaskModel.id).where(
+            TaskModel.collaboration_pending.is_not(None),
+        ).order_by(
+            func.coalesce(TaskModel.collaboration_pending["checked_at"].as_string(), ""),
+            TaskModel.created_at, TaskModel.id,
+        ).limit(limit))
+        return [(workspace_id, task_id) for workspace_id, task_id in rows]
+
+    async def defer_collaboration(self, workspace_id: UUID, task_id: UUID) -> None:
+        """等待活跃 Run 的交接移到扫描队尾，避免长任务饿死已可交接的任务。"""
+        scope = (TaskModel.workspace_id == workspace_id, TaskModel.id == task_id)
+        pending = await self._session.scalar(select(TaskModel.collaboration_pending).where(*scope))
+        if pending is not None:
+            await self._session.execute(update(TaskModel).where(*scope).values(
+                collaboration_pending=pending | {"checked_at": datetime.now(UTC).isoformat()},
+            ))
 
     async def add(self, task: TaskRecord) -> None:
         """先 flush 父记录，但不提交；后续 Run 写入失败仍整体回滚。"""

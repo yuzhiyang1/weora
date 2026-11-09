@@ -10,6 +10,7 @@ from fastapi import FastAPI
 
 from weora.bootstrap.project_execution import ProjectExecution
 from weora.bootstrap.settings import AppSettings
+from weora.modules.collaboration.infrastructure.inbox import sync_plan_inbox
 from weora.modules.computers.credentials import ComputerCredentials
 from weora.modules.computers.tools import register_computer_tools
 from weora.modules.context.domain import ContextActor, Json, Message, MessagePage
@@ -228,7 +229,7 @@ def configure_execution_services(app: FastAPI, settings: AppSettings, guard: Run
         return await cast(RunService, app.state.run_service).execution_predecessors(actor, run_id)
 
     delivery = DeliveryService(
-        SqlAlchemyDeliveryStore(sessions),
+        SqlAlchemyDeliveryStore(sessions, sync_plan_inbox),
         DeliveryModuleAccess(
             context_access,
             executions,

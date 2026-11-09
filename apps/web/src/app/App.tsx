@@ -62,6 +62,15 @@ const RunDetailPage = lazy(() =>
     default: module.RunDetailPage,
   })),
 );
+const TasksPage = lazy(() =>
+  import("../features/tasks/TasksPage").then((module) => ({ default: module.TasksPage })),
+);
+const TaskDetailPage = lazy(() =>
+  import("../features/tasks/TasksPage").then((module) => ({ default: module.TaskDetailPage })),
+);
+const InboxPage = lazy(() =>
+  import("../features/inbox/InboxPage").then((module) => ({ default: module.InboxPage })),
+);
 const ConnectionsPage = lazy(() =>
   import("../features/context/ConnectionsPage").then((module) => ({
     default: module.ConnectionsPage,
@@ -217,6 +226,9 @@ export function App() {
               />
               <Route path="runs" element={<RunsPage />} />
               <Route path="runs/:runId" element={<RunDetailPage />} />
+              <Route path="tasks" element={<TasksPage />} />
+              <Route path="tasks/:taskId" element={<TaskDetailPage />} />
+              <Route path="inbox" element={<InboxPage />} />
               <Route path="context" element={<ConnectionsPage />} />
               <Route path="coordination" element={<CoordinationPage />} />
               <Route

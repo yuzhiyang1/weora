@@ -31,6 +31,15 @@ class SqlAlchemyIdentityStore:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
+    async def workspace_member_names(self, workspace_id: UUID) -> list[tuple[UUID, str]]:
+        rows = await self._session.execute(select(UserModel.id, UserModel.display_name).join(
+            WorkspaceMembershipModel, WorkspaceMembershipModel.user_id == UserModel.id,
+        ).where(
+            WorkspaceMembershipModel.workspace_id == workspace_id, WorkspaceMembershipModel.status == "active",
+            UserModel.status == "active",
+        ).order_by(UserModel.display_name, UserModel.id))
+        return [(user_id, name) for user_id, name in rows]
+
     async def update_profile(
         self, user_id: UUID, name: str, avatar: str | None, update_avatar: bool, now: datetime
     ) -> None:

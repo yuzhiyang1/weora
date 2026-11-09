@@ -255,6 +255,7 @@ async def _dispatch() -> int:
         await _reconcile_tools(app)
         await _reconcile_control(app)
         await cast(RunService, app.state.run_service).dispatch_task_inputs()
+        await app.state.task_collaboration_service.settle_handoffs()
         await _pump_context(app)
         await cast(DeliveryService, app.state.delivery_service).purge_expired()
         await cast(SqlAlchemyToolStore, app.state.tool_store).purge()

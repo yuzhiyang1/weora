@@ -11,6 +11,7 @@ import {
   ChevronsLeft,
   ChevronsRight,
   FolderGit2,
+  Inbox,
   GitBranch,
   LayoutDashboard,
   LogOut,
@@ -67,6 +68,8 @@ const sections: { label: string; items: NavigationItem[] }[] = [
     items: [
       { label: "概览", mobileLabel: "工作台", path: "/", icon: LayoutDashboard },
       { label: "运行", mobileLabel: "任务列表", path: "/runs", icon: Activity },
+      { label: "协作任务", path: "/tasks", icon: Users },
+      { label: "待我处理", path: "/inbox", icon: Inbox },
       { label: "协调中心", path: "/coordination", icon: Bot },
       { label: "项目", path: "/projects", icon: FolderGit2 },
     ],

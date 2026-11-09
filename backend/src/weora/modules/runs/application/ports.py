@@ -73,6 +73,8 @@ class RunRecord:
     output_text: str | None = None
     failure_code: str | None = None
     recovery_read_only: bool = False
+    # 共享执行冻结经过显式发布的摘要和本轮授权快照。
+    collaboration_context: dict[str, object] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,6 +144,8 @@ class RunStore(Protocol):
     async def task_runs(self, *, actor: RunActor, task_id: UUID, limit: int = 8) -> list[RunRecord]: ...
 
     async def active_task_run(self, *, actor: RunActor, task_id: UUID) -> RunRecord | None: ...
+
+    async def active_run_for_task(self, workspace_id: UUID, task_id: UUID) -> RunRecord | None: ...
 
 
 class RunsUnitOfWork(Protocol):

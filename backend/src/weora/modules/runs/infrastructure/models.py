@@ -29,8 +29,9 @@ class RunModel(Base):
     __tablename__ = "runs"
     __table_args__ = (
         ForeignKeyConstraint(
-            ["task_id", "workspace_id", "created_by"],
-            ["collaboration_tasks.id", "collaboration_tasks.workspace_id", "collaboration_tasks.created_by"],
+            ["task_id", "workspace_id"],
+            ["collaboration_tasks.id", "collaboration_tasks.workspace_id"],
+            name="fk_runs_task_workspace",
         ),
         UniqueConstraint("workspace_id", "created_by", "idempotency_key", name="uq_runs_submission_key"),
         CheckConstraint("last_sequence >= 1", name="ck_runs_sequence_positive"),
@@ -64,6 +65,7 @@ class RunModel(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     execution_profile: Mapped[dict[str, str | int] | None] = mapped_column(JSON(), nullable=True)
+    collaboration_context: Mapped[dict[str, object] | None] = mapped_column(JSON(), nullable=True)
     cancellation_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     output_text: Mapped[str | None] = mapped_column(Text(), nullable=True)
     failure_code: Mapped[str | None] = mapped_column(String(64), nullable=True)

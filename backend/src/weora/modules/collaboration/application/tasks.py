@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass, replace
 from datetime import datetime
-from typing import Protocol
+from typing import Literal, Protocol
 from uuid import UUID
 
 
@@ -20,6 +20,45 @@ class TaskRecord:
     origin_metadata: dict[str, object] | None = None
     # 冻结本次选中项目/仓库的白名单资料，不含凭据；更新项目不会回写历史任务。
     project_context: dict[str, object] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class TaskAssignment:
+    """负责人独立于任务发起人；Agent 指派固定可运行的发布版本。"""
+
+    kind: str
+    id: UUID
+    name: str
+    version: str | None = None
+
+
+TaskStatus = Literal["backlog", "todo", "in_progress", "in_review", "blocked", "done", "cancelled"]
+
+
+@dataclass(frozen=True, slots=True)
+class TaskCollaboration:
+    """协作区只发布明确填写的标题和摘要，不返回私有任务正文。"""
+
+    task_id: UUID
+    workspace_id: UUID
+    owner_id: UUID
+    title: str | None
+    summary: str | None
+    participants: tuple[UUID, ...]
+    assignment: TaskAssignment | None
+    manager_id: UUID | None
+    pending: TaskAssignment | None
+    pending_by: UUID | None
+    revision: int
+    status: TaskStatus
+
+    def can_manage(self, user_id: UUID) -> bool:
+        return self.owner_id == user_id or (self.manager_id == user_id and user_id in self.participants) or (
+            self.assignment is not None and self.assignment.kind == "member" and self.assignment.id == user_id
+        )
+
+    def can_view(self, user_id: UUID) -> bool:
+        return self.can_manage(user_id) or user_id in self.participants
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,12 +104,63 @@ class TaskStore(Protocol):
     async def thread_run(self, workspace_id: UUID, user_id: UUID, key: str) -> UUID | None: ...
     async def bind_thread(self, task: TaskRecord, key: str, run_id: UUID) -> None: ...
 
+    async def collaboration(
+        self, workspace_id: UUID, task_id: UUID, *, lock: bool = False,
+    ) -> TaskCollaboration | None: ...
+    async def list_collaborations(self, workspace_id: UUID, user_id: UUID) -> list[TaskCollaboration]: ...
+    async def save_collaboration(self, state: TaskCollaboration) -> None: ...
+    async def add_activity(self, state: TaskCollaboration, event: dict[str, object]) -> None: ...
+    async def activities(self, workspace_id: UUID, task_id: UUID) -> list[dict[str, object]]: ...
+    async def pending_collaborations(self, limit: int) -> list[tuple[UUID, UUID]]: ...
+    async def defer_collaboration(self, workspace_id: UUID, task_id: UUID) -> None: ...
+
 
 class TaskService:
     """在调用方事务内暂存任务，由最外层用例统一提交或回滚。"""
 
     def __init__(self, store: TaskStore) -> None:
         self._store = store
+
+    async def collaboration(self, workspace_id: UUID, task_id: UUID, *, lock: bool = False) -> TaskCollaboration | None:
+        return await self._store.collaboration(workspace_id, task_id, lock=lock)
+
+    async def list_collaborations(self, workspace_id: UUID, user_id: UUID) -> list[TaskCollaboration]:
+        return await self._store.list_collaborations(workspace_id, user_id)
+
+    async def change_collaboration(
+        self, state: TaskCollaboration, *, actor_id: UUID, action: str, note: str = "",
+        previous: TaskAssignment | None = None, target: TaskAssignment | None = None,
+    ) -> None:
+        """调用方持有 Task 锁；权限、状态和协作动态在同一事务生效。"""
+        await self._store.save_collaboration(state)
+        await self._store.add_activity(state, {
+            "revision": state.revision, "actor_id": str(actor_id), "action": action, "note": note,
+            "previous": previous.name if previous else None, "target": target.name if target else None,
+            "assignment_changed": previous != target if action in {"assigned", "started"} else False,
+        })
+
+    async def activities(self, workspace_id: UUID, task_id: UUID) -> list[dict[str, object]]:
+        return await self._store.activities(workspace_id, task_id)
+
+    async def pending_collaborations(self, limit: int) -> list[tuple[UUID, UUID]]:
+        return await self._store.pending_collaborations(limit)
+
+    async def defer_collaboration(self, workspace_id: UUID, task_id: UUID) -> None:
+        await self._store.defer_collaboration(workspace_id, task_id)
+
+    async def for_collaboration_run(
+        self, workspace_id: UUID, task_id: UUID, user_id: UUID, context: dict[str, object],
+    ) -> TaskRecord | None:
+        """共享执行只装配本轮冻结的摘要及项目，来源回传和私有历史各自隔离。"""
+        state = await self.collaboration(workspace_id, task_id)
+        if state is None or not state.can_view(user_id) or state.summary is None:
+            return None
+        project = context.get("project")
+        return TaskRecord(
+            task_id, workspace_id, user_id, str(context["instruction"]),
+            datetime.fromisoformat(str(context["created_at"])),
+            project_context=project if isinstance(project, dict) else None,
+        )
 
     async def create_private_console_task(self, task: TaskRecord) -> None:
         """仅接受受信应用层构造的目标，不在模块内提前提交事务。"""

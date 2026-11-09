@@ -1,5 +1,6 @@
 """审批和交付以数据库为事实来源，进程重启不丢失批准或未知远端结果。"""
 
+from collections.abc import Awaitable, Callable
 from dataclasses import asdict, replace
 from datetime import UTC, datetime, timedelta
 from typing import cast
@@ -7,6 +8,7 @@ from uuid import UUID
 
 from sqlalchemy import JSON, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, func, select, update
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Mapped, mapped_column
 
 from weora.modules.delivery.domain.models import ArtifactRecord, PlanRecord, PlanScope, PlanStatus, RemoteRecord
@@ -123,8 +125,13 @@ def _remote(model: DeliveryRemoteModel) -> RemoteRecord:
 
 
 class SqlAlchemyDeliveryStore:
-    def __init__(self, sessions: SessionFactory) -> None:
+    def __init__(
+        self,
+        sessions: SessionFactory,
+        on_plan_saved: Callable[[AsyncSession, UUID, UUID, UUID, UUID, str], Awaitable[None]] | None = None,
+    ) -> None:
         self.sessions = sessions
+        self.on_plan_saved = on_plan_saved
 
     async def remote_by_id(self, workspace_id: UUID, record_id: UUID) -> RemoteRecord | None:
         async with self.sessions() as session:
@@ -176,18 +183,24 @@ class SqlAlchemyDeliveryStore:
                             return False
                     session.add(DeliveryPlanModel(**values))
                     await session.flush()
-                    return True
-                result = await session.execute(
-                    update(DeliveryPlanModel)
-                    .where(
-                        DeliveryPlanModel.id == plan.id,
-                        DeliveryPlanModel.workspace_id == plan.workspace_id,
-                        DeliveryPlanModel.version == expected_version,
-                        DeliveryPlanModel.status == expected_status,
+                else:
+                    result = await session.execute(
+                        update(DeliveryPlanModel)
+                        .where(
+                            DeliveryPlanModel.id == plan.id,
+                            DeliveryPlanModel.workspace_id == plan.workspace_id,
+                            DeliveryPlanModel.version == expected_version,
+                            DeliveryPlanModel.status == expected_status,
+                        )
+                        .values(**values)
                     )
-                    .values(**values)
-                )
-                return result.rowcount == 1  # type: ignore[attr-defined,no-any-return]
+                    if result.rowcount != 1:  # type: ignore[attr-defined]
+                        return False
+                if self.on_plan_saved:
+                    await self.on_plan_saved(
+                        session, plan.workspace_id, plan.created_by, plan.run_id, plan.id, plan.status
+                    )
+                return True
         except IntegrityError:
             # 唯一版本约束负责并发插入；异常不包含在客户端响应中。
             return False

@@ -188,6 +188,7 @@ class SqlAlchemyExecutionStore:
                 )
                 .values(
                     output_text=None,
+                    collaboration_context=None,
                     fencing_token=RunModel.fencing_token + 1,
                     lease_owner=None,
                     lease_expires_at=None,

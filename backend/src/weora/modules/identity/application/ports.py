@@ -41,6 +41,7 @@ class RevokedSessionRecord:
 
 
 class IdentityStore(Protocol):
+    async def workspace_member_names(self, workspace_id: UUID) -> list[tuple[UUID, str]]: ...
     """Identity 聚合在一个事务内需要的数据库操作。"""
 
     async def get_user_by_email(self, email: str) -> UserRecord | None: ...

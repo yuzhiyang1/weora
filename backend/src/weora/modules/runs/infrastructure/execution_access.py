@@ -89,27 +89,28 @@ class ModulesExecutionAccess:
         except AgentRegistryError as exc:
             raise RuntimeFailure("RUNTIME_MATERIAL_INVALID") from exc
         async with self._uow_factory() as uow:
-            task = await uow.tasks.get_private(
-                workspace_id=run.workspace_id,
-                task_id=run.task_id,
-                user_id=run.created_by,
-            )
-            original = task
-            is_continuation = task is not None and await uow.tasks.input_for_run(task, run.id) is not None
-            if task is not None:
-                task = await uow.tasks.for_run(task, run.id)
-            previous_runs = await uow.store.task_runs(
-                actor=RunActor(run.created_by, run.workspace_id),
-                task_id=run.task_id,
-                limit=8,
-            )
+            original = None
+            is_continuation = False
             history_turns = []
-            for earlier in reversed(previous_runs):
-                if earlier.id == run.id or earlier.created_at >= run.created_at:
-                    continue
-                if earlier.status != "SUCCEEDED" or not earlier.output_text or original is None:
-                    continue
-                history_turns.append((earlier, await uow.tasks.for_run(original, earlier.id)))
+            if run.collaboration_context is not None:
+                task = await uow.tasks.for_collaboration_run(
+                    run.workspace_id, run.task_id, run.created_by, run.collaboration_context,
+                )
+            else:
+                original = await uow.tasks.get_private(
+                    workspace_id=run.workspace_id, task_id=run.task_id, user_id=run.created_by,
+                )
+                task = await uow.tasks.for_run(original, run.id) if original else None
+                if original:
+                    is_continuation = await uow.tasks.input_for_run(original, run.id) is not None
+                    previous_runs = await uow.store.task_runs(
+                        actor=RunActor(run.created_by, run.workspace_id), task_id=run.task_id, limit=8,
+                    )
+                    for earlier in reversed(previous_runs):
+                        if earlier.created_at >= run.created_at or earlier.collaboration_context is not None:
+                            continue
+                        if earlier.status == "SUCCEEDED" and earlier.output_text:
+                            history_turns.append((earlier, await uow.tasks.for_run(original, earlier.id)))
         if task is None:
             raise RuntimeFailure("TASK_NOT_FOUND")
         prompt = context.system_prompt

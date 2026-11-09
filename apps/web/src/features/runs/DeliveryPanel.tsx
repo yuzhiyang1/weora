@@ -166,6 +166,7 @@ export function DeliveryPanel({
       setReason("");
       setConfirmed(false);
       void client.invalidateQueries({ queryKey: key });
+      void client.invalidateQueries({ queryKey: ["inbox", workspaceId, userId] });
       void client.invalidateQueries({
         queryKey: ["runs", workspaceId, userId, runId],
       });

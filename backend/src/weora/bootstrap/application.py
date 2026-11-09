@@ -8,11 +8,13 @@ from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
+from uuid import UUID
 
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.requests import Request
 
@@ -30,6 +32,10 @@ from weora.modules.agents.application.runtime import AgentRuntimeContextAssemble
 from weora.modules.agents.application.service import AgentRegistryService
 from weora.modules.agents.infrastructure.skill_catalog import SkillsModuleVersionCatalog
 from weora.modules.agents.infrastructure.unit_of_work import SqlAlchemyAgentsUnitOfWork
+from weora.modules.collaboration.api import router as tasks_router
+from weora.modules.collaboration.application.inbox import InboxService
+from weora.modules.collaboration.inbox_api import router as inbox_router
+from weora.modules.collaboration.infrastructure.inbox import InboxStore
 from weora.modules.computers.api import router as computer_router
 from weora.modules.computers.credential_api import router as computer_credential_router
 from weora.modules.computers.openbot import OpenBot
@@ -63,7 +69,9 @@ from weora.modules.runs.api.routes import router as runs_router
 from weora.modules.runs.application.harness import OMP_RUNTIME
 from weora.modules.runs.application.ports import ExecutionProfile, RunActor
 from weora.modules.runs.application.service import RunService
+from weora.modules.runs.application.task_collaboration import TaskCollaborationService
 from weora.modules.runs.infrastructure.agent_catalog import AgentsModuleVersionCatalog
+from weora.modules.runs.infrastructure.models import RunModel
 from weora.modules.runs.infrastructure.module_access import RunContentGuard
 from weora.modules.runs.infrastructure.project_catalog import ProjectsModuleCatalog
 from weora.modules.runs.infrastructure.unit_of_work import SqlAlchemyRunsUnitOfWork
@@ -238,15 +246,26 @@ def create_app(
     async def current_git_identity(actor: RunActor, agent_name: str) -> dict[str, object]:
         return await git_identity(app.state.console_settings_service, app.state.identity_service, actor, agent_name)
 
+    async def workspace_member_name(workspace_id: UUID, user_id: UUID) -> str | None:
+        member = await app.state.identity_service.get_active_workspace_principal(
+            workspace_id=workspace_id, user_id=user_id,
+        )
+        return member.display_name if member else None
+
+    agent_catalog = AgentsModuleVersionCatalog(app.state.agent_registry_service)
     app.state.run_service = RunService(
         uow_factory=lambda: SqlAlchemyRunsUnitOfWork(session_factory),
-        agent_catalog=AgentsModuleVersionCatalog(app.state.agent_registry_service),
+        agent_catalog=agent_catalog,
         execution_profile=base_profile,
         profile_provider=current_profile if base_profile is not None else None,
         git_identity_provider=current_git_identity,
         content_authorizer=guard,
         projects=project_catalog,
         channel_project_authorizer=guard.channel_project_allowed,
+    )
+    app.state.task_collaboration_service = TaskCollaborationService(
+        lambda: SqlAlchemyRunsUnitOfWork(session_factory), workspace_member_name, agent_catalog,
+        current_profile, project_catalog, current_git_identity,
     )
     app.state.openbot = None
     if resolved_settings.computer_supervisor_url:
@@ -260,6 +279,12 @@ def create_app(
             "weora",
         )
     configure_execution_services(app, resolved_settings, guard)
+    app.state.inbox_service = InboxService(
+        InboxStore(session_factory, select(RunModel.id, RunModel.workspace_id, RunModel.task_id).subquery("run_tasks")),
+        app.state.task_collaboration_service,
+        app.state.run_service,
+        app.state.delivery_service,
+    )
     context = app.state.context_service
     app.state.coordination_service = (
         CoordinationService(
@@ -345,6 +370,8 @@ def create_app(
     app.include_router(skills_router, prefix=resolved_settings.api_prefix)
     app.include_router(agents_router, prefix=resolved_settings.api_prefix)
     app.include_router(runs_router, prefix=resolved_settings.api_prefix)
+    app.include_router(tasks_router, prefix=resolved_settings.api_prefix)
+    app.include_router(inbox_router, prefix=resolved_settings.api_prefix)
     app.include_router(computer_router, prefix=resolved_settings.api_prefix)
     app.include_router(computer_credential_router, prefix=resolved_settings.api_prefix)
     app.include_router(context_router, prefix=resolved_settings.api_prefix)
