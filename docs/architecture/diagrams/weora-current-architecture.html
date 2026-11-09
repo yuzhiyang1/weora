@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Weora 当前架构</title>
+  <title>Weora 架构与路线图 / Architecture &amp; Roadmap</title>
   <style>
     body {
       margin: 0;
@@ -24,120 +24,134 @@
 </head>
 <body>
 <main>
-<div class="diagram-container" tabindex="0" role="region" aria-label="可横向滚动的 Weora 架构图">
+<div class="diagram-container" tabindex="0" role="region" aria-label="可横向滚动的 Weora 架构与路线图">
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 720" role="img"
      aria-labelledby="weora-current-architecture-title weora-current-architecture-desc">
-  <title id="weora-current-architecture-title">Weora 当前架构</title>
-  <desc id="weora-current-architecture-desc">控制台和飞书提交任务，PostgreSQL 持久化状态，Celery 调度 Worker 通过执行内核和工具网关运行，Oh My Pi 仍在本地开发。</desc>
+  <title id="weora-current-architecture-title">Weora 架构与路线图 / Architecture &amp; Roadmap</title>
+  <desc id="weora-current-architecture-desc">控制台与飞书接入任务，PostgreSQL 持久化状态，Celery 调度 Agent 经工具网关执行。长期记忆、RAG、定时任务和团队上下文标为计划中。</desc>
   <defs>
-    <marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto-start-reverse">
+    <marker id="arrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto-start-reverse">
       <path d="M 0 0 L 8 3 L 0 6 Z" fill="#646a73"/>
-    </marker>
-    <marker id="arrow-blue" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
-      <path d="M 0 0 L 8 3 L 0 6 Z" fill="#005fd7"/>
     </marker>
   </defs>
   <rect width="1280" height="720" fill="#f7f8fa"/>
   <g font-family="'Geist', Aptos, 'Segoe UI Variable', 'PingFang SC', 'Microsoft YaHei', sans-serif" fill="#1c1f23">
-    <text x="44" y="64" font-size="28" font-family="'Instrument Serif', 'Noto Serif', 'Songti SC', SimSun, serif">Weora 当前架构</text>
-    <text x="44" y="96" font-size="14" fill="#646a73">2026-11-06 · 从任务入口、持久化调度到审批约束下的研发执行</text>
-    <path d="M 44 120 H 1236" stroke="#d4d7dd"/>
+    <text x="44" y="60" font-size="28" font-family="'Instrument Serif', 'Noto Serif', 'Songti SC', SimSun, serif">Weora 架构与路线图</text>
+    <text x="44" y="88" font-size="15" fill="#646a73">Architecture &amp; Roadmap</text>
+    <path d="M 44 104 H 1236" stroke="#d4d7dd"/>
+    <text x="44" y="132" font-size="13" font-weight="600" fill="#646a73">当前实现 / CURRENT</text>
 
-    <!-- API 和 Receiver 独立持久化输入，Beat 从数据库扫描并补投队列。 -->
+    <!-- API 与 Receiver 持久化输入，Beat 扫描待办并补投 Redis，Worker 保存运行结果。 -->
     <g fill="none" stroke="#646a73" stroke-width="1.2" marker-end="url(#arrow)">
-      <path d="M 260 220 H 312"/>
-      <path d="M 260 452 H 312"/>
-      <path d="M 422 280 V 392"/>
-      <path d="M 856 280 V 320 Q 856 328 848 328 H 500 Q 492 328 492 336 V 392"/>
-      <path d="M 752 220 H 800" marker-start="url(#arrow)"/>
-      <path d="M 1008 220 H 1060"/>
-      <path d="M 1148 280 V 328 Q 1148 336 1140 336 H 968 Q 960 336 960 344 V 392"/>
-      <path d="M 1008 452 H 1060" stroke="#005fd7" marker-end="url(#arrow-blue)"/>
+      <path d="M 260 212 H 312"/>
+      <path d="M 260 420 H 312"/>
+      <path d="M 422 268 V 364"/>
+      <path d="M 856 268 V 292 Q 856 300 848 300 H 500 Q 492 300 492 308 V 364"/>
+      <path d="M 752 212 H 800" marker-start="url(#arrow)"/>
+      <path d="M 1008 212 H 1060"/>
+      <path d="M 1148 268 V 316 Q 1148 324 1140 324 H 968 Q 960 324 960 332 V 364"/>
+      <path d="M 1008 420 H 1060"/>
     </g>
-
     <g fill="#f7f8fa">
-      <rect x="432" y="352" width="54" height="20" rx="2"/>
-      <rect x="584" y="300" width="132" height="20" rx="2"/>
-      <rect x="984" y="344" width="136" height="20" rx="2"/>
+      <rect x="430" y="310" width="54" height="20" rx="2"/>
+      <rect x="588" y="272" width="152" height="20" rx="2"/>
+      <rect x="992" y="332" width="132" height="20" rx="2"/>
     </g>
     <g fill="#646a73" font-size="12" text-anchor="middle">
-      <text x="459" y="366">读写状态</text>
-      <text x="650" y="314">扫描待办 / 保存运行</text>
-      <text x="1052" y="358">JSONL 工具请求</text>
+      <text x="457" y="324">读写状态</text>
+      <text x="664" y="286">扫描待办与回写 / SYNC</text>
+      <text x="1058" y="346">工具请求 / JSONL</text>
     </g>
 
     <g data-node-id="console">
-      <rect x="44" y="160" width="216" height="120" rx="6" fill="#ffffff" stroke="#1c1f23"/>
-      <text x="60" y="184" font-size="12" fill="#646a73">H · 人工操作</text>
-      <text x="60" y="218" font-size="16" font-weight="600">Web 控制台</text>
-      <text x="60" y="244" font-size="13" fill="#646a73">创建任务、审批、查看进度</text>
+      <rect x="44" y="156" width="216" height="112" rx="6" fill="#ffffff" stroke="#1c1f23"/>
+      <text x="60" y="180" font-size="12" fill="#646a73">H · 人工操作 / HUMAN</text>
+      <text x="60" y="210" font-size="17" font-weight="600">Web 控制台 / Console</text>
+      <text x="60" y="234" font-size="13" fill="#646a73">创建任务、审批、查看进度</text>
+      <text x="60" y="252" font-size="12" fill="#646a73">Create, approve, track</text>
     </g>
     <g data-node-id="feishu">
-      <rect x="44" y="392" width="216" height="120" rx="6" fill="#ffffff" stroke="#1c1f23"/>
-      <text x="60" y="416" font-size="12" fill="#646a73">P · 渠道接入</text>
-      <text x="60" y="450" font-size="16" font-weight="600">飞书 Receiver</text>
-      <text x="60" y="476" font-size="13" fill="#646a73">长连接接收，持久化 Inbox</text>
+      <rect x="44" y="364" width="216" height="112" rx="6" fill="#ffffff" stroke="#1c1f23"/>
+      <text x="60" y="388" font-size="12" fill="#646a73">P · 渠道接入 / CHANNEL</text>
+      <text x="60" y="418" font-size="17" font-weight="600">飞书 / Feishu Receiver</text>
+      <text x="60" y="442" font-size="13" fill="#646a73">接收消息并持久化到 Inbox</text>
+      <text x="60" y="460" font-size="12" fill="#646a73">Receive and store messages</text>
     </g>
     <g data-node-id="api">
-      <rect x="312" y="160" width="220" height="120" rx="6" fill="#e8f3ff" stroke="#005fd7" stroke-width="1.4"/>
-      <text x="328" y="184" font-size="12" fill="#646a73">P · 控制面</text>
-      <text x="328" y="218" font-size="16" font-weight="600">FastAPI</text>
-      <text x="328" y="244" font-size="13" fill="#646a73">工作空间、资产、Task / Run</text>
-      <text x="328" y="264" font-size="13" fill="#646a73">审批、运行查询与 SSE</text>
+      <rect x="312" y="156" width="220" height="112" rx="6" fill="#e8f3ff" stroke="#005fd7" stroke-width="1.4"/>
+      <text x="328" y="180" font-size="12" fill="#646a73">P · 控制面 / CONTROL PLANE</text>
+      <text x="328" y="210" font-size="17" font-weight="600">FastAPI</text>
+      <text x="328" y="234" font-size="13" fill="#646a73">工作空间、任务、运行与审批</text>
+      <text x="328" y="252" font-size="12" fill="#646a73">Workspaces, tasks, approvals, SSE</text>
     </g>
     <g data-node-id="postgres">
-      <rect x="312" y="392" width="220" height="120" rx="6" fill="#eef0f3" stroke="#1c1f23"/>
-      <text x="328" y="416" font-size="12" fill="#646a73">P · 权威存储</text>
-      <text x="328" y="450" font-size="16" font-weight="600">PostgreSQL</text>
-      <text x="328" y="476" font-size="13" fill="#646a73">任务、租约、审批与运行事件</text>
-      <text x="328" y="496" font-size="13" fill="#646a73">Inbox / Outbox 与交付回执</text>
+      <rect x="312" y="364" width="220" height="112" rx="6" fill="#eef0f3" stroke="#1c1f23"/>
+      <text x="328" y="388" font-size="12" fill="#646a73">P · 状态存储 / STATE</text>
+      <text x="328" y="418" font-size="17" font-weight="600">PostgreSQL</text>
+      <text x="328" y="442" font-size="13" fill="#646a73">任务、租约、事件与交付回执</text>
+      <text x="328" y="460" font-size="12" fill="#646a73">Tasks, leases, events, receipts</text>
     </g>
     <g data-node-id="redis">
-      <rect x="576" y="160" width="176" height="120" rx="6" fill="#eef0f3" stroke="#1c1f23"/>
-      <text x="592" y="184" font-size="12" fill="#646a73">P · 消息代理</text>
-      <text x="592" y="218" font-size="16" font-weight="600">Redis</text>
-      <text x="592" y="244" font-size="13" fill="#646a73">队列投递与消费</text>
+      <rect x="576" y="156" width="176" height="112" rx="6" fill="#eef0f3" stroke="#1c1f23"/>
+      <text x="592" y="180" font-size="12" fill="#646a73">P · 消息代理 / BROKER</text>
+      <text x="592" y="210" font-size="17" font-weight="600">Redis</text>
+      <text x="592" y="234" font-size="13" fill="#646a73">队列投递与消费</text>
+      <text x="592" y="252" font-size="12" fill="#646a73">Queue transport</text>
     </g>
     <g data-node-id="celery">
-      <rect x="800" y="160" width="208" height="120" rx="6" fill="#ffffff" stroke="#1c1f23"/>
-      <text x="816" y="184" font-size="12" fill="#646a73">P · 调度与执行</text>
-      <text x="816" y="218" font-size="16" font-weight="600">Celery Beat / Worker</text>
-      <text x="816" y="244" font-size="13" fill="#646a73">补投、主 Agent 协调与执行</text>
-      <text x="816" y="264" font-size="13" fill="#646a73">按 Run 快照选择执行内核</text>
+      <rect x="800" y="156" width="208" height="112" rx="6" fill="#ffffff" stroke="#1c1f23"/>
+      <text x="816" y="180" font-size="12" fill="#646a73">P · 调度 / DISPATCH</text>
+      <text x="816" y="210" font-size="17" font-weight="600">Celery Beat / Worker</text>
+      <text x="816" y="234" font-size="13" fill="#646a73">扫描、补投与执行 Run</text>
+      <text x="816" y="252" font-size="12" fill="#646a73">Dispatch, retry, execute runs</text>
     </g>
     <g data-node-id="runtime">
-      <rect x="1060" y="160" width="176" height="120" rx="6" fill="#ffffff" stroke="#1c1f23"/>
-      <text x="1076" y="184" font-size="12" fill="#646a73">A · 模型与工具循环</text>
-      <text x="1076" y="210" font-size="16" font-weight="600">Pi</text>
-      <text x="1076" y="230" font-size="13" fill="#646a73">主 Agent 与 Worker</text>
-      <rect x="1076" y="244" width="144" height="24" rx="4" fill="#f7f8fa" stroke="#646a73" stroke-dasharray="5 4"/>
-      <text x="1084" y="260" font-size="12" fill="#646a73">OMP · 本地 Worker</text>
+      <rect x="1060" y="156" width="176" height="112" rx="6" fill="#ffffff" stroke="#1c1f23"/>
+      <text x="1076" y="180" font-size="12" fill="#646a73">A · 执行内核 / RUNTIME</text>
+      <text x="1076" y="210" font-size="17" font-weight="600">Pi / Oh My Pi</text>
+      <text x="1076" y="234" font-size="13" fill="#646a73">Pi 为主，Oh My Pi 可选</text>
+      <text x="1076" y="252" font-size="12" fill="#646a73">Pi, with Oh My Pi opt-in</text>
     </g>
     <g data-node-id="gateway">
-      <rect x="800" y="392" width="208" height="120" rx="6" fill="#e8f3ff" stroke="#005fd7" stroke-width="1.4"/>
-      <text x="816" y="416" font-size="12" fill="#646a73">P · 权限边界</text>
-      <text x="816" y="450" font-size="16" font-weight="600">工具网关</text>
-      <text x="816" y="476" font-size="13" fill="#646a73">逐次校验租约、角色和预算</text>
-      <text x="816" y="496" font-size="13" fill="#646a73">高风险写入核对审批范围</text>
+      <rect x="800" y="364" width="208" height="112" rx="6" fill="#e8f3ff" stroke="#005fd7" stroke-width="1.4"/>
+      <text x="816" y="388" font-size="12" fill="#646a73">P · 权限边界 / POLICY</text>
+      <text x="816" y="418" font-size="17" font-weight="600">工具网关 / Gateway</text>
+      <text x="816" y="442" font-size="13" fill="#646a73">校验租约、角色、预算与审批</text>
+      <text x="816" y="460" font-size="12" fill="#646a73">Access checks &amp; approvals</text>
     </g>
-    <g data-node-id="delivery">
-      <rect x="1060" y="392" width="176" height="120" rx="6" fill="#ffffff" stroke="#1c1f23"/>
-      <text x="1076" y="416" font-size="12" fill="#646a73">T · 受控工具</text>
-      <text x="1076" y="450" font-size="16" font-weight="600">上下文与交付</text>
-      <text x="1076" y="476" font-size="13" fill="#646a73">飞书 / 仓库读取</text>
-      <text x="1076" y="496" font-size="13" fill="#646a73">Docker 沙箱 / 代码评审</text>
+    <g data-node-id="tools">
+      <rect x="1060" y="364" width="176" height="112" rx="6" fill="#ffffff" stroke="#1c1f23"/>
+      <text x="1076" y="388" font-size="12" fill="#646a73">T · 受控调用 / TOOLS</text>
+      <text x="1076" y="418" font-size="17" font-weight="600">执行工具 / Tools</text>
+      <text x="1076" y="442" font-size="13" fill="#646a73">上下文、沙箱、虚拟电脑</text>
+      <text x="1076" y="460" font-size="12" fill="#646a73">Context, sandbox, web</text>
     </g>
 
-    <text x="44" y="568" font-size="15" font-weight="600">运行结果留在平台</text>
-    <text x="44" y="596" font-size="14" fill="#646a73">控制台读取运行事件与产物，飞书任务由后台通过 Outbox 回报原会话。后续输入可延续同一 Task，并创建新 Run。</text>
-    <path d="M 44 632 H 1236" stroke="#d4d7dd"/>
-    <g font-size="13" fill="#646a73">
-      <text x="44" y="674">H 人工操作</text>
-      <text x="164" y="674">P 平台</text>
-      <text x="252" y="674">A 执行内核</text>
-      <text x="364" y="674">T 工具</text>
-      <path d="M 468 669 H 500" stroke="#646a73" stroke-dasharray="5 4"/>
-      <text x="512" y="674">本地开发中，尚未合入 main</text>
+    <!-- 路线图独立于当前调用链，不预设组件、接口或交付顺序。 -->
+    <g>
+      <rect x="44" y="520" width="1192" height="112" rx="6" fill="#f7f8fa" stroke="#646a73" stroke-dasharray="5 4"/>
+      <text x="64" y="548" font-size="13" font-weight="600" fill="#646a73">计划中 / PLANNED</text>
+      <path d="M 342 566 V 612 M 640 566 V 612 M 938 566 V 612" stroke="#d4d7dd"/>
+      <g font-size="17" font-weight="600">
+        <text x="64" y="582">长期记忆</text>
+        <text x="362" y="582">RAG · 知识库检索</text>
+        <text x="660" y="582">定时任务</text>
+        <text x="958" y="582">团队上下文</text>
+      </g>
+      <g font-size="13" fill="#646a73">
+        <text x="64" y="606">Long-term memory</text>
+        <text x="362" y="606">Retrieval-augmented generation</text>
+        <text x="660" y="606">Scheduled tasks</text>
+        <text x="958" y="606">Team context</text>
+      </g>
+    </g>
+
+    <path d="M 44 656 H 1236" stroke="#d4d7dd"/>
+    <g font-size="12" fill="#646a73">
+      <text x="44" y="686">H 人工操作 / Human</text>
+      <text x="220" y="686">P 平台 / Platform</text>
+      <text x="388" y="686">A 执行内核 / Agent runtime</text>
+      <text x="612" y="686">T 工具 / Tool</text>
     </g>
   </g>
 </svg>

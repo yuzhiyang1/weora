@@ -73,20 +73,20 @@ pnpm dev:web
 
 ## 架构
 
-```mermaid
-flowchart LR
-    Entry["Web 控制台或飞书"] --> API["Weora API"]
-    API --> State["PostgreSQL：任务、运行、审批"]
-    API --> Queue["Redis 与 Celery"]
-    Queue --> Worker["Worker 与 Agent 运行时"]
-    Worker --> Tools["工具网关"]
-    Tools --> Execution["沙箱、浏览器、代码托管"]
-    Worker --> State
-```
+![Weora 当前架构和路线图。控制台和飞书接入任务，PostgreSQL 保存状态，Celery 调度运行，Agent 通过工具网关调用工具。](docs/architecture/diagrams/weora-current-architecture.svg)
+
+[查看完整架构图](docs/architecture/diagrams/weora-current-architecture.svg)
 
 [FastAPI 后端](backend/)把任务和运行状态保存到 PostgreSQL。Celery 将工作交给独立的 Worker，工具网关逐次检查调用权限。[React 控制台](apps/web/)通过 API 读取状态和实时事件。参见[执行层架构](docs/architecture/execution-layer-upgrade.md)和[虚拟电脑设计](docs/adr/0022-task-computer-and-test-credentials.md)。
 
-[CLI](apps/cli/)已支持本地命令发现和 JSON Schema。业务 API 命令、Codex 和 Claude Code 运行时适配、A2A、可视化工作流及知识库仍在规划中。
+### 计划中
+
+- **长期记忆**：跨任务保留有用的决策和偏好。
+- **RAG**：检索获授权的知识库资料，在 Agent 回复中注明来源。
+- **定时任务**：让用户设置周期运行的 Agent 任务。
+- **团队上下文**：在工作空间内共享项目约定和团队决策。
+
+[CLI](apps/cli/)已支持本地命令发现和 JSON Schema。业务 API 命令、Codex 和 Claude Code 运行时适配、A2A 及可视化工作流也在规划中。
 
 ## 参与贡献
 

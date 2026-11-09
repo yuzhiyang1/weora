@@ -6,7 +6,7 @@
 
 | 图表 | 说明 | 离线源文件 | 文档图片 |
 | --- | --- | --- | --- |
-| 当前架构 | 控制面、持久化调度、Pi 执行和工具网关，另标出本地开发中的 OMP | [HTML](weora-current-architecture.html) | [SVG](weora-current-architecture.svg) |
+| 当前架构与路线图 | 双语总览，包含控制面、持久化调度、Pi 与可选的 Oh My Pi、工具网关，以及四项计划中的能力 | [HTML](weora-current-architecture.html) | [SVG](weora-current-architecture.svg) |
 | 职责总览 | 请求、调查、审批、工具与交付的责任分界 | [HTML](weora-overview.html) | [SVG](weora-overview.svg) |
 | 飞书上下文 | 自动补齐与主动查询共用服务及证据快照 | [HTML](feishu-context.html) | [SVG](feishu-context.svg) |
 | 接入与授权 | 渠道、成员、来源和输出受众分别约束 | [HTML](feishu-boundaries.html) | [SVG](feishu-boundaries.svg) |
