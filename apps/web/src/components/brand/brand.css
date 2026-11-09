@@ -1,0 +1,19 @@
+.weora-wordmark {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 12px;
+  white-space: nowrap;
+  font-weight: 700;
+  line-height: 1.2;
+}
+.weora-wordmark-mark {
+  color: var(--accent);
+  font-size: 24px;
+}
+.weora-wordmark-name {
+  color: var(--foreground);
+  font-size: 22px;
+}
+.app-shell[data-compact="true"] .weora-wordmark-name {
+  display: none;
+}

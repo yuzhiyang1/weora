@@ -1,0 +1,44 @@
+# 编辑器与本地环境
+.idea/
+.vscode/
+.env
+.env.*
+!.env.example
+*.local
+*.local.*
+
+# 本机身份凭据与 Git 认证材料不进入源码仓库。
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa
+id_ed25519
+.git-credentials
+weora-codeup-token.txt
+
+# Python
+backend/.venv/
+backend/.venv-v01/
+backend/.pytest_cache/
+backend/.mypy_cache/
+backend/.ruff_cache/
+backend/.coverage
+backend/htmlcov/
+**/__pycache__/
+*.py[cod]
+
+# Node.js
+node_modules/
+apps/*/node_modules/
+apps/*/dist/
+apps/*/coverage/
+runtimes/*/dist/
+runtimes/*/coverage/
+
+# 本地验收产物、临时数据库、日志和下载缓存不作为源码交付。
+.playwright-cli/
+output/
+
+# 本地基础设施数据
+volumes/

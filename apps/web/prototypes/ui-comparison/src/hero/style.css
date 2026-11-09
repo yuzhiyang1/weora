@@ -1,0 +1,164 @@
+@import "tailwindcss";
+@import "@heroui/styles";
+@import "../shared/layout.css";
+
+/* 保留 HeroUI 自身的颜色与控件表面，以下仅补充工作台专用布局。 */
+:root {
+  --canvas: var(--background);
+  --ink: var(--foreground);
+  --subtle: var(--muted);
+  --panel: var(--surface);
+  --line: var(--border);
+  --side: var(--background);
+  --soft: var(--surface-secondary);
+  --accent-ink: var(--accent);
+  --good: var(--success);
+}
+body {
+  background: var(--canvas);
+  color: var(--ink);
+}
+.hero-page .preview-sidebar {
+  padding-top: 27px;
+}
+.hero-page .preview-nav > button {
+  height: 41px;
+  font-size: 12px;
+  font-weight: 500;
+}
+.hero-page .preview-nav > .button--secondary {
+  color: var(--accent);
+  background: color-mix(in oklch, var(--accent) 12%, transparent);
+}
+.hero-page .workspace-label {
+  display: flex;
+  flex-direction: row;
+}
+.hero-page .sidebar-tip {
+  padding: 17px 15px;
+  margin: auto 0 24px;
+  color: var(--subtle);
+}
+.hero-page .sidebar-tip > svg {
+  color: var(--accent);
+  margin-bottom: 12px;
+}
+.hero-page .sidebar-tip strong {
+  color: var(--ink);
+  display: block;
+  font-size: 12px;
+  font-weight: 500;
+}
+.hero-page .sidebar-tip p {
+  font-size: 11px;
+  line-height: 1.8;
+  margin: 8px 0 14px;
+}
+.hero-page .preview-account {
+  margin-top: 0;
+}
+.hero-stat .stat-label svg {
+  opacity: 0.7;
+}
+.hero-tasks .tabs {
+  width: 100%;
+}
+.hero-tasks .tabs__list-container {
+  width: auto;
+}
+.hero-tasks .tabs__tab {
+  font-size: 12px;
+  white-space: nowrap;
+}
+.hero-task-list {
+  margin: 0 -8px -4px;
+}
+.hero-task-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-height: 79px;
+  padding: 16px 8px;
+  border-top: 1px solid var(--line);
+}
+.hero-task-row:hover {
+  background: color-mix(in oklch, var(--foreground) 2%, transparent);
+}
+.task-leading {
+  flex-shrink: 0;
+  width: 35px;
+  height: 35px;
+  display: grid;
+  place-items: center;
+  background: var(--soft);
+  color: var(--subtle);
+  border-radius: 11px;
+}
+.task-leading.running {
+  background: color-mix(in oklch, var(--accent) 10%, transparent);
+  color: var(--accent);
+}
+.hero-task-title {
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+  cursor: pointer;
+}
+.hero-task-title:hover .task-title {
+  color: var(--accent);
+}
+.task-time {
+  color: var(--subtle);
+  font-size: 10px;
+  min-width: 62px;
+  text-align: right;
+}
+.meta-separator {
+  padding: 0 5px;
+  opacity: 0.45;
+}
+.project-select {
+  width: 155px;
+}
+.project-select .select__trigger {
+  font-size: 12px;
+}
+.project-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 3px;
+}
+.project-dot.blue {
+  background: #7b98e7;
+}
+.project-dot.violet {
+  background: #ad92d8;
+}
+@media (max-width: 760px) {
+  .hero-task-row {
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+  .hero-task-title {
+    flex-basis: calc(100% - 50px);
+  }
+  .hero-task-row > .chip {
+    margin-left: 45px;
+  }
+  .task-time {
+    margin-left: auto;
+  }
+  .hero-page .sidebar-tip {
+    display: none;
+  }
+  .hero-page .preview-account {
+    margin-top: auto;
+  }
+  .section-line {
+    align-items: flex-start;
+  }
+  .project-select {
+    width: 130px;
+  }
+}

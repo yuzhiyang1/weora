@@ -1,0 +1,93 @@
+html,
+body,
+#comparison {
+  margin: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}
+iframe {
+  display: block;
+  border: 0;
+  width: 100%;
+  height: 100%;
+}
+iframe[hidden] {
+  display: none;
+}
+.comparison-bar {
+  position: fixed;
+  z-index: 999;
+  bottom: 18px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 7px;
+  border-radius: 16px;
+  background: #111318;
+  border: 1px solid #3b3d45;
+  color: #bec2ce;
+  box-shadow: 0 10px 40px #0005;
+  white-space: nowrap;
+  font:
+    11px "Segoe UI",
+    "Microsoft YaHei",
+    sans-serif;
+}
+.comparison-label {
+  padding: 0 9px;
+  font-size: 10px;
+  color: #8a8f9d;
+}
+.comparison-bar button,
+.comparison-bar a {
+  border: 0;
+  padding: 10px 13px;
+  border-radius: 10px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  text-decoration: none;
+}
+.comparison-bar button[aria-pressed="true"] {
+  background: #eceef5;
+  color: #16181d;
+  font-weight: 600;
+}
+.comparison-bar button:hover,
+.comparison-bar a:hover {
+  background: #333640;
+  color: white;
+}
+.comparison-bar button[aria-pressed="true"]:hover {
+  background: white;
+  color: black;
+}
+.comparison-bar button:focus-visible,
+.comparison-bar a:focus-visible {
+  outline: 2px solid #a6baff;
+  outline-offset: 2px;
+}
+.bar-divider {
+  width: 1px;
+  height: 20px;
+  background: #353942;
+  margin: 0 5px;
+}
+@media (max-width: 600px) {
+  .comparison-label,
+  #standalone {
+    display: none;
+  }
+  .comparison-bar {
+    bottom: 10px;
+    padding: 5px;
+    gap: 0;
+  }
+  .comparison-bar button {
+    padding: 10px 11px;
+  }
+}

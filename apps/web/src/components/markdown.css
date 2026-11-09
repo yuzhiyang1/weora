@@ -1,0 +1,57 @@
+.markdown-content {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: 14px;
+  line-height: 1.8;
+}
+.markdown-content > :first-child { margin-top: 0; }
+.markdown-content > :last-child { margin-bottom: 0; }
+.markdown-content p,
+.markdown-content ul,
+.markdown-content ol,
+.markdown-content blockquote,
+.markdown-content pre,
+.markdown-table-scroll { margin-block: 16px; }
+.markdown-content :is(h4, h5, h6) {
+  margin: 24px 0 12px;
+  font-size: 16px;
+  line-height: 1.5;
+  font-weight: 600;
+}
+.markdown-content ul { list-style: disc; padding-left: 24px; }
+.markdown-content ol { list-style: decimal; padding-left: 24px; }
+.markdown-content li + li { margin-top: 6px; }
+.markdown-content strong { font-weight: 600; }
+.markdown-content a { color: var(--accent); text-decoration: underline; text-underline-offset: 3px; }
+.markdown-content blockquote {
+  padding-left: 16px;
+  border-left: 3px solid var(--separator);
+  color: var(--muted);
+}
+.markdown-content code {
+  padding: 2px 5px;
+  border-radius: 4px;
+  background: var(--surface-secondary);
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 0.9em;
+}
+.markdown-content pre {
+  max-width: 100%;
+  overflow: auto;
+  padding: 16px;
+  border-radius: 12px;
+  background: var(--surface-secondary);
+}
+.markdown-content pre code { padding: 0; background: none; }
+.markdown-table-scroll { max-width: 100%; overflow-x: auto; }
+.markdown-content table { width: 100%; border-collapse: collapse; text-align: left; }
+/* 三列及以上的证据表保留可读列宽，只在表格区域横向滚动。 */
+.markdown-content table:has(tr > :nth-child(3)) { min-width: 560px; }
+.markdown-content :is(th, td) {
+  min-width: 96px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--separator);
+  vertical-align: top;
+}
+.markdown-content th { background: var(--surface-secondary); font-weight: 500; }
+.markdown-image-note { color: var(--muted); font-size: 12px; }

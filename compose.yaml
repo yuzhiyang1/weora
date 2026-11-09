@@ -1,0 +1,67 @@
+name: weora
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: weora
+      POSTGRES_USER: weora
+      POSTGRES_PASSWORD: ${WEORA_POSTGRES_PASSWORD:?WEORA_POSTGRES_PASSWORD is required}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U weora -d weora"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  backend:
+    build:
+      context: ./backend
+    environment:
+      WEORA_ENVIRONMENT: development
+      WEORA_CORS_ORIGINS: '["http://localhost:3000"]'
+      WEORA_DATABASE_URL: postgresql+asyncpg://weora:${WEORA_POSTGRES_PASSWORD}@postgres:5432/weora
+      WEORA_DEVELOPMENT_AUTH_BYPASS_ENABLED: "${WEORA_DEVELOPMENT_AUTH_BYPASS_ENABLED:-false}"
+      WEORA_SESSION_COOKIE_SECURE: "false"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health/live')",
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  frontend:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "3000:80"
+
+volumes:
+  postgres-data:
+  redis-data:

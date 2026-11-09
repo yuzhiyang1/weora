@@ -1,0 +1,90 @@
+/* HeroUI 默认主题是唯一视觉来源；旧业务语义只作为别名保留。 */
+:root {
+  font-family:
+    "Segoe UI Variable", "Segoe UI", "PingFang SC", "Microsoft YaHei",
+    sans-serif;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  --card: var(--surface);
+  --popover: var(--overlay);
+  --primary: var(--accent);
+  --primary-foreground: var(--accent-foreground);
+  --secondary: var(--surface-secondary);
+  --muted-foreground: var(--muted);
+  --destructive: var(--danger);
+  --input: var(--separator);
+  --ring: var(--focus);
+  --sidebar: var(--background);
+  --brand: var(--accent);
+  --brand-soft: var(--accent-soft);
+  --weora-ink: var(--foreground);
+  --weora-muted: var(--muted);
+  --weora-canvas: var(--background);
+  --weora-surface: var(--surface);
+  --weora-line: var(--border);
+  --weora-accent: var(--accent);
+  --weora-accent-dark: var(--accent);
+  --weora-accent-soft: var(--accent-soft);
+  --sidebar-width: 232px;
+}
+* {
+  box-sizing: border-box;
+}
+html,
+body {
+  /* 经典滚动条会占用可见宽度，320px 视口下仍须允许页面收缩。 */
+  min-width: min(320px, 100%);
+  min-height: 100%;
+}
+body {
+  margin: 0;
+  background: var(--background);
+  color: var(--foreground);
+  font-size: 14px;
+  line-height: 1.6;
+}
+a {
+  text-decoration: none;
+}
+a:not(.button):not(.link) {
+  color: inherit;
+}
+code,
+pre {
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 12px;
+}
+time,
+code,
+.metric-card strong {
+  font-variant-numeric: tabular-nums;
+}
+h1,
+h2,
+h3,
+h4,
+p {
+  margin-top: 0;
+}
+h1,
+h2,
+h3 {
+  color: var(--foreground);
+  font-weight: 600;
+}
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Router 链接不经过 React Aria，也要具备清楚的键盘焦点反馈。 */
+a:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 3px;
+}

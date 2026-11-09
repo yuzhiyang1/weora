@@ -1,0 +1,268 @@
+/* 这里只保留业务布局；HeroUI 自身负责控件的颜色、圆角、尺寸与状态。 */
+.console-input-wrap,
+.console-input,
+.console-textarea,
+.console-select {
+  width: 100%;
+  min-width: 0;
+}
+.console-textarea {
+  resize: vertical;
+}
+.console-select-popover {
+  min-width: 240px;
+  max-width: min(560px, calc(100vw - 32px));
+}
+.console-select-popover .search-field {
+  padding: 6px;
+}
+.console-tag {
+  vertical-align: middle;
+}
+.console-notice {
+  min-width: 0;
+}
+.console-notice .alert__content {
+  overflow-wrap: anywhere;
+}
+.avatar-square {
+  border-radius: var(--field-radius);
+}
+.console-empty {
+  display: grid;
+  justify-items: center;
+  text-align: center;
+  gap: 12px;
+  padding: 40px 16px;
+}
+.console-empty h3 {
+  font-size: 15px;
+  margin: 0;
+}
+.console-empty p {
+  max-width: 48ch;
+  color: var(--muted);
+  font-size: 13px;
+  margin: 0;
+}
+.empty-icon {
+  display: grid;
+  place-items: center;
+  width: 52px;
+  height: 52px;
+  border-radius: var(--radius-2xl);
+  background: var(--surface-secondary);
+  color: var(--muted);
+}
+.console-loading,
+.route-loading {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 10px;
+  padding: 40px 16px;
+  color: var(--muted);
+}
+.console-skeleton {
+  display: grid;
+  gap: 15px;
+  padding: 20px;
+}
+.console-dialog {
+  width: 100%;
+}
+.console-dialog-body {
+  min-height: 0;
+}
+.console-dialog-body > .search-field {
+  margin-bottom: 12px;
+}
+.console-card {
+  min-width: 0;
+}
+.console-card-heading {
+  display: flex;
+  flex-direction: row;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+.console-table {
+  min-width: 0;
+  width: 100%;
+}
+.console-table .table__scroll-container {
+  width: 100%;
+  overflow-x: auto;
+}
+.console-table table {
+  min-width: 570px;
+}
+.table-empty {
+  display: block;
+  padding: 24px;
+  color: var(--muted);
+  text-align: center;
+}
+.package-form,
+.agent-form,
+.skill-form {
+  display: grid;
+  gap: calc(var(--spacing) * 6);
+}
+.form-field {
+  display: grid;
+  gap: calc(var(--spacing) * 2);
+  min-width: 0;
+}
+.form-field > span:first-child {
+  color: var(--foreground);
+  font-size: 14px;
+  font-weight: 500;
+}
+.form-field > p,
+.agent-form > p {
+  color: var(--muted-foreground);
+  font-size: 14px;
+}
+.modal-actions {
+  position: sticky;
+  /* 操作区留在滚动容器内；负偏移会将长表单的按钮裁掉。 */
+  bottom: 0;
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 16px 0 4px;
+  background: var(--popover);
+  border-top: 1px solid var(--border);
+}
+.skill-picker {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  background: var(--surface-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-2xl);
+}
+.skill-picker-header h3 {
+  font-size: 14px;
+  margin: 0 0 4px;
+}
+.skill-picker-header p {
+  color: var(--muted-foreground);
+  font-size: 12px;
+  margin: 0;
+}
+.skill-option-list {
+  display: grid;
+  gap: calc(var(--spacing) * 2);
+  max-height: 240px;
+  overflow-y: auto;
+}
+.skill-option {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px;
+  background: var(--background);
+  border: 1px solid var(--border);
+  border-radius: var(--field-radius);
+  cursor: pointer;
+}
+.skill-option > span:nth-last-child(2) {
+  display: grid;
+  flex: 1;
+  min-width: 0;
+}
+.skill-option small {
+  color: var(--muted-foreground);
+}
+.skill-option-icon {
+  color: var(--brand);
+}
+.picker-empty {
+  padding: 22px;
+  background: var(--surface-secondary);
+  color: var(--muted-foreground);
+  font-size: 14px;
+  text-align: center;
+  border-radius: var(--field-radius);
+}
+.package-dropzone {
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 10px;
+  padding: 32px;
+  min-height: 190px;
+  border: 1px dashed var(--input);
+  border-radius: var(--radius-2xl);
+  background: var(--surface-secondary);
+  color: var(--muted-foreground);
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+.package-dropzone:hover,
+.package-dropzone.dragging {
+  border-color: var(--brand);
+  background: var(--brand-soft);
+}
+.package-dropzone input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+}
+.package-dropzone strong {
+  color: var(--foreground);
+}
+.package-dropzone small {
+  max-width: 48ch;
+}
+.upload-mark {
+  color: var(--brand);
+}
+.package-guidance {
+  display: grid;
+  gap: 4px;
+  padding: 12px;
+  background: var(--surface-secondary);
+  border-radius: var(--field-radius);
+  font-size: 12px;
+}
+@media (max-width: 760px) {
+  .console-dialog {
+    max-height: 90dvh;
+    /* HeroUI Body 自带焦点环留白，避免与 Dialog 内边距重复挤压窄屏表单。 */
+    padding: 16px;
+  }
+  /* 创建任务、仓库和设置弹窗共用同一个长选项收缩规则。 */
+  .console-dialog .select__value {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+  .package-dropzone {
+    padding: 16px;
+    min-height: 0;
+  }
+  .skill-option,
+  .skill-picker-header {
+    overflow-wrap: anywhere;
+  }
+}
+
+.skill-option .checkbox,
+.skill-option .checkbox__content {
+  width: 100%;
+}
+.skill-option .checkbox__content > .label {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+}
+.skill-option .label > span:nth-last-child(2) {
+  display: grid;
+  flex: 1;
+  min-width: 0;
+}

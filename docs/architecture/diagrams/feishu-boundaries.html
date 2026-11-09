@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>飞书接入与授权边界</title><style>/* 复用 Weora 色彩；本地字体确保图表离线可读。 */
+:root{--paper:#f7f8fa;--ink:#1c1f23;--muted:#646a73;--accent:#005fd7;--font-sans:'Geist',Aptos,'Segoe UI Variable','PingFang SC','Microsoft YaHei',sans-serif;--font-serif:'Instrument Serif','Noto Serif','Songti SC',SimSun,serif;--font-mono:'Geist Mono',Consolas,'Liberation Mono',monospace}
+*{box-sizing:border-box}body{margin:0;padding:32px 24px;background:var(--paper);color:var(--ink);font-family:var(--font-sans)}
+.frame{width:100%;max-width:1280px;min-width:0;margin:auto}.eyebrow{font:11px var(--font-mono);letter-spacing:.14em;color:var(--muted)}
+h1{font:400 28px var(--font-serif);margin:12px 0 20px}.intro,.footer{font-size:14px;line-height:1.7;color:var(--muted)}
+.diagram-container{width:100%;overflow-x:auto}svg{width:100%;min-width:1280px;display:block}
+/* SVG 显式声明字体与颜色，兼容不解析 CSS 变量的离线阅读器。 */
+svg text{font-family:'Geist',Aptos,'Segoe UI Variable','PingFang SC','Microsoft YaHei',sans-serif;fill:#1c1f23}.name{font-size:12px;font-weight:600}.body,.legend,.note{font-size:12px;fill:#646a73}
+.tech{font:9px 'Geist Mono',Consolas,'Liberation Mono',monospace;fill:#646a73}.tag{font:9px 'Geist Mono',Consolas,'Liberation Mono',monospace;fill:#646a73}.heading{font-size:14px;font-weight:600}
+.connector{fill:none;stroke:#646a73;stroke-width:1.2}.return{stroke-dasharray:5 4;stroke-width:1}.link{stroke:#005fd7}.footer{border-top:1px solid #e5e6eb;padding-top:16px}
+@media print{body{padding:0}.diagram-container{overflow-x:visible}svg{min-width:0}}</style></head>
+<body><main class="frame"><p class="eyebrow">WEORA / ARCHITECTURE / V0.1</p><h1>飞书接入与授权边界</h1><p class="intro">渠道绑定、用户关联、工具读取和通知交付分别约束，同一连接不意味着全部能力同时获权。</p><div class="diagram-container">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 720" role="img" aria-labelledby="feishu-boundaries-title feishu-boundaries-desc">
+<title id="feishu-boundaries-title">飞书接入与授权边界</title><desc id="feishu-boundaries-desc">渠道绑定、用户关联、工具读取和通知交付分别约束，同一连接不意味着全部能力同时获权。</desc>
+<defs><marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#646a73"/></marker><marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#005fd7"/></marker><marker id="arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#005fd7"/></marker></defs>
+<rect width="1280" height="720" fill="#f7f8fa"/>
+<text class="heading" x="40" y="56">飞书接入与授权边界</text><text class="note" x="40" y="84">第一版目标设计 · 尚未表示已实现 · 中国大陆飞书自建应用 / 应用身份</text>
+<path class="connector" d="M 280 192 H 496" marker-end="url(#arrow)"/>
+<path class="connector" d="M 1000 192 H 736" marker-end="url(#arrow)"/>
+<path class="connector" d="M 616 240 V 344" marker-end="url(#arrow)"/>
+<path class="connector" d="M 280 392 H 496" marker-end="url(#arrow)"/>
+<path class="connector" d="M 736 392 H 1000" marker-end="url(#arrow)"/>
+<path class="connector return" d="M 1120 440 V 488 Q 1120 496 1112 496 H 624 Q 616 496 616 504 V 536" marker-end="url(#arrow)"/>
+<path class="connector" d="M 280 576 H 496" marker-end="url(#arrow)"/>
+<path class="connector" d="M 736 576 H 1000" marker-end="url(#arrow)"/><rect x="752" y="164" width="144" height="20" rx="2" fill="#f7f8fa"/><text class="body" x="824" y="178" text-anchor="middle">身份不等于读权</text><rect x="792" y="504" width="160" height="20" rx="2" fill="#f7f8fa"/><text class="body" x="872" y="518" text-anchor="middle">结果仍受来源限制</text>
+<!-- route：渠道绑定。仅展示职责，不代表独立进程。 -->
+<g data-node-id="route"><rect x="40" y="144" width="240" height="96" rx="6" fill="#f7f8fa"/>
+<rect x="40" y="144" width="240" height="96" rx="6" fill="#ffffff" stroke="#1c1f23" stroke-width="1"/>
+<rect x="52" y="156" width="24" height="16" rx="2" fill="#f7f8fa" stroke="#a5aab2" stroke-width=".8"/>
+<text class="tag" x="64" y="168" text-anchor="middle">P</text>
+<text class="name" x="56" y="192">渠道绑定</text>
+<text class="body" x="56" y="212">连接、群、话题 → Agent</text>
+</g>
+<!-- run-context：Run 授权上下文。仅展示职责，不代表独立进程。 -->
+<g data-node-id="run-context"><rect x="496" y="144" width="240" height="96" rx="6" fill="#f7f8fa"/>
+<rect x="496" y="144" width="240" height="96" rx="6" fill="#ffffff" stroke="#1c1f23" stroke-width="1"/>
+<rect x="508" y="156" width="24" height="16" rx="2" fill="#f7f8fa" stroke="#a5aab2" stroke-width=".8"/>
+<text class="tag" x="520" y="168" text-anchor="middle">P</text>
+<text class="name" x="512" y="192">Run 授权上下文</text>
+<text class="body" x="512" y="212">固定发起人、版本与受众</text>
+</g>
+<!-- identity：用户关联。仅展示职责，不代表独立进程。 -->
+<g data-node-id="identity"><rect x="1000" y="144" width="240" height="96" rx="6" fill="#f7f8fa"/>
+<rect x="1000" y="144" width="240" height="96" rx="6" fill="#ffffff" stroke="#1c1f23" stroke-width="1"/>
+<rect x="1012" y="156" width="24" height="16" rx="2" fill="#f7f8fa" stroke="#a5aab2" stroke-width=".8"/>
+<text class="tag" x="1024" y="168" text-anchor="middle">P</text>
+<text class="name" x="1016" y="192">用户关联</text>
+<text class="body" x="1016" y="212">飞书身份 → 有效 Weora 成员</text>
+</g>
+<!-- source：上下文来源授权。仅展示职责，不代表独立进程。 -->
+<g data-node-id="source"><rect x="40" y="344" width="240" height="96" rx="6" fill="#f7f8fa"/>
+<rect x="40" y="344" width="240" height="96" rx="6" fill="#ffffff" stroke="#1c1f23" stroke-width="1"/>
+<rect x="52" y="356" width="24" height="16" rx="2" fill="#f7f8fa" stroke="#a5aab2" stroke-width=".8"/>
+<text class="tag" x="64" y="368" text-anchor="middle">P</text>
+<text class="name" x="56" y="392">上下文来源授权</text>
+<text class="body" x="56" y="412">应用能力与显式来源读者</text>
+</g>
+<!-- read-gate：逐次读取校验。仅展示职责，不代表独立进程。 -->
+<g data-node-id="read-gate"><rect x="496" y="344" width="240" height="96" rx="6" fill="#f7f8fa"/>
+<rect x="496" y="344" width="240" height="96" rx="6" fill="#e8f3ff" stroke="#005fd7" stroke-width="1.4"/>
+<rect x="508" y="356" width="24" height="16" rx="2" fill="#f7f8fa" stroke="#a5aab2" stroke-width=".8"/>
+<text class="tag" x="520" y="368" text-anchor="middle">P</text>
+<text class="name" x="512" y="392">逐次读取校验</text>
+<text class="body" x="512" y="412">来源 ∩ 发起人 ∩ Run ∩ 受众</text>
+</g>
+<!-- read：允许的上下文读取。仅展示职责，不代表独立进程。 -->
+<g data-node-id="read"><rect x="1000" y="344" width="240" height="96" rx="6" fill="#f7f8fa"/>
+<rect x="1000" y="344" width="240" height="96" rx="6" fill="#ffffff" stroke="#1c1f23" stroke-width="1"/>
+<rect x="1012" y="356" width="24" height="16" rx="2" fill="#f7f8fa" stroke="#a5aab2" stroke-width=".8"/>
+<text class="tag" x="1024" y="368" text-anchor="middle">T</text>
+<text class="name" x="1016" y="392">允许的上下文读取</text>
+<text class="body" x="1016" y="412">失败明确报错，不换个人身份</text>
+</g>
+<!-- audience：输出受众约束。仅展示职责，不代表独立进程。 -->
+<g data-node-id="audience"><rect x="40" y="536" width="240" height="80" rx="6" fill="#f7f8fa"/>
+<rect x="40" y="536" width="240" height="80" rx="6" fill="#ffffff" stroke="#1c1f23" stroke-width="1"/>
+<rect x="52" y="548" width="24" height="16" rx="2" fill="#f7f8fa" stroke="#a5aab2" stroke-width=".8"/>
+<text class="tag" x="64" y="560" text-anchor="middle">P</text>
+<text class="name" x="56" y="584">输出受众约束</text>
+<text class="body" x="56" y="604">派生结果继承来源限制</text>
+</g>
+<!-- send-gate：交付可见性校验。仅展示职责，不代表独立进程。 -->
+<g data-node-id="send-gate"><rect x="496" y="536" width="240" height="80" rx="6" fill="#f7f8fa"/>
+<rect x="496" y="536" width="240" height="80" rx="6" fill="#e8f3ff" stroke="#005fd7" stroke-width="1.4"/>
+<rect x="508" y="548" width="24" height="16" rx="2" fill="#f7f8fa" stroke="#a5aab2" stroke-width=".8"/>
+<text class="tag" x="520" y="560" text-anchor="middle">P</text>
+<text class="name" x="512" y="584">交付可见性校验</text>
+<text class="body" x="512" y="604">执行完成 ≠ 消息已送达</text>
+</g>
+<!-- destination：原始授权会话。仅展示职责，不代表独立进程。 -->
+<g data-node-id="destination"><rect x="1000" y="536" width="240" height="80" rx="6" fill="#f7f8fa"/>
+<rect x="1000" y="536" width="240" height="80" rx="6" fill="#eef0f3" stroke="#1c1f23" stroke-width="1"/>
+<rect x="1012" y="548" width="24" height="16" rx="2" fill="#f7f8fa" stroke="#a5aab2" stroke-width=".8"/>
+<text class="tag" x="1024" y="560" text-anchor="middle">OUT</text>
+<text class="name" x="1016" y="584">原始授权会话</text>
+<text class="body" x="1016" y="604">Outbox 定向回报，不跨群分享</text>
+</g>
+<text class="note" x="40" y="640">展示使用飞书上下文的 Run 的约束关系，不是完整执行时序；一个“已绑定”状态不能替代四类边界。</text>
+<!-- 图例置于底部，避免覆盖组件和连线。 -->
+<line x1="40" y1="660" x2="1240" y2="660" stroke="#d4d7dd" stroke-width=".8"/>
+<text class="legend" x="40" y="688">P 平台代码　T Tool 执行　OUT 输出　实线：授权约束或受控操作　虚线：读取结果　蓝框：独立校验点</text></svg></div>
+<p class="footer">Weora · 2026-10-17 · diagram-design · doc-wide / balanced / engineer · 本文件不加载外部资源。</p></main></body></html>

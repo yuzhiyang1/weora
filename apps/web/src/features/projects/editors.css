@@ -1,0 +1,15 @@
+/* 编辑器自己加载布局，避免从设置入口打开时依赖项目列表先加载样式。 */
+.repository-editor {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.repository-editor > * {
+  grid-column: 1 / -1;
+}
+.repository-editor > .repository-editor-half {
+  grid-column: span 1;
+}
+@media (max-width: 760px) {
+  .repository-editor {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

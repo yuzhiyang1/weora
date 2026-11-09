@@ -1,0 +1,149 @@
+/* 认证入口与工作台共享令牌，不建立另一套主题。 */
+.auth-page {
+  display: grid;
+  grid-template-columns: minmax(360px, 0.9fr) minmax(420px, 1.1fr);
+  min-height: 100dvh;
+  background: var(--background);
+}
+.auth-story {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 44px;
+  min-height: 100dvh;
+  padding: 42px 48px;
+  border-right: 1px solid var(--border);
+  background: var(--sidebar);
+}
+.auth-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: fit-content;
+}
+.auth-brand-copy {
+  display: grid;
+  gap: 4px;
+}
+.auth-brand small {
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+.auth-story-copy {
+  max-width: 450px;
+  margin: auto 0;
+  padding: 40px 0;
+}
+.auth-story-copy h2 {
+  margin: 22px 0 20px;
+  font-size: clamp(29px, 3vw, 43px);
+  line-height: 1.55;
+  letter-spacing: -1px;
+  font-weight: 550;
+  text-wrap: balance;
+}
+.auth-story-copy p {
+  max-width: 44ch;
+  margin: 0;
+  color: var(--muted-foreground);
+  font-size: 14px;
+  line-height: 1.9;
+}
+.auth-principles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+}
+.auth-principles span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--muted-foreground);
+}
+.auth-principles svg {
+  width: 13px;
+  height: 13px;
+}
+.auth-form-stage {
+  display: grid;
+  min-height: 100dvh;
+  place-items: center;
+  padding: 48px 28px;
+}
+.auth-form-wrap {
+  width: min(100%, 355px);
+}
+.auth-heading {
+  margin-bottom: 28px;
+}
+.auth-heading h2 {
+  margin: 10px 0;
+  font-size: 25px;
+  font-weight: 550;
+  letter-spacing: -0.5px;
+}
+.auth-heading p {
+  color: var(--muted-foreground);
+  font-size: 14px;
+}
+.auth-form {
+  display: grid;
+  gap: 19px;
+}
+.auth-field {
+  display: grid;
+  gap: 8px;
+}
+.auth-field > span:first-child {
+  font-size: 14px;
+  font-weight: 500;
+}
+.auth-field > .console-input-wrap {
+  font-weight: 400;
+}
+.auth-hint {
+  margin-top: -1px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 1.6;
+}
+.auth-switch {
+  margin: 23px 0 0;
+  text-align: center;
+  font-size: 14px;
+  color: var(--muted-foreground);
+}
+.auth-switch a {
+  margin-left: 7px;
+  color: var(--brand);
+}
+.auth-footer {
+  margin-top: 37px;
+  text-align: center;
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--muted-foreground);
+}
+.auth-loading {
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 18px;
+  min-height: 100dvh;
+  background: var(--background);
+}
+@media (max-width: 850px) {
+  .auth-page {
+    grid-template-columns: 1fr;
+  }
+  .auth-story {
+    display: none;
+  }
+  .auth-form-stage {
+    padding: 38px 22px;
+  }
+  .auth-heading h2 {
+    font-size: 24px;
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "name": "weora",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@10.28.2",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev:web": "pnpm --filter @weora/web dev",
+    "test": "pnpm --recursive --if-present run test",
+    "typecheck": "pnpm --recursive --if-present run typecheck",
+    "lint": "pnpm --recursive --if-present run lint",
+    "build": "pnpm --recursive --if-present run build"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "core-js",
+      "esbuild"
+    ]
+  }
+}

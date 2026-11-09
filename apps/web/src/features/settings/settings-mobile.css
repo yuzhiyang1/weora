@@ -1,0 +1,126 @@
+.settings-mobile-context {
+  display: grid;
+  /* 空间名称可以换行，网格列需要跟随视口而不是最长名称。 */
+  grid-template-columns: minmax(0, 1fr);
+  gap: 12px;
+  max-width: 1088px;
+  margin: 0 auto 24px;
+  min-width: 0;
+}
+.settings-mobile-context > a {
+  justify-self: start;
+}
+.settings-mobile-context .workspace-switch {
+  width: 100%;
+  min-width: 0;
+}
+.settings-mobile-context .sidebar-text {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: flex-start;
+  text-align: left;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.settings-mobile-context .sidebar-text small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+@media (max-width: 1199px) {
+  /* 列标题保留在语义表格中，手机条目通过相同列定义展示可见标签。 */
+  .settings-page .console-table:not(.model-connections-table) table,
+  .settings-page .console-table:not(.model-connections-table) tbody {
+    display: block;
+    min-width: 0;
+    width: 100%;
+  }
+  .settings-page .console-table:not(.model-connections-table) thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+  .settings-page .console-table:not(.model-connections-table) tbody tr {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 12px;
+    padding: 20px 0;
+    border-bottom: 1px solid var(--separator);
+  }
+  .settings-page
+    .console-table:not(.model-connections-table)
+    tbody
+    tr:last-child {
+    border-bottom: 0;
+  }
+  .settings-page .console-table:not(.model-connections-table) td {
+    display: flex;
+    align-items: flex-start;
+    flex-wrap: wrap;
+    gap: 8px;
+    width: auto;
+    min-width: 0;
+    height: auto;
+    padding: 0;
+    border-bottom: 0;
+    overflow-wrap: anywhere;
+  }
+  .settings-page
+    .console-table:not(.model-connections-table)
+    td:not(:first-child)::before {
+    content: attr(data-label);
+    color: var(--muted);
+    font-size: 12px;
+    line-height: 20px;
+  }
+  .settings-repository-copy {
+    min-width: 0;
+  }
+  .settings-table-actions {
+    flex-wrap: wrap;
+  }
+}
+@media (max-width: 760px) {
+  /* UUID、远端群标识可能没有自然断点，不能让 Select 的 flex 子项撑开视口。 */
+  .settings-page .select__value {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+  .settings-page .console-card-heading {
+    flex-wrap: wrap;
+    align-items: flex-start;
+  }
+  .settings-page .console-card-heading > *,
+  .settings-page .settings-row > div {
+    min-width: 0;
+  }
+  .settings-avatar-row {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+  .settings-list-row {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+  .settings-list-copy {
+    min-width: 0;
+    width: 100%;
+  }
+  .settings-page code,
+  .settings-page .context-secondary,
+  .settings-page .context-records {
+    overflow-wrap: anywhere;
+  }
+  .settings-page .context-records li {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+  .settings-page .context-records li > span {
+    min-width: 0;
+  }
+}

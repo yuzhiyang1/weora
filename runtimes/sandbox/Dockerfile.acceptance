@@ -1,0 +1,15 @@
+# 核心容器验收使用轻量镜像；传入已核验的官方 Python RepoDigest。
+ARG PYTHON_IMAGE
+FROM ${PYTHON_IMAGE}
+LABEL weora.managed="v1" weora.purpose="sandbox-acceptance"
+ARG PYTEST_VERSION=9.1.1
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git ca-certificates \
+    && python3 -m pip install --no-cache-dir "pytest==${PYTEST_VERSION}" \
+    && groupadd --gid 10001 weora \
+    && useradd --uid 10001 --gid 10001 --no-create-home weora \
+    && apt-get clean
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+USER 10001:10001
+WORKDIR /workspace
+CMD ["python3", "-c", "import time; time.sleep(86400)"]

@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>飞书上下文：自动补齐与主动查询</title><style>/* 复用 Weora 色彩；本地字体确保图表离线可读。 */
+:root{--paper:#f7f8fa;--ink:#1c1f23;--muted:#646a73;--accent:#005fd7;--font-sans:'Geist',Aptos,'Segoe UI Variable','PingFang SC','Microsoft YaHei',sans-serif;--font-serif:'Instrument Serif','Noto Serif','Songti SC',SimSun,serif;--font-mono:'Geist Mono',Consolas,'Liberation Mono',monospace}
+*{box-sizing:border-box}body{margin:0;padding:32px 24px;background:var(--paper);color:var(--ink);font-family:var(--font-sans)}
+.frame{width:100%;max-width:1280px;min-width:0;margin:auto}.eyebrow{font:11px var(--font-mono);letter-spacing:.14em;color:var(--muted)}
+h1{font:400 28px var(--font-serif);margin:12px 0 20px}.intro,.footer{font-size:14px;line-height:1.7;color:var(--muted)}
+.diagram-container{width:100%;overflow-x:auto}svg{width:100%;min-width:1280px;display:block}
+/* SVG 显式声明字体与颜色，兼容不解析 CSS 变量的离线阅读器。 */
+svg text{font-family:'Geist',Aptos,'Segoe UI Variable','PingFang SC','Microsoft YaHei',sans-serif;fill:#1c1f23}.name{font-size:12px;font-weight:600}.body,.legend,.note{font-size:12px;fill:#646a73}
+.tech{font:9px 'Geist Mono',Consolas,'Liberation Mono',monospace;fill:#646a73}.tag{font:9px 'Geist Mono',Consolas,'Liberation Mono',monospace;fill:#646a73}.heading{font-size:14px;font-weight:600}
+.connector{fill:none;stroke:#646a73;stroke-width:1.2}.return{stroke-dasharray:5 4;stroke-width:1}.link{stroke:#005fd7}.footer{border-top:1px solid #e5e6eb;padding-top:16px}
+@media print{body{padding:0}.diagram-container{overflow-x:visible}svg{min-width:0}}</style></head>
+<body><main class="frame"><p class="eyebrow">WEORA / ARCHITECTURE / V0.1</p><h1>飞书上下文：自动补齐与主动查询</h1><p class="intro">自动装配与 Agent 按需查询复用 Context Service，并将可追踪证据交给发起调用的 Agent。</p><div class="diagram-container">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 720" role="img" aria-labelledby="feishu-context-title feishu-context-desc">
+<title id="feishu-context-title">飞书上下文：自动补齐与主动查询</title><desc id="feishu-context-desc">自动装配与 Agent 按需查询复用 Context Service，并将可追踪证据交给发起调用的 Agent。</desc>
+<defs><marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#646a73"/></marker><marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#005fd7"/></marker><marker id="arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#005fd7"/></marker></defs>
+<rect width="1280" height="720" fill="#f7f8fa"/>
+<text class="heading" x="40" y="56">飞书上下文：自动补齐与主动查询</text><text class="note" x="40" y="84">第一版目标设计 · 尚未表示已实现 · 中国大陆飞书自建应用 / 应用身份</text>
+<path class="connector" d="M 240 196 H 304" marker-end="url(#arrow)"/>
+<path class="connector" d="M 544 196 H 584 Q 592 196 592 204 V 276 Q 592 284 600 284 H 640" marker-end="url(#arrow)"/>
+<path class="connector" d="M 240 408 H 304" marker-end="url(#arrow)"/>
+<path class="connector" d="M 544 408 H 584 Q 592 408 592 400 V 356 Q 592 348 600 348 H 640" marker-end="url(#arrow)"/>
+<path class="connector link" d="M 880 292 H 992" marker-end="url(#arrow-link)"/>
+<path class="connector return link" d="M 992 340 H 880" marker-end="url(#arrow-link)"/>
+<path class="connector" d="M 760 380 V 488" marker-end="url(#arrow)"/>
+<path class="connector" d="M 880 536 H 992" marker-end="url(#arrow)"/><rect x="48" y="116" width="112" height="20" rx="2" fill="#f7f8fa"/><text class="body" x="104" y="130" text-anchor="middle">首次模型调用前</text><rect x="48" y="328" width="112" height="20" rx="2" fill="#f7f8fa"/><text class="body" x="104" y="342" text-anchor="middle">运行中按需查询</text>
+<rect x="888" y="264" width="96" height="20" rx="2" fill="#f7f8fa"/><text class="body" x="936" y="278" text-anchor="middle">读取请求</text><rect x="888" y="348" width="96" height="20" rx="2" fill="#f7f8fa"/><text class="body" x="936" y="362" text-anchor="middle">返回或报错</text>
+<!-- current：当前群聊请求。仅展示职责，不代表独立进程。 -->
+<g data-node-id="current"><rect x="40" y="148" width="200" height="96" rx="6" fill="#f7f8fa"/>
+<rect x="40" y="148" width="200" height="96" rx="6" fill="#eef0f3" stroke="#1c1f23" stroke-width="1"/>
+<rect x="52" y="160" width="24" height="16" rx="2" fill="#f7f8fa" stroke="#a5aab2" stroke-width=".8"/>
+<text class="tag" x="64" y="172" text-anchor="middle">IN</text>
+<text class="name" x="56" y="196">当前群聊请求</text>
+<text class="body" x="56" y="216">持久接收后异步处理</text>
+</g>
+<!-- auto：自动上下文装配。仅展示职责，不代表独立进程。 -->
+<g data-node-id="auto"><rect x="304" y="148" width="240" height="96" rx="6" fill="#f7f8fa"/>
+<rect x="304" y="148" width="240" height="96" rx="6" fill="#ffffff" stroke="#1c1f23" stroke-width="1"/>
+<rect x="316" y="160" width="24" height="16" rx="2" fill="#f7f8fa" stroke="#a5aab2" stroke-width=".8"/>
+<text class="tag" x="328" y="172" text-anchor="middle">P</text>
+<text class="name" x="320" y="196">自动上下文装配</text>
+<text class="body" x="320" y="216">引用、同话题、邻近消息</text>
+</g>
+<!-- decision：Agent 查询决策。仅展示职责，不代表独立进程。 -->
+<g data-node-id="decision"><rect x="40" y="360" width="200" height="96" rx="6" fill="#f7f8fa"/>
+<rect x="40" y="360" width="200" height="96" rx="6" fill="#e8f3ff" stroke="#005fd7" stroke-width="1.4"/>
+<rect x="52" y="372" width="24" height="16" rx="2" fill="#f7f8fa" stroke="#a5aab2" stroke-width=".8"/>
+<text class="tag" x="64" y="384" text-anchor="middle">A</text>
+<text class="name" x="56" y="408">Agent 查询决策</text>
+<text class="body" x="56" y="428">来源、窗口、分页与展开</text>
+</g>
+<!-- context-tools：受控 Context Tool。仅展示职责，不代表独立进程。 -->
+<g data-node-id="context-tools"><rect x="304" y="360" width="240" height="96" rx="6" fill="#f7f8fa"/>
+<rect x="304" y="360" width="240" height="96" rx="6" fill="#ffffff" stroke="#1c1f23" stroke-width="1"/>
+<rect x="316" y="372" width="24" height="16" rx="2" fill="#f7f8fa" stroke="#a5aab2" stroke-width=".8"/>
+<text class="tag" x="328" y="384" text-anchor="middle">T</text>
+<text class="name" x="320" y="408">受控 Context Tool</text>
+<text class="body" x="320" y="428">四个工具；不开放任意命令</text>
+</g>
+<!-- service：共享 Context Service。仅展示职责，不代表独立进程。 -->
+<g data-node-id="service"><rect x="640" y="252" width="240" height="128" rx="6" fill="#f7f8fa"/>
+<rect x="640" y="252" width="240" height="128" rx="6" fill="#e8f3ff" stroke="#005fd7" stroke-width="1.4"/>
+<rect x="652" y="264" width="24" height="16" rx="2" fill="#f7f8fa" stroke="#a5aab2" stroke-width=".8"/>
+<text class="tag" x="664" y="276" text-anchor="middle">P</text>
+<text class="name" x="656" y="300">共享 Context Service</text>
+<text class="body" x="656" y="320">同一套鉴权、预算与分页</text>
+<text class="tech" x="656" y="340">source / actor / run / audience</text></g>
+<!-- reader：FeishuReader Adapter。仅展示职责，不代表独立进程。 -->
+<g data-node-id="reader"><rect x="992" y="252" width="240" height="128" rx="6" fill="#f7f8fa"/>
+<rect x="992" y="252" width="240" height="128" rx="6" fill="#ffffff" stroke="#1c1f23" stroke-width="1"/>
+<rect x="1004" y="264" width="24" height="16" rx="2" fill="#f7f8fa" stroke="#a5aab2" stroke-width=".8"/>
+<text class="tag" x="1016" y="276" text-anchor="middle">T</text>
+<text class="name" x="1008" y="300">FeishuReader Adapter</text>
+<text class="body" x="1008" y="320">固定连接的应用身份</text>
+<text class="tech" x="1008" y="340">SDK / API; CLI candidate</text></g>
+<!-- snapshot：Run 上下文快照。仅展示职责，不代表独立进程。 -->
+<g data-node-id="snapshot"><rect x="640" y="488" width="240" height="96" rx="6" fill="#f7f8fa"/>
+<rect x="640" y="488" width="240" height="96" rx="6" fill="#f0f1f3" stroke="#1c1f23" stroke-width="1"/>
+<rect x="652" y="500" width="24" height="16" rx="2" fill="#f7f8fa" stroke="#a5aab2" stroke-width=".8"/>
+<text class="tag" x="664" y="512" text-anchor="middle">P</text>
+<text class="name" x="656" y="536">Run 上下文快照</text>
+<text class="body" x="656" y="556">消息、来源、覆盖范围与缺口</text>
+</g>
+<!-- input：发起调用的 Agent。仅展示职责，不代表独立进程。 -->
+<g data-node-id="input"><rect x="992" y="488" width="240" height="96" rx="6" fill="#f7f8fa"/>
+<rect x="992" y="488" width="240" height="96" rx="6" fill="#ffffff" stroke="#1c1f23" stroke-width="1"/>
+<rect x="1004" y="500" width="24" height="16" rx="2" fill="#f7f8fa" stroke="#a5aab2" stroke-width=".8"/>
+<text class="tag" x="1016" y="512" text-anchor="middle">A</text>
+<text class="name" x="1008" y="536">发起调用的 Agent</text>
+<text class="body" x="1008" y="556">据证据回答、追问或继续执行</text>
+</g>
+<text class="note" x="40" y="620">自动补齐由平台代码触发；主动查询由 Agent 决策。两条路径共享服务，不能绕过来源授权。</text>
+<!-- 图例置于底部，避免覆盖组件和连线。 -->
+<line x1="40" y1="660" x2="1240" y2="660" stroke="#d4d7dd" stroke-width=".8"/>
+<text class="legend" x="40" y="688">P 平台代码　A Agent 决策　T Tool 执行　IN 输入　蓝线：外部读取　虚线：结果返回　蓝框：本图重点</text></svg></div>
+<p class="footer">Weora · 2026-10-17 · diagram-design · doc-wide / balanced / engineer · 本文件不加载外部资源。</p></main></body></html>

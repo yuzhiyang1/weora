@@ -1,0 +1,274 @@
+.settings-page {
+  display: flex;
+  flex-direction: column;
+  gap: 28px;
+  max-width: 1088px;
+  margin: 0 auto;
+  min-width: 0;
+}
+.settings-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
+}
+.settings-heading h1 {
+  margin: 0;
+  font-size: 28px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+.settings-heading > .console-tag {
+  flex-shrink: 0;
+  margin-top: 8px;
+}
+.settings-toolbar {
+  display: flex;
+  justify-content: flex-end;
+}
+.settings-actions.settings-actions-start {
+  justify-content: flex-start;
+  margin-top: 28px;
+}
+.settings-save-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 16px;
+  margin-top: 28px;
+}
+.settings-save-row a {
+  color: var(--accent);
+}
+.settings-divider {
+  margin: 28px 0;
+}
+.settings-appearance h2 {
+  font-size: 16px;
+  line-height: 24px;
+  margin-bottom: 12px;
+}
+.settings-page .console-card-heading > h3 {
+  font-size: 16px;
+  line-height: 24px;
+}
+.workspace-glyph {
+  flex-shrink: 0;
+  color: var(--accent);
+}
+.app-shell[data-settings="true"] .app-sidebar {
+  padding-inline: 16px;
+}
+.app-shell[data-settings="true"] .workspace-switch {
+  margin-top: 8px;
+}
+.settings-heading p {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.6;
+}
+.settings-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  min-width: 0;
+}
+fieldset.settings-stack,
+fieldset.settings-fields,
+fieldset.settings-grid {
+  border: 0;
+  padding: 0;
+  margin: 0;
+  min-width: 0;
+}
+.settings-fields {
+  width: 100%;
+  max-width: 640px;
+}
+.settings-page .form-help {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
+  margin: 6px 0 0;
+}
+.settings-page .console-card {
+  padding: 24px;
+}
+.settings-page .form-help a,
+.settings-page > a {
+  color: var(--accent);
+}
+.settings-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 20px;
+}
+.settings-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  min-width: 0;
+}
+.settings-inline {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.settings-select {
+  width: 300px;
+  flex-shrink: 0;
+}
+.settings-actions {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.settings-feishu-tabs {
+  width: fit-content;
+  max-width: 100%;
+}
+.settings-page .settings-authorization-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: stretch;
+}
+.settings-page .context-stack h3 {
+  font-size: 16px;
+  margin-bottom: 12px;
+}
+.settings-page .context-stack .console-card p {
+  color: var(--muted);
+  font-size: 14px;
+}
+.settings-page .context-form {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+.settings-page .context-form > button {
+  grid-column: 1 / -1;
+  justify-self: end;
+}
+.settings-page .settings-collection-form {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.settings-page .settings-identity-form {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.settings-page .settings-identity-form > .form-field:first-child,
+.settings-page .settings-identity-form > button {
+  grid-column: 1 / -1;
+}
+.settings-page .settings-identity-form > button,
+.settings-page .settings-authorization-grid form > button {
+  justify-self: end;
+}
+@media (max-width: 980px) {
+  .settings-page .settings-authorization-grid,
+  .settings-page .settings-identity-form,
+  .settings-page .context-form {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+.settings-avatar-row {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  flex-wrap: wrap;
+}
+.settings-list {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  margin-top: 20px;
+}
+.settings-list-row {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.settings-list-copy {
+  flex: 1;
+  min-width: 140px;
+  overflow-wrap: anywhere;
+}
+.settings-list-copy p {
+  color: var(--muted);
+  font-size: 12px;
+  margin: 6px 0 0;
+}
+.settings-footnote {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+.settings-footnote svg {
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+.app-shell[data-settings="true"] .app-main {
+  padding: 40px 56px 48px;
+}
+.settings-back {
+  margin: 12px 0 4px;
+}
+@media (max-width: 1050px) {
+  .app-shell[data-settings="true"] .app-main {
+    padding: 32px 24px;
+  }
+  .settings-row {
+    flex-wrap: wrap;
+    gap: 16px;
+  }
+  .settings-select {
+    width: 100%;
+    max-width: 360px;
+  }
+}
+@media (max-width: 760px) {
+  .settings-page .console-card {
+    padding: 16px;
+  }
+  .app-shell[data-settings="true"] .app-main {
+    padding: 24px 16px;
+  }
+  .settings-heading h1 {
+    font-size: 24px;
+  }
+  .settings-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .settings-page {
+    gap: 24px;
+  }
+  .settings-actions > * {
+    flex: 1;
+  }
+  .settings-list-row {
+    align-items: flex-start;
+  }
+}
+
+.settings-repository-copy {
+  min-width: 180px;
+  overflow-wrap: anywhere;
+}
+.settings-repository-copy p {
+  color: var(--muted);
+  font-size: 12px;
+  margin: 4px 0 0;
+}
+.settings-table-actions {
+  flex-wrap: nowrap;
+  gap: 4px;
+}
+
+.harness-settings-actions {
+  justify-content: space-between;
+}

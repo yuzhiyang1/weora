@@ -1,0 +1,171 @@
+.context-stack {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 24px;
+}
+/* 区块标题与字段标签保持可辨认的层级，不靠缩小正文腾出空间。 */
+.context-page .detail-card > h3,
+.receiver-diagnostics > h3 {
+  margin-bottom: 12px;
+  font-size: 16px;
+}
+.context-page .detail-card > p {
+  color: var(--muted);
+  font-size: 14px;
+}
+/* 沿用现有详情卡片外观；语义 section 不会自动获得 公共卡片 的布局约束。 */
+.context-page section.detail-card {
+  min-width: 0;
+  padding: 24px;
+  background: var(--card);
+  border: 1px solid var(--weora-line);
+  border-radius: var(--radius-3xl);
+  box-shadow: var(--surface-shadow);
+}
+/* 长群 ID 与渠道表格只能在卡片内部滚动，不能撑宽整个窄屏页面。 */
+.context-page .console-table {
+  max-width: 100%;
+  overflow-x: auto;
+}
+.context-form {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 16px;
+  align-items: end;
+  padding-top: 24px;
+}
+.context-form .form-field {
+  margin: 0;
+}
+.context-secondary {
+  display: block;
+  color: var(--weora-muted);
+  margin-top: 5px;
+  overflow-wrap: anywhere;
+}
+.context-records {
+  margin: 24px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.context-records li {
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+  border-top: 1px solid var(--weora-line);
+  padding: 16px 0;
+}
+.context-records li span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.context-records small {
+  display: block;
+  color: var(--weora-muted);
+  margin-top: 6px;
+}
+/* 窄屏优先折行长消息 ID，不能把关键投递结论压成“已…”。 */
+.context-records .channel-status-tag {
+  flex-shrink: 0;
+  /* 状态随内容保持自然高度，不被同一行的多条回执文字拉伸。 */
+  align-self: flex-start;
+}
+.context-message {
+  margin: 16px 0;
+  border-left: 3px solid var(--weora-line);
+  padding: 4px 0 4px 16px;
+}
+.context-message header {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  color: var(--weora-muted);
+  font-size: 12px;
+}
+.context-message p {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.8;
+}
+.context-message-status {
+  margin-top: 12px;
+  color: var(--weora-muted);
+  font-size: 12px;
+}
+.context-parse-notes {
+  padding-left: 20px;
+  color: var(--weora-muted);
+  line-height: 1.8;
+}
+.context-resources {
+  list-style: none;
+  padding: 0;
+}
+.context-resources li {
+  display: grid;
+  gap: 6px;
+  margin-top: 12px;
+  padding: 12px;
+  background: var(--surface-secondary);
+  border-radius: var(--field-radius);
+  overflow-wrap: anywhere;
+}
+.context-resources small {
+  color: var(--weora-muted);
+}
+.context-resources code {
+  white-space: pre-wrap;
+}
+.context-window {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.context-window .console-input { min-width: 0; }
+.context-window .form-field { flex: 1; min-width: 0; }
+@media (max-width: 640px) {
+  .context-page section.detail-card {
+    padding: 16px;
+  }
+  /* 保留状态列的可读宽度，避免为挤进窄屏把中文表头拆成竖排。 */
+  .context-page .table__content {
+    min-width: 560px;
+  }
+  .context-form {
+    grid-template-columns: 1fr;
+  }
+}
+.receiver-diagnostics {
+  margin: 20px 0;
+  padding: 18px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-3xl);
+  min-width: 0;
+}
+.receiver-diagnostics p {
+  font-size: 12px;
+  color: var(--muted-foreground);
+  line-height: 1.7;
+  margin: 8px 0;
+}
+.receiver-status-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  margin: 12px 0;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.receiver-diagnostics .form-field {
+  margin: 16px 0;
+}
+.receiver-diagnostics [role="status"] {
+  font-size: 12px;
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+}
+.receiver-diagnostics details {
+  margin-top: 14px;
+  font-size: 12px;
+}

@@ -1,0 +1,72 @@
+/* Figma 4:81 / 4:104：桌面优先，报告在右；窄窗口按相同阅读顺序纵向排列。 */
+.run-computer-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 352px;
+  align-items: start;
+  gap: calc(var(--spacing) * 5);
+}
+.run-computer,
+.run-report {
+  min-width: 0;
+  padding: calc(var(--spacing) * 5);
+  gap: calc(var(--spacing) * 4);
+}
+.run-computer-body,
+.run-computer-instruction {
+  display: grid;
+  gap: calc(var(--spacing) * 4);
+  min-width: 0;
+}
+.run-computer-toolbar,
+.run-computer-actions,
+.run-panel-title,
+.run-report-heading {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: calc(var(--spacing) * 3);
+}
+.run-computer-toolbar,
+.run-report-heading { justify-content: space-between; }
+.run-panel-title { gap: calc(var(--spacing) * 2); }
+.run-panel-title svg { flex-shrink: 0; color: var(--muted); }
+.run-panel-title h3 { margin: 0; font-size: 16px; }
+.run-computer-screen {
+  display: block;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  border-radius: 8px;
+  background: var(--surface-secondary);
+}
+.run-computer-screen:focus-visible { outline: 2px solid var(--focus); outline-offset: 4px; }
+.run-computer-screen img { display: block; width: 100%; height: auto; }
+.run-computer-caption {
+  display: grid;
+  gap: 2px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 20px;
+}
+.run-instruction-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; width: 100%; }
+.run-instruction-heading > :last-child { font-size: 12px; }
+.run-report-source,
+.run-instruction-source {
+  margin: 0;
+  max-height: 640px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: inherit;
+  font-size: 14px;
+  line-height: 1.8;
+}
+@media (max-width: 1250px) {
+  .run-computer-layout { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 640px) {
+  .run-computer,
+  .run-report { padding: calc(var(--spacing) * 4); }
+}

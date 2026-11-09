@@ -1,0 +1,1 @@
+"""Skill Registry HTTP API。"""

@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- 管理员在联网准备阶段使用的无凭据配置，不读取宿主个人 Maven 设置。 -->
+<settings xmlns="http://maven.apache.org/SETTINGS/1.2.0">
+  <localRepository>/maven/repository</localRepository>
+  <mirrors>
+    <mirror>
+      <id>weora-public</id>
+      <mirrorOf>*</mirrorOf>
+      <url>https://maven.aliyun.com/repository/public</url>
+    </mirror>
+  </mirrors>
+</settings>

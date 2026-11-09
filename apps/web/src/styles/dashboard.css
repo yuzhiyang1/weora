@@ -1,0 +1,250 @@
+/* 工作台优先呈现真实任务；颜色、圆角和阴影由 HeroUI Card 提供。 */
+.dashboard-page {
+  max-width: 1240px;
+  margin: 0 auto;
+}
+.dashboard-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: calc(var(--spacing) * 4);
+  margin-bottom: calc(var(--spacing) * 8);
+}
+.metric-link {
+  display: block;
+  min-width: 0;
+  border-radius: var(--radius-3xl);
+}
+.metric-card {
+  height: 100%;
+  padding: calc(var(--spacing) * 5);
+}
+.metric-link:hover .metric-label {
+  color: var(--accent);
+}
+.metric-label,
+.metric-note,
+.panel-heading {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: calc(var(--spacing) * 3);
+}
+.metric-label,
+.metric-note {
+  color: var(--muted);
+}
+.metric-card strong {
+  display: block;
+  font-size: 2rem;
+  font-weight: 600;
+  line-height: 1.25;
+}
+.metric-note small {
+  font-size: 0.75rem;
+}
+.metric-note svg,
+.metric-label svg {
+  flex-shrink: 0;
+}
+.dashboard-columns {
+  display: grid;
+  grid-template-columns: minmax(0, 1.7fr) minmax(300px, 1fr);
+  grid-template-areas: "recent attention" "recent agents";
+  grid-template-rows: auto 1fr;
+  align-items: start;
+  gap: calc(var(--spacing) * 6);
+}
+.dashboard-recent {
+  grid-area: recent;
+}
+.attention-panel {
+  grid-area: attention;
+}
+.dashboard-agents {
+  grid-area: agents;
+}
+.dashboard-panel {
+  min-width: 0;
+  padding: calc(var(--spacing) * 5);
+}
+.panel-heading .card__title {
+  display: flex;
+  align-items: center;
+  gap: calc(var(--spacing) * 2);
+  font-size: 1rem;
+}
+.panel-heading .card__title svg {
+  color: var(--muted);
+}
+.dashboard-task-row,
+.available-agent {
+  display: flex;
+  align-items: center;
+  gap: calc(var(--spacing) * 3);
+  padding: calc(var(--spacing) * 4) 0;
+  border-bottom: 1px solid var(--separator);
+}
+.dashboard-task-row:last-child,
+.available-agent:last-child {
+  border-bottom: 0;
+}
+.dashboard-task-row:hover strong,
+.available-agent:hover strong,
+.attention-row:hover strong {
+  color: var(--accent);
+}
+.task-agent-icon {
+  display: grid;
+  place-items: center;
+  width: calc(var(--spacing) * 9);
+  height: calc(var(--spacing) * 9);
+  flex-shrink: 0;
+  border-radius: var(--radius-xl);
+  background: var(--surface-secondary);
+  color: var(--muted);
+}
+.dashboard-task-row > span:nth-child(2),
+.available-agent > span:nth-child(2) {
+  display: grid;
+  gap: var(--spacing);
+  flex: 1;
+  min-width: 0;
+}
+.dashboard-task-row strong,
+.available-agent strong,
+.attention-row strong {
+  font-size: 0.875rem;
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+.dashboard-task-row small,
+.available-agent small {
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+.dashboard-task-row > svg {
+  color: var(--muted);
+  flex-shrink: 0;
+}
+.dashboard-open-task {
+  display: none;
+}
+.attention-empty {
+  display: flex;
+  align-items: start;
+  gap: calc(var(--spacing) * 3);
+  padding: calc(var(--spacing) * 3) 0;
+}
+.attention-empty > svg {
+  flex-shrink: 0;
+  color: var(--muted);
+}
+.attention-empty > .attention-clear {
+  color: var(--success);
+}
+.attention-empty strong {
+  font-size: 0.875rem;
+  font-weight: 500;
+}
+.attention-empty p,
+.agent-setup p {
+  margin: var(--spacing) 0 0;
+  font-size: 0.875rem;
+  color: var(--muted);
+}
+.attention-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: calc(var(--spacing) * 3);
+  padding: calc(var(--spacing) * 4) 0;
+}
+.agent-setup a {
+  display: inline-flex;
+  align-items: center;
+  gap: calc(var(--spacing) * 2);
+  margin-top: calc(var(--spacing) * 3);
+  font-size: 0.875rem;
+}
+.dashboard-empty {
+  display: grid;
+  gap: calc(var(--spacing) * 3);
+  justify-items: center;
+  padding: calc(var(--spacing) * 8) calc(var(--spacing) * 4);
+  text-align: center;
+}
+.dashboard-empty > svg {
+  color: var(--muted);
+}
+.dashboard-empty h3 {
+  font-size: 1rem;
+  margin: 0;
+}
+.dashboard-empty p {
+  font-size: 0.875rem;
+  color: var(--muted);
+  max-width: 35ch;
+  margin: 0;
+}
+.dashboard-skeleton {
+  display: grid;
+  gap: calc(var(--spacing) * 4);
+  padding: calc(var(--spacing) * 4) 0;
+}
+@media (max-width: 1180px) {
+  .dashboard-columns {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-areas: "recent recent" "attention agents";
+  }
+}
+@media (max-width: 760px) {
+  .dashboard-heading .page-eyebrow {
+    display: none;
+  }
+  .dashboard-heading h1 {
+    font-size: 24px;
+  }
+  .dashboard-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: calc(var(--spacing) * 3);
+    margin-bottom: calc(var(--spacing) * 6);
+  }
+  .dashboard-columns {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas: "attention" "recent" "agents";
+    gap: calc(var(--spacing) * 4);
+  }
+  .metric-card,
+  .dashboard-panel {
+    padding: calc(var(--spacing) * 4);
+  }
+  .metric-card strong {
+    font-size: 26px;
+  }
+  .dashboard-task-row {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+  .dashboard-task-row > svg {
+    display: none;
+  }
+  .dashboard-task-row .console-tag {
+    grid-column: 2;
+    justify-self: start;
+  }
+  .dashboard-open-task {
+    display: inline-flex;
+    grid-column: 2;
+    justify-self: start;
+  }
+  .attention-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    align-items: start;
+    justify-items: start;
+  }
+  .attention-row .dashboard-open-task {
+    grid-column: 1;
+  }
+}

@@ -1,0 +1,232 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "../shared/layout.css";
+@custom-variant dark (&:is(.dark *));
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+}
+/* shadcn 默认 Neutral 主题，不加载正式项目经过定制的 theme / console CSS。 */
+:root {
+  --radius: 0.625rem;
+  --background: oklch(1 0 0);
+  --foreground: oklch(0.145 0 0);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.145 0 0);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.145 0 0);
+  --primary: oklch(0.205 0 0);
+  --primary-foreground: oklch(0.985 0 0);
+  --secondary: oklch(0.97 0 0);
+  --secondary-foreground: oklch(0.205 0 0);
+  --muted: oklch(0.97 0 0);
+  --muted-foreground: oklch(0.556 0 0);
+  --accent: oklch(0.97 0 0);
+  --accent-foreground: oklch(0.205 0 0);
+  --destructive: oklch(0.577 0.245 27.325);
+  --border: oklch(0.922 0 0);
+  --input: oklch(0.922 0 0);
+  --ring: oklch(0.708 0 0);
+  --side: oklch(0.985 0 0);
+}
+.dark {
+  --background: oklch(0.145 0 0);
+  --foreground: oklch(0.985 0 0);
+  --card: oklch(0.205 0 0);
+  --card-foreground: oklch(0.985 0 0);
+  --popover: oklch(0.205 0 0);
+  --popover-foreground: oklch(0.985 0 0);
+  --primary: oklch(0.922 0 0);
+  --primary-foreground: oklch(0.205 0 0);
+  --secondary: oklch(0.269 0 0);
+  --secondary-foreground: oklch(0.985 0 0);
+  --muted: oklch(0.269 0 0);
+  --muted-foreground: oklch(0.708 0 0);
+  --accent: oklch(0.269 0 0);
+  --accent-foreground: oklch(0.985 0 0);
+  --destructive: oklch(0.704 0.191 22.216);
+  --border: oklch(1 0 0 / 10%);
+  --input: oklch(1 0 0 / 15%);
+  --ring: oklch(0.556 0 0);
+  --side: oklch(0.175 0 0);
+}
+:root {
+  --canvas: var(--background);
+  --ink: var(--foreground);
+  --panel: var(--card);
+  --line: var(--border);
+  --soft: var(--secondary);
+  --subtle: var(--muted-foreground);
+  --accent-ink: var(--foreground);
+  --good: #449478;
+}
+body {
+  background: var(--background);
+  color: var(--foreground);
+}
+* {
+  border-color: var(--border);
+}
+.shadcn-page .workspace-label {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.shadcn-page .preview-nav > button {
+  font-size: 12px;
+  font-weight: 400;
+  height: 37px;
+  padding-left: 12px;
+}
+.sh-sidebar-note {
+  margin: auto 9px 23px;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  color: var(--subtle);
+  font-size: 11px;
+}
+.sh-sidebar-note small {
+  display: block;
+  font-size: 10px;
+  margin-top: 6px;
+}
+.shadcn-page .preview-account {
+  margin-top: 0;
+}
+.shadcn-page .section-heading {
+  padding-bottom: 3px;
+}
+.sh-stat {
+  padding: 19px 0;
+  gap: 0;
+  box-shadow: none;
+}
+.sh-stat [data-slot="card-content"] {
+  padding: 0 20px;
+}
+.sh-stat .stat-value {
+  margin: 13px 0 7px;
+}
+.shadcn-page .stat-label svg {
+  opacity: 0.6;
+}
+.shadcn-page .task-controls [data-slot="tabs-trigger"] {
+  font-size: 12px;
+  padding: 5px 12px;
+}
+.sh-search {
+  position: relative;
+}
+.sh-search > svg {
+  position: absolute;
+  left: 11px;
+  top: 11px;
+  opacity: 0.5;
+}
+.sh-search input {
+  padding-left: 33px;
+  font-size: 12px;
+}
+.sh-task-table {
+  width: 100%;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+}
+.sh-task-table table {
+  min-width: 740px;
+}
+.sh-task-table th {
+  height: 42px;
+  color: var(--subtle);
+  font-size: 11px;
+  padding: 8px 18px;
+}
+.sh-task-table td {
+  padding: 17px 18px;
+}
+.sh-task-table .agent-table-name {
+  font-size: 11px;
+  color: var(--subtle);
+  white-space: nowrap;
+}
+.sh-status {
+  font-size: 10px;
+  padding: 3px 8px;
+  font-weight: 400;
+  white-space: nowrap;
+}
+.sh-status.running {
+  color: #7d9fdd;
+  border-color: #7096ce40;
+  background: #628ae511;
+}
+.sh-status.waiting {
+  color: #b89258;
+  border-color: #ba935340;
+  background: #be965811;
+}
+.sh-status.done {
+  color: var(--subtle);
+  background: var(--soft);
+}
+.sh-agent {
+  box-shadow: none;
+}
+.sh-agent [data-slot="card-header"] {
+  padding: 0 20px;
+}
+.sh-agent [data-slot="card-footer"] {
+  padding: 0 20px;
+}
+.sh-agent-icon {
+  display: grid;
+  place-items: center;
+  width: 37px;
+  height: 37px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--subtle);
+}
+.shadcn-page .task-meta {
+  line-height: 1.5;
+}
+[data-slot="dialog-content"] {
+  max-height: calc(100dvh - 40px);
+  overflow-y: auto;
+}
+@media (max-width: 760px) {
+  .sh-sidebar-note {
+    display: none;
+  }
+  .shadcn-page .preview-account {
+    margin-top: auto;
+  }
+  .shadcn-page .task-controls [data-slot="tabs-trigger"] {
+    padding: 5px 8px;
+    font-size: 11px;
+  }
+  .sh-task-table td {
+    padding: 16px 13px;
+  }
+}

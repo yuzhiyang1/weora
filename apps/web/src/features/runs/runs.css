@@ -1,0 +1,275 @@
+.run-actions,
+.run-section-heading {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.run-section-heading {
+  justify-content: space-between;
+}
+.run-link {
+  display: grid;
+  gap: 5px;
+  text-decoration: none;
+  color: var(--weora-ink);
+}
+.run-link small {
+  color: var(--weora-muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.runs-home-link {
+  display: none;
+}
+.run-back-link {
+  justify-self: start;
+}
+.run-list-feedback,
+.run-list-no-match {
+  display: grid;
+  gap: 12px;
+  justify-items: start;
+}
+.run-list-no-match {
+  padding: 12px 16px 24px;
+  justify-items: center;
+}
+.run-list-feedback p {
+  margin: 0;
+}
+.run-pagination {
+  padding: 20px;
+  text-align: center;
+}
+.run-text {
+  margin: 16px 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: inherit;
+  line-height: 1.8;
+  max-height: 640px;
+  overflow: auto;
+}
+.run-metadata {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 12px 20px;
+}
+.run-metadata dt {
+  color: var(--weora-muted);
+}
+.run-metadata dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+/* 审批需要核对完整分支和 SHA；窄屏上下排列，避免长标签挤压实际批准范围。 */
+@media (max-width: 640px) {
+  .run-metadata--approval {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 6px;
+  }
+  .run-metadata--approval dt:not(:first-child) {
+    margin-top: 10px;
+  }
+}
+.run-events {
+  list-style: none;
+  margin: 16px 0 0;
+  padding: 0;
+}
+.run-events li {
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr) auto;
+  gap: 8px 14px;
+  padding: 16px 0;
+  border-bottom: 1px solid var(--weora-line);
+}
+.run-events li small {
+  grid-column: 2 / -1;
+  color: var(--weora-muted);
+  overflow-wrap: anywhere;
+}
+.run-event-number {
+  color: var(--weora-accent);
+  font-variant-numeric: tabular-nums;
+}
+.run-events time {
+  color: var(--weora-muted);
+  font-size: 12px;
+}
+.run-tool {
+  padding: 20px 0;
+  border-bottom: 1px solid var(--weora-line);
+}
+.run-tool details {
+  margin-top: 14px;
+}
+.run-tool summary {
+  cursor: pointer;
+  color: var(--weora-muted);
+}
+.context-snapshot-list {
+  margin: 24px 0;
+}
+.run-screenshot {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  border: 1px solid var(--weora-line);
+  border-radius: var(--radius-2xl);
+}
+@media (max-width: 640px) {
+  .run-events li {
+    grid-template-columns: 28px minmax(0, 1fr);
+  }
+  .run-events time {
+    grid-column: 2;
+  }
+}
+.run-detail-page {
+  display: grid;
+  /* 与可编辑设计稿使用同一本机中文系统字形；缺失时沿用原有平台字体回退。 */
+  font-family: "Noto Sans SC", "Segoe UI Variable", "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  /* 显式允许网格列收缩，让 HeroUI 页签的内部滚动承担窄屏溢出。 */
+  grid-template-columns: minmax(0, 1fr);
+  gap: 20px;
+}
+/* 沿用 Agent 详情卡片的边框、圆角与阴影；这些语义 section 不会命中 公共卡片。 */
+.run-detail-page section.detail-card {
+  min-width: 0;
+  padding: 24px;
+  background: var(--card);
+  border: 1px solid var(--weora-line);
+  border-radius: var(--radius-3xl);
+  box-shadow: var(--surface-shadow);
+}
+.run-detail-page .page-header,
+.run-detail-page .detail-card h3 {
+  margin-top: 0;
+}
+.run-detail-heading {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.run-detail-id {
+  display: block;
+  margin-top: 12px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.run-detail-navigation {
+  min-width: 0;
+  scroll-margin-top: 88px;
+}
+.run-detail-page .detail-card h3 {
+  font-size: 16px;
+  margin-bottom: 15px;
+}
+.run-detail-tabs .tabs__panel {
+  display: grid;
+  gap: 18px;
+}
+.run-detail-tabs .tabs__panel[hidden] {
+  display: none;
+}
+.run-events strong {
+  overflow-wrap: anywhere;
+  font-size: 14px;
+}
+@media (max-width: 760px) {
+  .runs-home-link {
+    display: inline-flex;
+    margin-bottom: 16px;
+  }
+  .runs-list-page .page-eyebrow {
+    display: none;
+  }
+  .runs-list-page .page-header h1,
+  .run-detail-page .page-header h1 {
+    font-size: 24px;
+  }
+  .runs-list-page .task-toolbar {
+    display: grid;
+    gap: 12px;
+    grid-template-columns: minmax(0, 1fr);
+    padding: 16px;
+  }
+  .runs-list-page .task-filters {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px;
+  }
+  /* 只改变任务表的呈现，表头与原有表格键盘导航仍可访问。 */
+  .runs-list-table table,
+  .runs-list-table tbody {
+    display: block;
+    width: 100%;
+    min-width: 0;
+  }
+  .runs-list-table thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+  .runs-list-table tbody tr {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: start;
+    gap: 10px 12px;
+    padding: 16px;
+    border-bottom: 1px solid var(--separator);
+  }
+  .runs-list-table tbody tr:last-child {
+    border-bottom: 0;
+  }
+  .runs-list-table td {
+    min-width: 0;
+    width: auto;
+    height: auto;
+    padding: 0;
+    border-bottom: 0;
+    overflow-wrap: anywhere;
+  }
+  .runs-list-table td:nth-child(n + 3) {
+    grid-column: 1 / -1;
+  }
+  .runs-list-table td:nth-child(3)::before {
+    content: attr(data-label) " ";
+  }
+  .runs-list-table td:nth-child(3),
+  .runs-list-table td:nth-child(4) {
+    color: var(--muted);
+    font-size: 12px;
+  }
+  .run-detail-page {
+    gap: 16px;
+  }
+  .run-detail-page .page-header {
+    margin-bottom: 0;
+  }
+  .run-detail-page .page-header > .run-actions {
+    width: 100%;
+  }
+  .run-detail-page section.detail-card {
+    padding: 16px;
+  }
+  .run-detail-tabs [role="tablist"] {
+    display: grid;
+    width: 100%;
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+    row-gap: 4px;
+  }
+  .run-detail-tabs [role="tab"] {
+    grid-column: span 2;
+    min-width: 0;
+    padding-inline: 4px;
+  }
+  .run-detail-page .context-records li {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+}

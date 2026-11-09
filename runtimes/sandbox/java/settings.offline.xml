@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- 执行阶段只读已封装缓存，不提供私服认证，不允许联网补依赖。 -->
+<settings xmlns="http://maven.apache.org/SETTINGS/1.2.0">
+  <offline>true</offline>
+  <localRepository>/opt/weora/maven/repository</localRepository>
+  <mirrors>
+    <mirror>
+      <id>weora-public</id>
+      <mirrorOf>*</mirrorOf>
+      <url>https://maven.aliyun.com/repository/public</url>
+    </mirror>
+  </mirrors>
+</settings>

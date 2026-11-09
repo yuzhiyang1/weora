@@ -1,0 +1,158 @@
+/* 控件外观沿用 HeroUI；这里只安排信息、列宽与响应式布局。 */
+.model-connections-card > .card__content,
+.model-budget-card > .card__content {
+  display: flex;
+  flex-direction: column;
+  gap: calc(var(--spacing) * 4);
+}
+.settings-page .model-settings-help {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 20px;
+}
+.model-connections-card .card__description,
+.model-budget-card .card__description {
+  font-size: 12px;
+  line-height: 20px;
+  margin-top: 4px;
+}
+.model-settings-scope {
+  padding: calc(var(--spacing) * 3);
+  background: var(--surface-secondary);
+  border-radius: var(--radius-lg);
+  font-size: 12px;
+  line-height: 20px;
+}
+.model-settings-scope p {
+  margin: 0;
+}
+.model-settings-scope p + p {
+  color: var(--muted);
+  margin-top: 4px;
+}
+.model-connection-name,
+.model-connection-actions {
+  display: flex;
+  align-items: center;
+  gap: calc(var(--spacing) * 2);
+}
+.model-connection-name {
+  flex-wrap: wrap;
+}
+.model-connection-name strong {
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+.model-connection-name .console-tag,
+.model-connections-table td:nth-child(4) .console-tag,
+.model-connection-actions > * {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+.model-connections-table table {
+  min-width: 0;
+  width: 100%;
+  table-layout: fixed;
+}
+.model-connections-table th:nth-child(1) {
+  width: 23%;
+}
+.model-connections-table th:nth-child(2) {
+  width: 10%;
+}
+.model-connections-table th:nth-child(3) {
+  width: 18%;
+}
+.model-connections-table th:nth-child(4) {
+  width: 18%;
+}
+.model-connections-table th:nth-child(5) {
+  width: 31%;
+}
+.model-connections-table th {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 400;
+}
+.model-connections-table th,
+.model-connections-table td {
+  padding: 16px 8px;
+}
+.model-connections-table th:first-child,
+.model-connections-table td:first-child {
+  padding-left: 0;
+}
+.model-connections-table th:last-child,
+.model-connections-table td:last-child {
+  padding-right: 0;
+}
+.model-connections-table td:nth-child(3) {
+  overflow-wrap: anywhere;
+}
+.settings-grid.model-budget-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+.model-connection-editor .form-help {
+  font-size: 12px;
+  line-height: 20px;
+}
+
+@media (max-width: 1199px) {
+  .model-connections-card .console-card-heading {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+  /* 保留列标题与同一份语义表格，堆叠时不复制可交互节点。 */
+  .model-connections-table thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+  .model-connections-table table,
+  .model-connections-table tbody {
+    display: block;
+  }
+  .model-connections-table tr {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: center;
+    gap: 12px 8px;
+    padding: 20px 0;
+    border-bottom: 1px solid var(--separator);
+  }
+  .model-connections-table tr:last-child {
+    border-bottom: 0;
+  }
+  .model-connections-table td,
+  .model-connections-table td:first-child,
+  .model-connections-table td:last-child {
+    padding: 0;
+    width: auto;
+    border-bottom: 0;
+    height: auto;
+  }
+  .model-connections-table td:nth-child(1),
+  .model-connections-table td:nth-child(4),
+  .model-connections-table td:nth-child(5) {
+    grid-column: 1 / -1;
+  }
+  .model-connections-table td:nth-child(2)::after {
+    content: " ·";
+  }
+  .model-connection-actions {
+    flex-wrap: wrap;
+  }
+  .settings-grid.model-budget-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+@media (max-width: 760px) {
+  .settings-page .model-connections-card,
+  .settings-page .model-budget-card {
+    padding: 16px;
+  }
+}

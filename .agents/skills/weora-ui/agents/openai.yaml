@@ -1,0 +1,4 @@
+interface:
+  display_name: "Weora HeroUI 设计约定"
+  short_description: "结合 HeroUI 公开设计原则与项目约定开发页面，统一信息层级并完成真实浏览器验收"
+  default_prompt: "使用 $weora-ui 按 HeroUI 公开设计原则和项目设计契约完成界面开发，检查操作主次、字号间距与真实浏览器效果。"

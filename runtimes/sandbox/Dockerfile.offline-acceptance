@@ -1,0 +1,8 @@
+# 仅用于本机核心适配器验收，不代替包含浏览器与供应链扫描的正式执行镜像。
+FROM scratch
+LABEL weora.managed="v1" weora.purpose="offline-sandbox-acceptance"
+ADD rootfs.tar /
+ENV PATH=/usr/bin:/bin PYTHONPATH=/opt/weora-testdeps PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+USER 10001:10001
+WORKDIR /workspace
+CMD ["python3", "-c", "import time; time.sleep(86400)"]

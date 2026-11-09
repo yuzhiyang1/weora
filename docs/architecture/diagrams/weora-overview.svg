@@ -1,0 +1,113 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 720" role="img" aria-labelledby="weora-overview-title weora-overview-desc" id="weora-overview-root">
+<title id="weora-overview-title">Weora 研发 Agent 职责总览</title><desc id="weora-overview-desc">从请求、调查与审批到隔离执行和交付，明确平台、Agent、Tool 与人类的责任。</desc>
+<defs>
+      <style>#weora-overview-root { --paper:#f7f8fa;--ink:#1c1f23;--muted:#646a73;--accent:#005fd7;--font-sans:'Geist',Aptos,'Segoe UI Variable','PingFang SC','Microsoft YaHei',sans-serif;--font-serif:'Instrument Serif','Noto Serif','Songti SC',SimSun,serif;--font-mono:'Geist Mono',Consolas,'Liberation Mono',monospace }
+      #weora-overview-root { color: var(--ink); font-family: var(--font-sans); }
+      #weora-overview-root .intro, #weora-overview-root .footer { font-size:14px;line-height:1.7;color:var(--muted) }
+      #weora-overview-root .diagram-container { width:100%;overflow-x:auto }
+      #weora-overview-root text { font-family:'Geist',Aptos,'Segoe UI Variable','PingFang SC','Microsoft YaHei',sans-serif;fill:#1c1f23 }
+      #weora-overview-root .name { font-size:12px;font-weight:600 }
+      #weora-overview-root .body, #weora-overview-root .legend, #weora-overview-root .note { font-size:12px;fill:#646a73 }
+      #weora-overview-root .tech { font:9px 'Geist Mono',Consolas,'Liberation Mono',monospace;fill:#646a73 }
+      #weora-overview-root .tag { font:9px 'Geist Mono',Consolas,'Liberation Mono',monospace;fill:#646a73 }
+      #weora-overview-root .heading { font-size:14px;font-weight:600 }
+      #weora-overview-root .connector { fill:none;stroke:#646a73;stroke-width:1.2 }
+      #weora-overview-root .return { stroke-dasharray:5 4;stroke-width:1 }
+      #weora-overview-root .link { stroke:#005fd7 }
+      #weora-overview-root .diagram-container { overflow-x:visible }</style><marker id="weora-overview-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#646a73"/></marker><marker id="weora-overview-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#005fd7"/></marker><marker id="weora-overview-arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#005fd7"/></marker></defs>
+<rect width="1280" height="720" fill="#f7f8fa"/>
+<text class="heading" x="40" y="56">Weora 研发 Agent 职责总览</text><text class="note" x="40" y="84">第一版目标设计 · 尚未表示已实现 · 中国大陆飞书自建应用 / 应用身份</text>
+<!-- 先画连线与标签，再画组件，保证端口清晰。 -->
+<path class="connector" d="M 200 176 H 248" marker-end="url(#weora-overview-arrow)"/>
+<path class="connector" d="M 448 176 H 496" marker-end="url(#weora-overview-arrow)"/>
+<path class="connector" d="M 696 160 H 1000" marker-end="url(#weora-overview-arrow)"/>
+<path class="connector" d="M 696 192 H 824 Q 832 192 832 200 V 296" marker-end="url(#weora-overview-arrow)"/>
+<path class="connector" d="M 912 344 H 1000" marker-end="url(#weora-overview-arrow)"/>
+<path class="connector" d="M 1120 296 V 224" marker-end="url(#weora-overview-arrow)"/>
+<path class="connector" d="M 560 224 V 352" marker-end="url(#weora-overview-arrow)"/>
+<path class="connector return" d="M 624 352 V 224" marker-end="url(#weora-overview-arrow)"/>
+<!-- 回包线跨越审批线时使用桥形跳线，避免误读成连接点。 -->
+<path d="M 936 352 A 8 8 0 0 1 936 336" fill="none" stroke="#f7f8fa" stroke-width="6"/>
+<path class="connector return" d="M 736 408 H 928 Q 936 408 936 400 V 352 A 8 8 0 0 1 936 336 V 328 Q 936 320 944 320 H 1000" marker-end="url(#weora-overview-arrow)"/>
+<path class="connector" d="M 1000 368 H 976 Q 968 368 968 376 V 424 Q 968 432 960 432 H 736" marker-end="url(#weora-overview-arrow)"/>
+<path class="connector" d="M 496 408 H 296" marker-end="url(#weora-overview-arrow)"/>
+<path class="connector" d="M 736 456 H 904 Q 912 456 912 464 V 540 Q 912 548 920 548 H 1000" marker-end="url(#weora-overview-arrow)"/>
+<rect x="804" y="132" width="112" height="20" rx="2" fill="#f7f8fa"/><text class="body" x="860" y="146" text-anchor="middle">咨询直接答复</text><rect x="832" y="240" width="136" height="20" rx="2" fill="#f7f8fa"/><text class="body" x="900" y="254" text-anchor="middle">先固化计划</text>
+<rect x="464" y="272" width="88" height="20" rx="2" fill="#f7f8fa"/><text class="body" x="508" y="286" text-anchor="middle">工具请求</text><rect x="632" y="272" width="88" height="20" rx="2" fill="#f7f8fa"/><text class="body" x="676" y="286" text-anchor="middle">仅回调用者</text>
+<!-- entry：请求入口。仅展示职责，不代表独立进程。 -->
+<g data-node-id="entry"><rect x="40" y="128" width="160" height="96" rx="6" fill="#f7f8fa"/>
+<rect x="40" y="128" width="160" height="96" rx="6" fill="#eef0f3" stroke="#1c1f23" stroke-width="1"/>
+<rect x="52" y="140" width="24" height="16" rx="2" fill="#f7f8fa" stroke="#a5aab2" stroke-width=".8"/>
+<text class="tag" x="64" y="152" text-anchor="middle">IN</text>
+<text class="name" x="56" y="176">请求入口</text>
+<text class="body" x="56" y="196">飞书 / Console</text>
+</g>
+<!-- run：Task / Run 控制。仅展示职责，不代表独立进程。 -->
+<g data-node-id="run"><rect x="248" y="128" width="200" height="96" rx="6" fill="#f7f8fa"/>
+<rect x="248" y="128" width="200" height="96" rx="6" fill="#ffffff" stroke="#1c1f23" stroke-width="1"/>
+<rect x="260" y="140" width="24" height="16" rx="2" fill="#f7f8fa" stroke="#a5aab2" stroke-width=".8"/>
+<text class="tag" x="272" y="152" text-anchor="middle">P</text>
+<text class="name" x="264" y="176">Task / Run 控制</text>
+<text class="body" x="264" y="196">身份、去重、版本与状态</text>
+</g>
+<!-- console：ConsoleAgent。仅展示职责，不代表独立进程。 -->
+<g data-node-id="console"><rect x="496" y="128" width="200" height="96" rx="6" fill="#f7f8fa"/>
+<rect x="496" y="128" width="200" height="96" rx="6" fill="#e8f3ff" stroke="#005fd7" stroke-width="1.4"/>
+<rect x="508" y="140" width="24" height="16" rx="2" fill="#f7f8fa" stroke="#a5aab2" stroke-width=".8"/>
+<text class="tag" x="520" y="152" text-anchor="middle">A</text>
+<text class="name" x="512" y="176">ConsoleAgent</text>
+<text class="body" x="512" y="196">理解、调查与计划</text>
+</g>
+<!-- delivery：可见性检查与交付。仅展示职责，不代表独立进程。 -->
+<g data-node-id="delivery"><rect x="1000" y="128" width="240" height="96" rx="6" fill="#f7f8fa"/>
+<rect x="1000" y="128" width="240" height="96" rx="6" fill="#ffffff" stroke="#1c1f23" stroke-width="1"/>
+<rect x="1012" y="140" width="24" height="16" rx="2" fill="#f7f8fa" stroke="#a5aab2" stroke-width=".8"/>
+<text class="tag" x="1024" y="152" text-anchor="middle">P</text>
+<text class="name" x="1016" y="176">可见性检查与交付</text>
+<text class="body" x="1016" y="196">Diff、测试、报告与回报</text>
+</g>
+<!-- approval：人工审批。仅展示职责，不代表独立进程。 -->
+<g data-node-id="approval"><rect x="752" y="296" width="160" height="96" rx="6" fill="#f7f8fa"/>
+<rect x="752" y="296" width="160" height="96" rx="6" fill="#ffffff" stroke="#1c1f23" stroke-width="1"/>
+<rect x="764" y="308" width="24" height="16" rx="2" fill="#f7f8fa" stroke="#a5aab2" stroke-width=".8"/>
+<text class="tag" x="776" y="320" text-anchor="middle">H</text>
+<text class="name" x="768" y="344">人工审批</text>
+<text class="body" x="768" y="364">批准才发放执行权</text>
+</g>
+<!-- sandbox：SandboxAgent。仅展示职责，不代表独立进程。 -->
+<g data-node-id="sandbox"><rect x="1000" y="296" width="240" height="96" rx="6" fill="#f7f8fa"/>
+<rect x="1000" y="296" width="240" height="96" rx="6" fill="#e8f3ff" stroke="#005fd7" stroke-width="1.4"/>
+<rect x="1012" y="308" width="24" height="16" rx="2" fill="#f7f8fa" stroke="#a5aab2" stroke-width=".8"/>
+<text class="tag" x="1024" y="320" text-anchor="middle">A</text>
+<text class="name" x="1016" y="344">SandboxAgent</text>
+<text class="body" x="1016" y="364">隔离环境内改码与验证</text>
+</g>
+<!-- gateway：Tool Gateway。仅展示职责，不代表独立进程。 -->
+<g data-node-id="gateway"><rect x="496" y="352" width="240" height="112" rx="6" fill="#f7f8fa"/>
+<rect x="496" y="352" width="240" height="112" rx="6" fill="#ffffff" stroke="#1c1f23" stroke-width="1"/>
+<rect x="508" y="364" width="24" height="16" rx="2" fill="#f7f8fa" stroke="#a5aab2" stroke-width=".8"/>
+<text class="tag" x="520" y="376" text-anchor="middle">P</text>
+<text class="name" x="512" y="400">Tool Gateway</text>
+<text class="body" x="512" y="420">逐次鉴权、凭据代理与审计</text>
+<text class="tech" x="512" y="440">request → validate → result</text></g>
+<!-- context：上下文工具。仅展示职责，不代表独立进程。 -->
+<g data-node-id="context"><rect x="56" y="352" width="240" height="112" rx="6" fill="#f7f8fa"/>
+<rect x="56" y="352" width="240" height="112" rx="6" fill="#ffffff" stroke="#1c1f23" stroke-width="1"/>
+<rect x="68" y="364" width="24" height="16" rx="2" fill="#f7f8fa" stroke="#a5aab2" stroke-width=".8"/>
+<text class="tag" x="80" y="376" text-anchor="middle">T</text>
+<text class="name" x="72" y="400">上下文工具</text>
+<text class="body" x="72" y="420">来源发现、消息与话题读取</text>
+<text class="tech" x="72" y="440">Context Service / FeishuReader</text></g>
+<!-- devtools：研发工具与沙箱。仅展示职责，不代表独立进程。 -->
+<g data-node-id="devtools"><rect x="1000" y="500" width="240" height="96" rx="6" fill="#f7f8fa"/>
+<rect x="1000" y="500" width="240" height="96" rx="6" fill="#ffffff" stroke="#1c1f23" stroke-width="1"/>
+<rect x="1012" y="512" width="24" height="16" rx="2" fill="#f7f8fa" stroke="#a5aab2" stroke-width=".8"/>
+<text class="tag" x="1024" y="524" text-anchor="middle">T</text>
+<text class="name" x="1016" y="548">研发工具与沙箱</text>
+<text class="body" x="1016" y="568">文件、Git、测试与浏览器</text>
+</g>
+<text class="note" x="40" y="620">P 管生命周期与安全边界；A 决定如何完成目标；T 执行确定性操作；H 审批高风险动作。</text>
+<!-- 图例置于底部，避免覆盖组件和连线。 -->
+<line x1="40" y1="660" x2="1240" y2="660" stroke="#d4d7dd" stroke-width=".8"/>
+<text class="legend" x="40" y="688">P 平台代码　A Agent 决策　T Tool 执行　H 人工审批　IN 输入　实线：请求或交付　虚线：结果返回</text></svg>

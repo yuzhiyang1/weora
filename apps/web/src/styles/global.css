@@ -1,0 +1,12 @@
+@import "tailwindcss" source("../");
+@import "@heroui/styles";
+@import "./theme.css";
+@import "./workspace.css";
+@import "./controls.css";
+@import "./pages.css";
+@import "./dashboard.css";
+/* 业务辅助类使用 HeroUI 同一组令牌，不重定义组件主题。 */
+@custom-variant dark (&:is(.dark *));
+@theme inline {
+  --color-muted-foreground: var(--muted);
+}

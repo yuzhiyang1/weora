@@ -1,0 +1,43 @@
+services:
+  backend:
+    ports: !override []
+    environment:
+      WEORA_DEVELOPMENT_AUTH_BYPASS_ENABLED: "false"
+      WEORA_COMPUTER_SUPERVISOR_URL: http://computer-supervisor:4300
+      WEORA_COMPUTER_SUPERVISOR_TOKEN: ${WEORA_COMPUTER_SUPERVISOR_TOKEN:?Set a computer supervisor token}
+      WEORA_COMPUTER_MASTER_TOKEN: ${WEORA_COMPUTER_MASTER_TOKEN:?Set a different computer master token}
+      WEORA_COMPUTER_BROWSER_ORIGINS: ${WEORA_COMPUTER_BROWSER_ORIGINS:-[]}
+      WEORA_COMPUTER_FEISHU_SCOPES:
+    volumes:
+      - ./backend/alembic.ini:/app/alembic.ini:ro
+      - ./backend/migrations:/app/migrations:ro
+    networks: [default, computer-control, computers]
+
+  frontend:
+    ports: !override ["127.0.0.1:3000:80"]
+
+  computer-supervisor:
+    image: weora-openbot-supervisor:b6932d3
+    environment:
+      SUPERVISOR_TOKEN: ${WEORA_COMPUTER_SUPERVISOR_TOKEN}
+      COMPUTER_TOKEN: ${WEORA_COMPUTER_MASTER_TOKEN}
+      COMPUTER_NAMESPACE: weora
+      COMPUTER_NETWORK: weora-computers
+      COMPUTER_IMAGE: weora-openbot-desktop:b6932d3
+      COMPUTER_BROWSER_MODE: headed
+      COMPUTER_MEMORY_BYTES: "2147483648"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks: [computer-control]
+    init: true
+    restart: unless-stopped
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+
+networks:
+  computer-control:
+    name: weora-computer-control
+    internal: true
+  computers:
+    name: weora-computers
+    internal: true

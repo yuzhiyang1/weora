@@ -1,0 +1,67 @@
+.project-overview {
+  /* 资料卡不是列表空态容器，不沿用共享表格区域的最小高度。 */
+  min-height: 0;
+  padding: 24px;
+  margin-bottom: 20px;
+}
+.project-facts {
+  display: grid;
+  grid-template-columns: 110px minmax(0, 1fr);
+  gap: 10px 16px;
+}
+.project-facts dt {
+  color: var(--muted-foreground);
+}
+.project-facts dd {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.project-repositories {
+  display: grid;
+  gap: 16px;
+  margin-top: 20px;
+}
+.project-repository {
+  min-width: 0;
+  padding: 20px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-2xl);
+}
+.project-repository code {
+  display: block;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+.project-repository p {
+  overflow-wrap: anywhere;
+}
+.project-repository-title {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.project-secret-input {
+  width: 100%;
+}
+@media (max-width: 760px) {
+  .project-overview,
+  .project-repository {
+    padding: 16px;
+  }
+  .project-facts {
+    grid-template-columns: 1fr;
+    gap: 6px;
+  }
+  .project-facts dd {
+    margin-bottom: 10px;
+  }
+  .project-repository .run-actions > span {
+    flex-basis: 100%;
+  }
+}
+.project-code-status {
+  margin-block: 12px;
+  overflow-wrap: anywhere;
+}
