@@ -13,7 +13,9 @@ from weora.bootstrap.settings import AppSettings
 from weora.modules.collaboration.infrastructure.inbox import sync_plan_inbox
 from weora.modules.computers.credentials import ComputerCredentials
 from weora.modules.computers.tools import register_computer_tools
-from weora.modules.context.domain import ContextActor, Json, Message, MessagePage
+from weora.modules.context.agent_cli import FEISHU_AGENT_CLI, FeishuAgentCli
+from weora.modules.context.agent_cli_skills import FEISHU_CLI_SKILL, read_feishu_cli_skill
+from weora.modules.context.domain import ContextActor, ContextError, Json, Message, MessagePage
 from weora.modules.context.feishu import FeishuHttpReader, FernetSecrets
 from weora.modules.context.feishu_cli import FeishuCliProcess, FeishuCliReader
 from weora.modules.context.service import ContextService
@@ -444,6 +446,25 @@ def configure_execution_services(app: FastAPI, settings: AppSettings, guard: Run
                 return await context_tools.execute(current, name, arguments)
 
             gateway.register(ToolSpec(tool.name, tool.description, tool.input_schema), handler)
+        if settings.feishu_agent_cli_executable:
+            agent_cli = FeishuAgentCli(settings.feishu_agent_cli_executable)
+
+            async def execute_feishu_cli(scope: ToolScope, arguments: Json) -> Json:
+                try:
+                    current = await context_access.scope(
+                        ContextActor(scope.actor.user_id, scope.actor.workspace_id), scope.run_id
+                    )
+                    if current.audience != "group" or current.source_kind != "feishu" or current.source_id is None:
+                        return failure("FEISHU_RUN_HAS_NO_BOUND_BOT")
+                    _, connection, _ = await context._authorize(current, current.source_id)
+                    return await agent_cli.execute(
+                        arguments, str(connection["app_id"]), lambda: reader._reader()._token(connection)
+                    )
+                except ContextError as error:
+                    return failure(error.code)
+
+            gateway.register(FEISHU_AGENT_CLI, execute_feishu_cli)
+            gateway.register(FEISHU_CLI_SKILL, read_feishu_cli_skill)
     register_delivery_tools(gateway, delivery)
     if app.state.openbot is not None and settings.computer_browser_origins:
         register_computer_tools(

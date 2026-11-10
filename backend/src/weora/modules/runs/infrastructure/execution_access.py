@@ -13,6 +13,7 @@ from weora.modules.identity.application.service import IdentityService
 from weora.modules.runs.application.execution import RuntimeFailure, RuntimeInput
 from weora.modules.runs.application.ports import ProjectContextCatalog, RunActor, RunRecord, RunsUnitOfWorkFactory
 from weora.modules.runs.infrastructure.execution_store import SqlAlchemyExecutionStore
+from weora.modules.runs.infrastructure.feishu_sheet_runtime import explicit_sheet_cli_read
 from weora.modules.runs.infrastructure.module_access import context_scope
 from weora.modules.tools.application.gateway import ToolGateway, ToolScope
 from weora.modules.tools.infrastructure.store import SqlAlchemyToolStore
@@ -307,10 +308,28 @@ class ModulesExecutionAccess:
                 "仓库修改、构建和交付先提出 plan.propose，等待人类批准，不调用审批工具。"
                 "如已提供 browser 工具，可直接在登记范围内导航和取证，权限由平台校验。"
             )
-        if len((prompt + instruction).encode()) > 128000:
-            raise RuntimeFailure("CONTEXT_TOO_LARGE")
         tools = self._gateway.specifications() if self._gateway else ()
         if run.recovery_read_only:
             tools = tuple(tool for tool in tools if tool.effect == "read")
             prompt += "\n本次为人工选择的只读恢复，禁止修改、执行命令、提交计划或远端交付；未知写结果只解释证据。"
-        return RuntimeInput(prompt, instruction, tools)
+        sheet_read = None
+        if (
+            scope.audience == "group"
+            and scope.source_kind == "feishu"
+            and scope.source_id is not None
+            and any(tool.name == "lark.cli.exec" for tool in tools)
+        ):
+            # 群来源目录只描述消息上下文；旧群回复也不能判断本轮 Bot 的工具和权限。
+            prompt += (
+                "\n本轮可用 lark.cli.exec，由 Gateway 使用本群已绑定的 Bot 调用官方飞书 CLI；"
+                "context.sources.list 仅列群消息来源，不能用来判断文档或表格的访问权限。"
+                "用户要求用飞书 CLI 读文档时，先从本轮用户消息或所引用消息确定链接；"
+                "若没有明确目标，请用户提供链接或重新引用原消息，不猜测目标。"
+                "有链接时，先用 lark.cli.skill 查相关用法，再调用 lark.cli.exec 实际读取正文；"
+                "历史回复里的能力和权限判断不能替代本轮调用。只根据这次调用的实际结果报告读取成功或错误。"
+            )
+            if not run.recovery_read_only and not (task.origin_metadata or {}).get("coordination_scope_id"):
+                sheet_read = explicit_sheet_cli_read(task.instruction)
+        if len((prompt + instruction).encode()) > 128000:
+            raise RuntimeFailure("CONTEXT_TOO_LARGE")
+        return RuntimeInput(prompt, instruction, tools, explicit_feishu_sheet_read=sheet_read)

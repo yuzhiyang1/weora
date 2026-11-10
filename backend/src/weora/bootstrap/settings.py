@@ -103,6 +103,8 @@ class AppSettings(BaseSettings):
     feishu_reader_backend: Literal["http", "cli"] = "http"
     feishu_cli_executable: str | None = None
     feishu_cli_timeout_seconds: float = Field(default=2.5, gt=0, le=2.5)
+    # Agent 命令使用支持官方 authsidecar 的独立二进制，群消息适配器仍可走 HTTP。
+    feishu_agent_cli_executable: str | None = None
     readonly_repository_path: str | None = None
     readonly_repository_workspace_id: UUID | None = None
     # 只读缓存是后台私有目录；私网和私有 CA 只能由部署管理员显式登记。
