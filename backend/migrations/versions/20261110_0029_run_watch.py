@@ -9,6 +9,9 @@ depends_on = None
 
 
 def upgrade() -> None:
+    # SQLite 使用应用层的状态回读，不需要 PostgreSQL 的通知触发器。
+    if op.get_context().dialect.name != "postgresql":
+        return
     op.execute("""
         CREATE FUNCTION weora_notify_run_changed() RETURNS trigger LANGUAGE plpgsql AS $$
         BEGIN
@@ -30,5 +33,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    if op.get_context().dialect.name != "postgresql":
+        return
     op.execute("DROP TRIGGER weora_run_changed ON runs")
     op.execute("DROP FUNCTION weora_notify_run_changed()")

@@ -13,13 +13,19 @@ import stat
 from collections.abc import Callable, Mapping
 from contextlib import suppress
 from dataclasses import replace
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
 from weora.modules.delivery.domain.models import DeliveryError
 from weora.modules.delivery.infrastructure.git import ConfiguredCredentials, GitRunner, IsolatedGitRunner
-from weora.modules.projects.domain import ProjectError, RepositoryArchive, RepositorySource, git_address
+from weora.modules.projects.domain import (
+    ProjectError,
+    RepositoryArchive,
+    RepositorySource,
+    git_address,
+    validate_repository_file_path,
+)
 
 
 def revision_id(raw: bytes) -> str:
@@ -372,22 +378,7 @@ class GitRepositoryReader:
 
     async def read(self, cache_id: UUID, revision: str, path: str) -> dict[str, object]:
         revision_id(revision.encode())
-        parts = PurePosixPath(path).parts
-        if (
-            not parts
-            or path.startswith("/")
-            or any(ord(c) < 32 for c in path)
-            or "\\" in path
-            or ":" in path
-            or any(
-                p in {"..", "."}
-                or p != p.rstrip(" .")
-                or p.casefold() in {".git", ".env", ".npmrc", ".pypirc", "id_rsa", "id_ed25519"}
-                or p.casefold().startswith(".env.")
-                for p in parts
-            )
-        ):
-            raise ProjectError("REPOSITORY_PATH_DENIED", "文件路径不可读取")
+        validate_repository_file_path(path)
         root = self._path(cache_id)
         env = await self._environment(root)
         raw = await self._run(root, env, "ls-tree", "-z", "--full-tree", revision, "--", path)

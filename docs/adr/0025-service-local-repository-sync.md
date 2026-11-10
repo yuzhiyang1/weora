@@ -11,7 +11,7 @@
 ## 设计与实现
 
 1. **项目仓库后台同步。** 已通过连接校验的存量仓库会自动纳入，新仓库使用原「校验连接」入口登记。部署复用 Celery Beat，并用 `weora.repositories.sync` 队列控制同步并发。首次只取登记分支最新提交及其 Git 文件内容，后续复用同一裸库增量拉取。LFS 正文、子模块、标签和其他分支不自动拉取。
-2. **Run 和接单评估固定本地提交。** 每个工作空间、仓库和连接版本独立持有随机缓存 ID。同步验证目标提交并建立固定 Git 引用后才发布 SHA 和同步时间。新 Run 以 `service-local-v1` 冻结读取方式，并在第一次成功准备时保存 SHA、缓存 ID 和同步时间。接单评估在首次读取后固定 SHA 和连接版本。两个入口都直接读本地 Git 对象。
+2. **Run 和接单评估固定本地提交。** 每个工作空间、仓库和连接版本独立持有随机缓存 ID。同步验证目标提交并建立固定 Git 引用后才发布 SHA 和同步时间。新 Run 以 `service-local-v1` 冻结读取方式，并在首次调用读取工具且绑定成功时保存目标仓库的 SHA、缓存 ID 和同步时间。接单评估在首次读取后固定 SHA 和连接版本。两个入口都直接读本地 Git 对象。
 3. **Agent 使用受控的本地读工具。** 第一阶段复用 Run 的 `repo.file.read` 与接单评估的文件、目录读取。工具仍以已选仓库和相对路径定位，授权、文件大小和输出预算继续在平台校验。Run 的目录工具和文本搜索可在此基础上另行接入。
 4. **改码与构建按审批准备独立工作区。** 从已经固定的本地提交生成隔离工作区，按目标仓库的构建配置执行。现有归档大小预算独立于同步配额。支持大仓库同步之后，完整构建仍需单独验证归档或工作区物化的资源边界。
 
@@ -32,7 +32,7 @@ uv run --no-sync celery -A weora.bootstrap.worker:celery_app worker --pool=solo 
 
 默认同步总时限 900 秒、同步间隔 300 秒、提交有效期 900 秒、每仓 2 GiB。可分别用 `WEORA_REPOSITORY_SYNC_TIMEOUT_SECONDS`、`WEORA_REPOSITORY_SYNC_INTERVAL_SECONDS`、`WEORA_REPOSITORY_SYNC_MAX_AGE_SECONDS` 和 `WEORA_REPOSITORY_SYNC_MAX_BYTES` 调整。进程按环境配置选择调度，改配置后需重启相应进程。
 
-使用 `GET /api/v1/workspaces/{workspace_id}/projects/{project_id}/repositories/{repository_id}/sync` 查看状态、最后成功 SHA、时间和失败码。已获授权的管理员可以调用现有连接校验入口提前排队。排队成功到 `READY` 之间由后台领取。首次接入时可等目标仓库就绪后发起运行。
+使用 `GET /api/v1/workspaces/{workspace_id}/projects/{project_id}/repositories/{repository_id}/sync` 查看状态、最后成功 SHA、时间和失败码。已获授权的管理员可以调用现有连接校验入口提前排队。排队成功到 `READY` 之间由后台领取。任务可以先处理其他资料，仓库就绪后再通过工具读取。
 
 回退时关闭预同步并保留数据库迁移与持久卷。新 Run 恢复原按运行准备方式，已绑定的 Run 可以继续从原缓存读取。此前已创建但未绑定本地提交的 `service-local-v1` Run 会报告预同步未启用，需重新启用或重新发起。旧资料型任务和原按运行准备的快照保持兼容。
 
