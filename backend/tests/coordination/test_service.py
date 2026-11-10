@@ -12,6 +12,7 @@ import pytest
 from sqlalchemy import select
 
 from tests.api.test_runs import runs as runs
+from tests.api.test_task_collaboration import member
 from tests.context.test_context import inbound
 from tests.context.test_run_integration import ContextRuns
 from tests.context.test_run_integration import contextual as contextual
@@ -86,10 +87,15 @@ async def receive(
     root: str | None = None,
     instruction: str = "请修复登录，沿用现有交互",
     topic: str | None = None,
+    addressed: bool = False,
+    open_id: str = "ou_user",
 ) -> None:
-    payload = inbound(identity, identity)
+    payload = inbound(identity, identity, open_id=open_id)
     raw = cast(Json, cast(Json, payload["event"])["message"])
-    raw["mentions"] = []
+    if addressed:
+        instruction = "@_user_1 " + instruction
+    else:
+        raw["mentions"] = []
     raw["content"] = json.dumps({"text": instruction}, ensure_ascii=False)
     if root:
         raw["root_id"] = root
@@ -112,6 +118,66 @@ async def decide(h: ContextRuns, coordinator: CoordinationService, scope_id: str
     decision = await coordinator.tool(workspace_id, scope_id, "decide", "orchestrator_eval_decide", value)
     assert decision["ok"] is True, decision
     return str(cast(Json, decision["decision"]).get("ticket_id"))
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("acknowledgement", [None, "已接单，会核对订单导出。"])
+async def test_feishu_acceptance_reply_contains_the_real_task_number(
+    contextual: ContextRuns, monkeypatch: pytest.MonkeyPatch, acknowledgement: str | None,
+) -> None:
+    h = contextual
+    coordinator, scope_id = await configure(h)
+    workspace_id = h.context_actor.workspace_id
+    await receive(h, coordinator, addressed=True)
+    decision = {
+        "trigger_id": "om_trigger", "decision": "accept", "title": "订单导出", "scope": "核对订单导出",
+    }
+    if acknowledgement:
+        decision["acknowledgement"] = acknowledgement
+    response = await coordinator.tool(
+        workspace_id, scope_id, "route", "orchestrator_route", {"decisions": [decision]},
+    )
+    assert cast(list[Json], response["results"])[0]["ok"] is True
+    state = await coordinator.store.snapshot(workspace_id, scope_id)
+    assert state.tickets[0].task_id is None
+    if acknowledgement:
+        pending_ack = next(item for item in state.effects if item.kind == "reply")
+        with pytest.raises(DeferredEffect, match="TASK_NUMBER_PENDING"):
+            await coordinator.deliver(workspace_id, scope_id, pending_ack)
+        assert h.reader.replies == 0
+
+    await coordinator.launch(workspace_id, scope_id, next(item for item in state.effects if item.kind == "worker"))
+    state = await coordinator.store.snapshot(workspace_id, scope_id)
+    task_id = state.tickets[0].task_id
+    assert task_id
+    assert len(state.replies) == 1
+    reply_effect = next(item for item in state.effects if item.kind == "reply")
+    send = AsyncMock(return_value="om_reply")
+    monkeypatch.setattr(h.reader, "reply", send)
+    assert await coordinator.deliver(workspace_id, scope_id, reply_effect)
+    assert not await coordinator.deliver(workspace_id, scope_id, reply_effect)
+    send.assert_awaited_once()
+    assert send.call_args.args[1:3] == (
+        "om_trigger", f"任务 #{task_id[:8].upper()}｜{acknowledgement or '已接单。'}",
+    )
+
+
+@pytest.mark.anyio
+async def test_unknown_feishu_task_number_replies_without_starting_a_task(contextual: ContextRuns) -> None:
+    h = contextual
+    coordinator, scope_id = await configure(h)
+    workspace_id = h.context_actor.workspace_id
+    for _ in range(2):
+        await receive(h, coordinator, instruction="#DEADBEEF 继续修复登录", addressed=True)
+
+    state = await coordinator.store.snapshot(workspace_id, scope_id)
+    assert not state.tickets and not state.evaluations
+    reply_effects = [effect for effect in state.effects if effect.kind == "reply"]
+    assert len(reply_effects) == len(state.replies) == 1
+    assert not any(effect.kind == "worker" for effect in state.effects)
+    assert "找不到可续接的任务 #DEADBEEF" in state.replies[0].text
+    assert await coordinator.deliver(workspace_id, scope_id, reply_effects[0])
+    assert h.reader.replies == 1
 
 
 @pytest.mark.anyio
@@ -183,10 +249,10 @@ async def test_successful_model_turn_without_ready_keeps_ticket_waiting(
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("root_present", [True, False])
+@pytest.mark.parametrize("followup", ["root", "topic", "number", "peer"])
 async def test_unmentioned_inbox_decision_worker_run_report_reply_and_task_continuation(
     contextual: ContextRuns,
-    root_present: bool,
+    followup: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     h = contextual
@@ -272,9 +338,34 @@ async def test_unmentioned_inbox_decision_worker_run_report_reply_and_task_conti
     assert status.status_code == 200, status.text
     assert status.json()["inbox"]["addressed"] is False
     assert status.json()["deliveries"][0]["status"] == "SENT"
-    await receive(
-        h, coordinator, identity="om_followup", root="om_trigger" if root_present else None, topic="omt_shared"
-    )
+    if followup == "number":
+        # 在群里单发消息，不带原话题或引用。重复事件只能追加一次。
+        number = ticket.task_id[:8].upper()
+        for _ in range(2):
+            await receive(
+                h, coordinator, identity="om_followup", instruction=f"#{number}：补上日期筛选", addressed=True
+            )
+        state = await coordinator.store.snapshot(workspace_id, scope_id)
+        assert sum(item.trigger_id == "om_followup" for item in state.tickets[0].inputs) == 1
+        assert any(reply.trigger_id == "om_followup" and reply.purpose == "ack" for reply in state.replies)
+    elif followup == "peer":
+        async with member(h.original, "复现同事") as (_, user_id):
+            await h.context.bind_identity(h.context_actor, h.connection_id, "ou_peer", UUID(user_id))
+            await h.context.set_grant(h.context_actor, h.source_id, UUID(user_id), True)
+            for _ in range(2):
+                await receive(
+                    h, coordinator, identity="om_followup", topic="omt_shared", open_id="ou_peer",
+                    instruction="刚刚复现了，是页面 2 白屏，页面 1 是笔误",
+                )
+        state = await coordinator.store.snapshot(workspace_id, scope_id)
+        inputs = [item for item in state.tickets[0].inputs if item.trigger_id == "om_followup"]
+        assert len(inputs) == 1 and inputs[0].peer_evidence
+        assert state.tickets[0].mandate == ticket.mandate
+    else:
+        await receive(
+            h, coordinator, identity="om_followup", root="om_trigger" if followup == "root" else None,
+            topic="omt_shared",
+        )
     state = await coordinator.store.snapshot(workspace_id, scope_id)
     assert len(state.tickets) == 1 and len(state.tickets[0].assignments) == 2
     worker_effect = next(item for item in state.effects if item.kind == "worker")

@@ -28,6 +28,8 @@ def test_large_ticket_has_bounded_preview_and_exact_full_text_chunks() -> None:
     assert all(isinstance(chunk, str) for chunk in chunks)
     assert "".join(str(chunk) for chunk in chunks) == original.text
     assert worker_facts(state, identity, {"resource": "root"})["chars"] == 24000
-    engine.receive(message("another", actor="other-user"))
+    outside = message("another", actor="other-user")
+    outside.threads = ["chat:another-topic"]
+    engine.receive(outside)
     with pytest.raises(CoordinationError, match="EVIDENCE_NOT_DELIVERED"):
         worker_facts(state, identity, {"resource": "input", "id": "another"})

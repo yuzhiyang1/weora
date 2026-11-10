@@ -295,15 +295,20 @@ class FeishuChannels:
         payload["idempotency_key"] = f"feishu:{row['id']}"
         submitted = await submit(actor, payload)
         receipt = submitted if isinstance(submitted, dict) else {"run_id": submitted}
+        status = "WAITING_RUN"
+        if receipt.get("rejection_code"):
+            status = "REJECTED"
+        elif receipt.get("coordination_scope_id"):
+            status = "COORDINATING"
+        elif receipt.get("run_id"):
+            status = "SUBMITTED"
         return await self.context.store.change(
             workspace_id,
             "inbox",
             key,
             lambda old: dict(
                 old or {},
-                status="COORDINATING"
-                if receipt.get("coordination_scope_id")
-                else ("SUBMITTED" if receipt.get("run_id") else "WAITING_RUN"),
+                status=status,
                 **receipt,
                 actor_id=str(actor.user_id),
             ),

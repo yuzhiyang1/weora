@@ -106,6 +106,8 @@ class Trigger:
     eval_id: str | None = None
     decision_id: str | None = None
     expires_at: str | None = None
+    # 同一飞书话题的其他成员提供的证据，不能再进入新任务评估。
+    peer_evidence: bool = False
 
 
 @dataclass
@@ -215,6 +217,8 @@ class Input:
     delivered_at: str | None = None
     read_at: str | None = None
     status: str = "pending"
+    # 可交给原 Worker 核实，但不能解除人工等待或代表原发起人授权。
+    peer_evidence: bool = False
 
 
 @dataclass

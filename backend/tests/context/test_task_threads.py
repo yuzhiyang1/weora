@@ -53,6 +53,18 @@ async def send(
 
 
 @pytest.mark.anyio
+async def test_numbered_message_without_coordination_never_falls_back_to_new_task(contextual: ContextRuns) -> None:
+    h = contextual
+    channels = await setup(h)
+    receipt = await send(h, channels, "om_number", "#DEADBEEF 补充说明", thread=None)
+    assert receipt["status"] == "REJECTED"
+    assert receipt["rejection_code"] == "TASK_REFERENCE_REQUIRES_COORDINATION"
+    assert "run_id" not in receipt
+    async with h.original.sessions() as session:
+        assert await session.scalar(select(RunModel.id)) is None
+
+
+@pytest.mark.anyio
 async def test_thread_followup_waits_and_then_replies_to_its_own_message(contextual: ContextRuns) -> None:
     h = contextual
     channels = await setup(h)

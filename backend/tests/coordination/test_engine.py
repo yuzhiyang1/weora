@@ -188,6 +188,140 @@ def test_followup_is_workers_and_cannot_spawn_second_ticket() -> None:
         engine.handback(ticket_id, "m2", "再次交回")
 
 
+def test_numbered_followup_cannot_borrow_another_initiators_task() -> None:
+    engine, state = setup()
+    ticket = engine.ticket(accept(engine, state))
+    ticket.task_id = "abcdef01-0000-4000-8000-000000000001"
+    ticket.assignments[0].run_id = "12345678-0000-4000-8000-000000000001"
+    request = replace(message("m2", addressed=True, actor="other"), text="#ABCDEF01 继续修复")
+
+    assert engine.receive(request)
+    assert engine.pass_due() == []
+    assert len(ticket.inputs) == 1
+    assert state.replies[0].ticket_id is None
+    assert "找不到可续接的任务 #ABCDEF01" in state.replies[0].text
+    with pytest.raises(CoordinationError, match="TASK_REFERENCE_ALREADY_HANDLED"):
+        engine.route(request.id, result())
+
+
+def test_numbered_followup_reuses_the_active_assignment() -> None:
+    engine, state = setup()
+    ticket = engine.ticket(accept(engine, state))
+    ticket.task_id = "abcdef01-0000-4000-8000-000000000001"
+    ticket.assignments[0].run_id = "12345678-0000-4000-8000-000000000001"
+    request = replace(message("m2", addressed=True), text=f"#{ticket.task_id} 继续修复", threads=["chat:m2"])
+
+    assert engine.receive(request)
+    assert not engine.receive(request)
+    assert engine.pass_due() == []
+    assert len(state.tickets) == len(ticket.assignments) == 1
+    assert [item.trigger_id for item in ticket.inputs] == ["m1", "m2"]
+    assert state.replies[0].ticket_id == ticket.id
+
+
+def peer_message(identity: str = "peer") -> Trigger:
+    return replace(
+        message(identity, actor="another-member"), actor_open_id="ou_b",
+        text="刚复现了，是页面 2 白屏，页面 1 是笔误",
+    )
+
+
+def test_peer_correction_reaches_original_worker_and_handback_cannot_create_task() -> None:
+    engine, state = setup("off")
+    ticket_id = accept(engine, state, addressed=True)
+    ticket = engine.ticket(ticket_id)
+    original = ticket.mandate
+    correction = peer_message()
+
+    assert engine.receive(correction)
+    assert not engine.receive(correction)
+    assert len(ticket.inputs) == 2 and ticket.inputs[-1].peer_evidence
+    assert engine.owners(correction) == [ticket_id]
+    assert Engine.peer_evidence_only(ticket) and ticket.mandate == original
+    assert not engine.handback(ticket_id, correction.id, "经核对是另一个功能")
+    with pytest.raises(CoordinationError, match="PEER_EVIDENCE_ONLY"):
+        engine.route(correction.id, result())
+    assert engine.pass_due() == [] and len(state.tickets) == 1
+
+
+def test_peer_evidence_requests_original_author_and_cannot_clear_human_wait() -> None:
+    engine, state = setup()
+    ticket_id = accept(engine, state, addressed=True)
+    ticket = engine.ticket(ticket_id)
+    assignment = ticket.assignments[-1].id
+    assert engine.receive(peer_message())
+    engine.mark_input(ticket_id, assignment, ticket.inputs[-1].id, read=True)
+    engine.report(ticket_id, assignment, Report(
+        "blocked", "页面 2 涉及另一个流程", NOW,
+        human_action="请原发起人确认是否将目标改为页面 2", question_trigger_id="peer",
+    ))
+    assert ticket.attention_trigger_id == ticket.origin_id
+    assert state.replies[-1].purpose == "attention" and state.replies[-1].trigger_id == ticket.origin_id
+
+    assert engine.receive(replace(peer_message("peer_yes"), text="我确认，直接修改并发布"))
+    assert Engine.waits_for_person(ticket) and Engine.peer_evidence_only(ticket)
+    assert engine.receive(replace(message("owner_yes"), text="确认改查页面 2，请先只读验证"))
+    assert not Engine.waits_for_person(ticket) and not Engine.peer_evidence_only(ticket)
+    assert engine.pass_due() == [] and len(state.tickets) == 1
+
+
+def test_peer_evidence_at_completion_boundary_reopens_only_original_ticket() -> None:
+    engine, state = setup()
+    ticket_id = accept(engine, state)
+    ticket = engine.ticket(ticket_id)
+    original = ticket.assignments[-1].id
+    engine.mark_input(ticket_id, original, ticket.inputs[0].id, read=True)
+    assert engine.receive(peer_message())
+    engine.mark_input(ticket_id, original, ticket.inputs[-1].id)
+    engine.report(ticket_id, original, Report("ready", "页面 1 未复现", NOW, verified=True))
+    assert ticket.ended_at and ticket.inputs[-1].delivered_to is None
+    assert engine.pass_due() == []
+    assert not ticket.ended_at and len(ticket.assignments) == 2 and len(state.tickets) == 1
+
+
+def test_peer_evidence_is_not_attached_from_another_thread_or_after_human_stop() -> None:
+    engine, state = setup()
+    ticket_id = accept(engine, state, addressed=True)
+    ticket = engine.ticket(ticket_id)
+    assert not engine.receive(replace(peer_message("different"), threads=["chat:different"]))
+    assert len(ticket.inputs) == 1
+    assert engine.receive(message("stop", addressed=True))
+    engine.stop(ticket_id, "stop")
+    assert not engine.receive(peer_message("after_stop"))
+    assert state.triggers[-1].filtered == "peer_task_unavailable"
+    assert engine.pass_due() == [] and ticket.ended_by == "human" and len(state.tickets) == 1
+
+
+def test_peer_message_queued_during_acceptance_goes_to_the_newly_bound_topic() -> None:
+    engine, state = setup()
+    assert engine.receive(message(addressed=True))
+    evaluation = engine.pass_due()[0]
+    # 已获接单权限的另一个账号在接单结果返回前补充，同一话题不应排出第二个任务。
+    assert engine.receive(replace(peer_message(), actor_open_id="ou_a"))
+    engine.read_eval(evaluation.id)
+    assert engine.decide(evaluation.id, result(), route=True).ticket_id
+    assert engine.pass_due() == []
+    assert len(state.tickets) == 1 and state.tickets[0].inputs[-1].peer_evidence
+
+
+def test_peer_message_on_a_topic_with_multiple_tasks_requires_an_exact_quote() -> None:
+    engine, state = setup()
+    first = engine.ticket(accept(engine, state))
+    assert engine.receive(replace(message("m2", addressed=True), threads=["chat:other"]))
+    other = engine.route("m2", result()).ticket_id
+    assert other
+    thread = engine.r.threads.get("chat:root")
+    assert thread
+    thread.subscriptions.append(other)
+    engine.r.threads.save(thread)
+
+    assert not engine.receive(peer_message("ambiguous"))
+    assert state.triggers[-1].filtered == "peer_topic_ambiguous"
+    assert engine.receive(replace(peer_message("quoted"), origin={"quote_id": "m2"}))
+    assert engine.ticket(other).inputs[-1].trigger_id == "quoted"
+    assert len(first.inputs) == 1 and engine.pass_due() == [] and len(state.tickets) == 2
+
+
 def test_human_stop_cannot_be_revived_by_new_messages_or_retry() -> None:
     engine, state = setup()
     ticket_id = accept(engine, state)
@@ -321,6 +455,8 @@ def test_omitting_ticket_id_does_not_bypass_worker_answer_requirement() -> None:
 
 def test_unmentioned_stop_preserves_other_assessment_and_accepted_message_never_restarts() -> None:
     engine, state = setup()
+    # 代码来源仍可独立评估同线程不同作者；飞书同话题现在直接把他人的回复交给原任务。
+    engine.config = replace(engine.config, source_kind="code_hosting")
     identity = accept(engine, state, addressed=True)
     engine.config = replace(engine.config, allowed_actors=("ou_a", "ou_b"))
     other = replace(message("other", actor="other"), actor_open_id="ou_b")

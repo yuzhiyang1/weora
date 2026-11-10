@@ -5,6 +5,7 @@
 """
 
 import hashlib
+import re
 from dataclasses import replace
 from datetime import datetime, timedelta
 from typing import Literal
@@ -40,6 +41,12 @@ def later(at: str, seconds: float) -> str:
     return (datetime.fromisoformat(at) + timedelta(seconds=seconds)).isoformat()
 
 
+def task_reference(text: str) -> tuple[str, str] | None:
+    """识别消息开头的任务编号；保留格式错误的编号请求，避免落入新建任务流程。"""
+    match = re.match(r"[#＃]([^\s:：]*)[\s:：]*(.*)\Z", text.lstrip(), re.DOTALL)
+    return (match[1].lower(), match[2].strip()) if match else None
+
+
 class Engine:
     def __init__(self, records: Records, config: Config, now: Clock) -> None:
         self.r, self.config, self.now = records, config, now
@@ -62,6 +69,11 @@ class Engine:
         if ticket is None:
             raise CoordinationError("TICKET_NOT_FOUND")
         return ticket
+
+    def _task_reference(self, trigger: Trigger) -> tuple[str, str] | None:
+        if self.config.source_kind == "feishu" and trigger.human and trigger.addressed:
+            return task_reference(trigger.text)
+        return None
 
     def owners(self, trigger: Trigger) -> list[str]:
         # 对照 core/model.ts followupOwners：人工重排、评估中与已读的结束任务不再占有跟进。
@@ -96,16 +108,17 @@ class Engine:
             or not trigger.threads
         ):
             raise CoordinationError("SOURCE_MISMATCH")
+        reference = self._task_reference(trigger)
+        if reference is not None:
+            return self._receive_task_reference(trigger, *reference)
         admission = gate(self.config, trigger)
-        subscribed: list[tuple[Ticket, bool]] = []
+        subscribed: dict[str, bool] = {}
         for thread_id in trigger.threads:
             thread = self._thread(thread_id)
             thread.last_at = max(thread.last_at, trigger.at)
             for identity in thread.subscriptions:
-                ticket = self.ticket(identity)
                 context_only = identity in thread.context_only
-                if not any(existing.id == identity for existing, _ in subscribed):
-                    subscribed.append((ticket, context_only))
+                subscribed[identity] = subscribed.get(identity, True) and context_only
             self.r.threads.save(thread)
         if not trigger.authorized or not self.config.enabled:
             trigger.filtered = "source_or_actor_revoked"
@@ -114,7 +127,15 @@ class Engine:
         self.r.triggers.save(trigger)
         if trigger.filtered:
             return False
-        for ticket, context_only in subscribed:
+        # 只认任务自己的话题订阅。群级来源或旁支上下文不能把别人的消息挂到任务上。
+        own_threads = [self.ticket(identity) for identity, context_only in subscribed.items() if not context_only]
+        if (
+            self.config.source_kind == "feishu" and trigger.human and own_threads
+            and not any(ticket.mandate.actor_id == trigger.actor_id for ticket in own_threads)
+        ):
+            return self._receive_peer_evidence(trigger, own_threads)
+        for identity, context_only in subscribed.items():
+            ticket = self.ticket(identity)
             if ticket.ended_by == "human":
                 continue
             origin = self.r.triggers.get(ticket.origin_id)
@@ -136,7 +157,70 @@ class Engine:
             return True
         return bool(trigger.fanout)
 
+    def _receive_peer_evidence(self, trigger: Trigger, tickets: list[Ticket]) -> bool:
+        """话题里的跨人回复只作为原任务证据，包含无权变更或误发的新请求。"""
+        trigger.peer_evidence = True
+        if len(tickets) > 1:
+            quote = trigger.origin.get("quote_id")
+            tickets = [ticket for ticket in tickets if quote in ticket.origin_ids]
+        if len(tickets) != 1:
+            trigger.filtered = "peer_topic_ambiguous"
+        else:
+            ticket = tickets[0]
+            origin = self.r.triggers.get(ticket.origin_id)
+            if ticket.ended_by == "human" or not origin or not revalidate(
+                self.config, ticket.mandate, authorized=origin.authorized,
+            ):
+                trigger.filtered = "peer_task_unavailable"
+            else:
+                self._input(ticket, trigger)
+        self.r.triggers.save(trigger)
+        return bool(trigger.fanout)
+
+    def _receive_task_reference(self, trigger: Trigger, number: str, instruction: str) -> bool:
+        """把编号请求只交给一个现有 Task，或通过 Outbox 回复发送者。"""
+        self.r.triggers.save(trigger)
+        if not trigger.authorized or not self.config.enabled:
+            return False
+
+        valid = re.fullmatch(r"[0-9a-f]{8}", number) is not None
+        if len(number) == 36:
+            try:
+                valid = str(UUID(number)) == number
+            except ValueError:
+                valid = False
+        if not valid or not instruction:
+            self.reply(trigger.id, "answer", "请按「@Weora #任务编号 补充说明」发送，编号可从任务列表复制。")
+            return True
+
+        admission = gate(self.config, trigger)
+        matches = [item for item in self.r.tickets.list() if item.task_id and item.task_id.startswith(number)]
+        if admission.strength == "explicit" and len(matches) == 1:
+            ticket = matches[0]
+            origin = self.r.triggers.get(ticket.origin_id)
+            if (
+                ticket.mandate.actor_id == trigger.actor_id
+                and ticket.ended_by != "human"
+                and any(assignment.run_id for assignment in ticket.assignments)
+                and origin is not None
+                and (
+                    not origin.expires_at
+                    or datetime.fromisoformat(origin.expires_at) > datetime.fromisoformat(self.now())
+                )
+                and revalidate(self.config, ticket.mandate, authorized=origin.authorized)
+            ):
+                # 编号只指定这条消息的去向，避免把整个群聊或其他任务的话题订阅进来。
+                self._input(ticket, trigger)
+                self.r.triggers.save(trigger)
+                self.reply(trigger.id, "ack", f"已将补充内容加入任务 #{number.upper()}。")
+                return True
+
+        self.reply(trigger.id, "answer", f"找不到可续接的任务 #{number.upper()}。请核对编号，或回到原任务话题继续。")
+        return True
+
     def _queue(self, trigger: Trigger) -> None:
+        if trigger.peer_evidence:
+            return
         thread = self._thread(trigger.threads[0])
         if trigger.id not in thread.pending:
             thread.pending.append(trigger.id)
@@ -153,6 +237,7 @@ class Engine:
             trigger_id=trigger.id,
             human=trigger.human,
             context_only=context_only,
+            peer_evidence=trigger.peer_evidence,
         )
         ticket.inputs.append(item)
         if trigger.human or not self.waits_for_person(ticket):
@@ -161,7 +246,9 @@ class Engine:
         if context_only:
             trigger.context_only.append(ticket.id)
         ticket.updated_at = self.now()
-        if trigger.human and not context_only and ticket.ended_by == "executor":
+        if trigger.human and not context_only and ticket.ended_by == "executor" and (
+            not item.peer_evidence or not (ticket.attention or self.waits_for_person(ticket))
+        ):
             ticket.ended_at = ticket.ended_by = ticket.outcome = None
             ticket.assignments.append(Assignment(key("assignment", ticket.id, trigger.id), self.now()))
         self.r.tickets.save(ticket)
@@ -169,6 +256,7 @@ class Engine:
             ticket,
             human=trigger.human
             and not context_only
+            and not item.peer_evidence
             and (trigger.id not in ticket.origin_ids or ticket.mandate.strength == "explicit"),
         )
 
@@ -211,7 +299,14 @@ class Engine:
             # 旧状态没有输入序号，沿用上游时间屏障；新报告统一保存平台时间和输入序号。
             barrier = assignment.idle_at or assignment.report.at
             later_inputs = [item for item in ticket.inputs if item.at > barrier]
-        return not any(item.human and not item.context_only for item in later_inputs)
+        return not any(item.human and not item.context_only and not item.peer_evidence for item in later_inputs)
+
+    @staticmethod
+    def peer_evidence_only(ticket: Ticket) -> bool:
+        """最近一条人类输入是他人证据时，本轮只核实事实；发起人的输入仍走原授权和审批。"""
+        return next(
+            (item.peer_evidence for item in reversed(ticket.inputs) if item.human and not item.context_only), False,
+        )
 
     def pass_due(self) -> list[Evaluation]:
         """两秒兜底检查；只有已投递的评估计算超时，暂停期间冻结期限。"""
@@ -254,8 +349,25 @@ class Engine:
             self.r.threads.save(thread)
         if not self.config.paused:
             for ticket in self.r.tickets.list():
+                if ticket.ended_by == "executor" and not ticket.attention and not self.waits_for_person(ticket):
+                    self._resume_pending_peer_evidence(ticket)
                 self._wake(ticket)
         return candidates
+
+    def _resume_pending_peer_evidence(self, ticket: Ticket) -> None:
+        """收尾窗口刚到的证据留在同一任务，待原 Run 结束再开下一轮。"""
+        for item in ticket.inputs:
+            if not item.peer_evidence or item.id not in ticket.undelivered or not item.trigger_id:
+                continue
+            trigger = self.r.triggers.get(item.trigger_id)
+            origin = self.r.triggers.get(ticket.origin_id)
+            if trigger and trigger.authorized and ticket.id not in trigger.handbacks and origin and revalidate(
+                self.config, ticket.mandate, authorized=origin.authorized,
+            ):
+                ticket.ended_at = ticket.ended_by = ticket.outcome = None
+                ticket.assignments.append(Assignment(key("assignment", ticket.id, trigger.id), self.now()))
+                self.r.tickets.save(ticket)
+                return
 
     def _start(self, thread: Thread) -> Evaluation | None:
         pending = [self.r.triggers.get(identity) for identity in thread.pending]
@@ -267,8 +379,16 @@ class Engine:
             for identity in decision.trigger_ids
         }
         for trigger in pending:
-            if trigger is None or self.owners(trigger) or trigger.id in accepted:
+            if trigger is None or trigger.peer_evidence or self.owners(trigger) or trigger.id in accepted:
                 continue
+            # 发起人接单前到达的回复可能已排进评估；已有关联任务时改交原 Worker。
+            if self.config.source_kind == "feishu" and trigger.human:
+                tickets = [
+                    self.ticket(identity) for identity in thread.subscriptions if identity not in thread.context_only
+                ]
+                if tickets and not any(ticket.mandate.actor_id == trigger.actor_id for ticket in tickets):
+                    self._receive_peer_evidence(trigger, tickets)
+                    continue
             participating = any(
                 identity not in trigger.context_only
                 and (ticket := self.r.tickets.get(identity))
@@ -496,6 +616,10 @@ class Engine:
         trigger = self.r.triggers.get(trigger_id)
         if not trigger:
             raise CoordinationError("TRIGGER_NOT_FOUND")
+        if trigger.peer_evidence:
+            raise CoordinationError("PEER_EVIDENCE_ONLY")
+        if self._task_reference(trigger) is not None:
+            raise CoordinationError("TASK_REFERENCE_ALREADY_HANDLED")
         if trigger.eval_id:
             current = self.r.evaluations.get(trigger.eval_id)
             if current and current.state == "pending":
@@ -688,6 +812,8 @@ class Engine:
             raise CoordinationError("REASON_REQUIRED")
         trigger.handbacks[ticket_id] = reason
         self.r.triggers.save(trigger)
+        if trigger.peer_evidence or self._task_reference(trigger) is not None:
+            return False
         if not self.owners(trigger):
             self._queue(trigger)
             return True
@@ -698,6 +824,10 @@ class Engine:
         trigger = self.r.triggers.get(trigger_id)
         if not trigger or not trigger.authorized or self.owners(trigger):
             raise CoordinationError("LEFT_TO_WORKER")
+        if trigger.peer_evidence:
+            raise CoordinationError("PEER_EVIDENCE_ONLY")
+        if self._task_reference(trigger) is not None:
+            raise CoordinationError("TASK_REFERENCE_ALREADY_HANDLED")
         self._queue(trigger)
 
     def note(self, ticket_id: str, text: str, identity: str) -> None:
@@ -794,13 +924,13 @@ class Engine:
             raise CoordinationError("REPORT_QUESTION_CONFLICT")
         if report.question_trigger_id and not report.human_action:
             raise CoordinationError("QUESTION_TRIGGER_WITHOUT_QUESTION")
+        question_from_peer = False
         if report.question_trigger_id or report.answers:
             identity = report.question_trigger_id or report.answers
-            if not any(
-                item.trigger_id == identity and item.human and not item.context_only and item.read_at
-                for item in ticket.inputs
-            ):
+            evidence = next((item for item in ticket.inputs if item.trigger_id == identity), None)
+            if not evidence or not evidence.human or evidence.context_only or not evidence.read_at:
                 raise CoordinationError("HUMAN_INPUT_NOT_READ")
+            question_from_peer = bool(report.question_trigger_id and evidence.peer_evidence)
         if report.state == "ready" and not report.verified:
             # Weora 的交付验收比上游更严格：Worker 自报 ready 不能跳过代码计划/测试证据。
             raise CoordinationError("COMPLETION_NOT_VERIFIED")
@@ -809,12 +939,16 @@ class Engine:
         assignment.idle_at = None if report.state == "progress" else self.now()
         ticket.updated_at = self.now()
         previous_attention_id = ticket.attention_id
-        if report.human_action and report.human_action != ticket.attention:
+        ask_author = question_from_peer or self.peer_evidence_only(ticket)
+        attention_target = ticket.origin_id if ask_author else report.question_trigger_id or ticket.origin_id
+        if report.human_action and (
+            report.human_action != ticket.attention or (ask_author and attention_target != ticket.attention_trigger_id)
+        ):
             ticket.attention, ticket.attention_id = (
                 report.human_action,
                 key(assignment.id, report.at, report.human_action),
             )
-            ticket.attention_trigger_id = report.question_trigger_id or ticket.origin_id
+            ticket.attention_trigger_id = attention_target
         elif report.state == "ready" or (report.human_action_supplied and report.human_action is None):
             ticket.attention = ticket.attention_id = ticket.attention_trigger_id = None
         if previous_attention_id and previous_attention_id != ticket.attention_id:
@@ -841,6 +975,11 @@ class Engine:
             ticket.ended_at, ticket.ended_by, ticket.outcome = self.now(), "executor", result
             self._release_untaken(ticket)
         self.r.tickets.save(ticket)
+        if report.human_action and ask_author:
+            origin = self.r.triggers.get(ticket.origin_id)
+            if origin and origin.authorized and ticket.attention_trigger_id == origin.id:
+                # 向原发起人的消息请求确认，不能把补充人当作批准人。
+                self.reply(origin.id, "attention", report.human_action, ticket_id=ticket.id)
         self.record_notice(
             "ticket.report",
             key(assignment.id, report.at),
@@ -858,6 +997,17 @@ class Engine:
         waiting = set(ticket.undelivered)
         ticket.undelivered.clear()
         for item in ticket.inputs:
+            if item.peer_evidence:
+                trigger = self.r.triggers.get(item.trigger_id) if item.trigger_id else None
+                if (
+                    ticket.ended_by != "human" and trigger and trigger.authorized and ticket.id not in trigger.handbacks
+                    and not item.read_at and (item.id in waiting or item.delivered_to)
+                ):
+                    # 已投递但未进入检查点的证据也需要随下一轮重投。
+                    item.delivered_to = item.delivered_at = None
+                    item.status = "pending"
+                    ticket.undelivered.append(item.id)
+                continue
             if not item.trigger_id or (item.id not in waiting and item.read_at and item.read_at <= until):
                 continue
             trigger = self.r.triggers.get(item.trigger_id)

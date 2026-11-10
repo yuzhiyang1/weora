@@ -533,10 +533,14 @@ class CoordinationService:
         if revoked:
 
             def revoke(_: Engine, current: State) -> None:
-                affected = {
+                invalid_mandates = {
                     ticket.id
                     for ticket in current.tickets
-                    if ticket.origin_id in revoked or any(item.trigger_id in revoked for item in ticket.inputs)
+                    if ticket.origin_id in revoked
+                    or any(item.trigger_id in revoked and not item.peer_evidence for item in ticket.inputs)
+                }
+                affected = invalid_mandates | {
+                    ticket.id for ticket in current.tickets if any(item.trigger_id in revoked for item in ticket.inputs)
                 }
                 for trigger in current.triggers:
                     if trigger.id in revoked:
@@ -579,8 +583,10 @@ class CoordinationService:
                 for ticket in current.tickets:
                     if ticket.id in affected:
                         ticket.attention = ticket.attention_id = ticket.attention_trigger_id = None
-                        ticket.title = "来源已失效"
-                        ticket.mandate = replace(ticket.mandate, scope="来源已失效")
+                        # 撤回补充人的证据不撤销原发起人的任务授权。
+                        if ticket.id in invalid_mandates:
+                            ticket.title = "来源已失效"
+                            ticket.mandate = replace(ticket.mandate, scope="来源已失效")
                         for item in ticket.inputs:
                             item.text = None
                         for assignment in ticket.assignments:
@@ -1197,36 +1203,47 @@ class CoordinationService:
                 )
 
         # 发送前先标记 unknown。硬退出时也不能把可能已发送的回复当 pending 重发。
-        def sending(_: Engine, current: State) -> bool:
+        def sending(_: Engine, current: State) -> str | None:
             if effect.owner is not None:
                 current.require_effect_lease(effect, datetime.now(UTC).isoformat())
             if current.config.paused or not current.config.enabled:
                 raise DeferredEffect("PROCESSING_PAUSED")
             saved = records(current).replies.get(reply.id)
             if not saved or saved.state != "pending":
-                return False
+                return None
             current_trigger = records(current).triggers.get(reply.trigger_id)
             if not current_trigger or not current_trigger.authorized:
                 raise CoordinationError("REPLY_ACCESS_REVOKED")
-            if saved.purpose == "attention":
-                ticket = records(current).tickets.get(saved.ticket_id or "")
-                if (
-                    not ticket
-                    or ticket.attention != saved.text
-                    or saved.id != key("attention", ticket.attention_id or "")
-                ):
-                    return False
+            ticket = records(current).tickets.get(saved.ticket_id or "")
+            if saved.purpose == "attention" and (
+                not ticket
+                or ticket.attention != saved.text
+                or saved.id != key("attention", ticket.attention_id or "")
+            ):
+                return None
+            if (
+                current.config.source_kind == "feishu" and saved.purpose == "ack"
+                and ticket and ticket.origin_id == saved.trigger_id
+            ):
+                if not ticket.task_id:
+                    if ticket.ended_at:
+                        return None
+                    raise DeferredEffect("TASK_NUMBER_PENDING")
+                # 回执与看板展示同一编号；在发送事务里写入正文，保留实际投递内容供对账。
+                number = f"任务 #{ticket.task_id[:8].upper()}｜"
+                saved.text = f"{number}{saved.text[:240 - len(number)]}"
             saved.state = "unknown"
             saved.sending_owner = effect.owner
-            return True
+            return saved.text
 
-        if not await self.store.transact(workspace_id, scope_id, sending):
+        text = await self.store.transact(workspace_id, scope_id, sending)
+        if text is None:
             return False
         if code_identity and self.repository_intake:
-            remote_id = await self.repository_intake.reply(code_identity, trigger, reply.text, reply.id)
+            remote_id = await self.repository_intake.reply(code_identity, trigger, text, reply.id)
         else:
             remote_id = await self.context.reader.reply(
-                connection, str(trigger.origin["message_id"]), reply.text,
+                connection, str(trigger.origin["message_id"]), text,
                 str(uuid5(NAMESPACE_URL, f"{workspace_id}:{scope_id}:{reply.id}")), image_keys=tuple(image_keys),
             )
 

@@ -28,6 +28,7 @@ def worker_facts(state: State, ticket_id: str, arguments: Json) -> Json:
         return {
             "ok": True,
             "id": identity or ticket.origin_id,
+            "peer_evidence": bool(resource == "input" and item and item.peer_evidence),
             "text": text[offset : offset + 4000],
             "chars": len(text),
             "next_offset": offset + 4000 if len(text) > offset + 4000 else None,
@@ -47,6 +48,7 @@ def worker_facts(state: State, ticket_id: str, arguments: Json) -> Json:
                 "kind": item.kind,
                 "human": item.human,
                 "context_only": item.context_only,
+                "peer_evidence": item.peer_evidence,
                 "text": text[:1200],
                 "chars": len(text),
                 "next_offset": 1200 if len(text) > 1200 else None,

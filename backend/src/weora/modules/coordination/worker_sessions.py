@@ -117,8 +117,8 @@ class WorkerSession:
             trigger = records(state).triggers.get(item.trigger_id) if item.trigger_id else None
             if trigger and not trigger.authorized:
                 continue
-            held = Engine.waits_for_person(ticket) and (not item.human or item.context_only)
-            if (ticket.attention and not item.human) or held:
+            needs_author = Engine.waits_for_person(ticket) or ticket.attention
+            if needs_author and (not item.human or item.context_only or item.peer_evidence):
                 continue
             pending.append(
                 (
@@ -130,6 +130,7 @@ class WorkerSession:
                             "kind": item.kind,
                             "human": item.human,
                             "context_only": item.context_only,
+                            "peer_evidence": item.peer_evidence,
                             "text": (trigger.text if trigger else item.text or "")[:4000],
                             "reference": "长正文使用 orchestrator_read resource=input 分段读取",
                         },

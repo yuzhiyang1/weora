@@ -21,6 +21,7 @@ from weora.modules.context.domain import ContextActor, ContextError, Json
 from weora.modules.context.service import ContextService
 from weora.modules.context.store import SqlContextStore
 from weora.modules.coordination.domain import CoordinationError
+from weora.modules.coordination.engine import task_reference
 from weora.modules.delivery.application.service import DeliveryService
 from weora.modules.delivery.domain.models import DeliveryError
 from weora.modules.delivery.infrastructure.docker import DockerSandbox
@@ -353,6 +354,9 @@ async def _pump_inbox(app: FastAPI) -> None:
                 managed = await coordinator.ingest(actor, payload)
                 if managed is not None:
                     return cast(Json, managed)
+            if payload.get("addressed") is True and task_reference(str(payload["instruction"])) is not None:
+                # 未启用协调时也不能把编号请求交给旧入口新建任务。
+                return {"rejection_code": "TASK_REFERENCE_REQUIRES_COORDINATION"}
             if payload.get("addressed") is False:
                 # 候选入库后配置被撤销，不能回退到旧入口自动创建任务。
                 raise ContextError("SOURCE_REVOKED", "主 Agent 候选配置已撤销")
