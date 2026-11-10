@@ -15,6 +15,7 @@ export type RunSummary = {
   agent_version_id: string;
   agent_name: string;
   agent_version: string;
+  task_title?: string | null;
   status: RunStatus;
   last_sequence: number;
   created_at: string;

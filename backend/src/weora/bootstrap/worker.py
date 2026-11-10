@@ -2,6 +2,7 @@
 
 import asyncio
 import re
+from dataclasses import replace
 from pathlib import Path
 from typing import cast
 from uuid import UUID, uuid4
@@ -16,6 +17,7 @@ from weora.bootstrap.harness import harness_factory
 from weora.bootstrap.run_profile import execution_profile
 from weora.bootstrap.settings import AppSettings, get_settings
 from weora.modules.agents.application.service import AgentRegistryService
+from weora.modules.collaboration.application.tasks import TaskRecord
 from weora.modules.context.channels import FeishuChannels
 from weora.modules.context.domain import ContextActor, ContextError, Json
 from weora.modules.context.service import ContextService
@@ -26,9 +28,10 @@ from weora.modules.delivery.application.service import DeliveryService
 from weora.modules.delivery.domain.models import DeliveryError
 from weora.modules.delivery.infrastructure.docker import DockerSandbox
 from weora.modules.identity.application.service import IdentityService
-from weora.modules.runs.application.execution import RunExecutor, RunLease, RuntimeFailure, TextRuntime
+from weora.modules.runs.application.execution import RunExecutor, RunLease, RuntimeFailure, RuntimeInput, TextRuntime
 from weora.modules.runs.application.ports import ExecutionProfile, RunActor
 from weora.modules.runs.application.service import RunService
+from weora.modules.runs.application.task_titles import TITLE_TIMEOUT_SECONDS, generate_next_title
 from weora.modules.runs.domain.errors import RunError
 from weora.modules.runs.infrastructure.execution_access import ModulesExecutionAccess
 from weora.modules.runs.infrastructure.execution_store import SqlAlchemyExecutionStore
@@ -54,6 +57,11 @@ celery_app.conf.update(
     worker_hijack_root_logger=False,
     beat_schedule={
         "dispatch-persisted-runs": {"task": "weora.runs.dispatch", "schedule": 5.0},
+        "generate-task-title": {
+            "task": "weora.runs.generate_title",
+            "schedule": 5.0,
+            "options": {"priority": 9, "expires": 5},
+        },
         "dispatch-superagent": {
             "task": "weora.coordination.dispatch",
             "schedule": 2.0,
@@ -61,6 +69,39 @@ celery_app.conf.update(
         },
     },
 )
+
+
+async def _generate_title() -> bool:
+    settings = get_settings()
+    deployment = execution_profile(settings)
+    if deployment is None:
+        return False
+    app = create_app(settings)
+    async with app.router.lifespan_context(app):
+        sessions = cast(SessionFactory, app.state.db_session_factory)
+
+        async def generate(task: TaskRecord, payload: RuntimeInput, frozen: ExecutionProfile) -> str:
+            principal = await app.state.identity_service.get_active_workspace_principal(
+                workspace_id=task.workspace_id, user_id=task.created_by,
+            )
+            if principal is None:
+                raise RuntimeFailure("ACCESS_REVOKED")
+            profile, api_key = await resolve_run_profile(
+                app.state.console_settings_service,
+                task.workspace_id,
+                frozen,
+                deployment,
+                settings.deepseek_api_key.get_secret_value() if settings.deepseek_api_key else "",
+            )
+            budget = min(profile.timeout_seconds, TITLE_TIMEOUT_SECONDS)
+            profile = replace(
+                profile, max_tokens=min(profile.max_tokens or 128, 128),
+                timeout_seconds=budget, execution_timeout_seconds=budget,
+            )
+            # 不装配 Agent 提示、技能、工具或会话历史，只概括原始请求。
+            return await harness_factory(settings, profile, api_key)(None, None).run(payload, profile)
+
+        return await generate_next_title(lambda: SqlAlchemyRunsUnitOfWork(sessions), generate)
 
 
 async def _execute(workspace_id: UUID, run_id: UUID) -> bool:
@@ -501,9 +542,18 @@ def dispatch_runs() -> int:
         raise RuntimeError("RUN_DISPATCH_INFRASTRUCTURE_ERROR") from None
 
 
+def generate_task_title() -> bool:
+    """低优先级命名任务，生命周期独立于正式 Run。"""
+    try:
+        return asyncio.run(_generate_title())
+    except Exception:
+        raise RuntimeError("TASK_TITLE_INFRASTRUCTURE_ERROR") from None
+
+
 # 保留普通函数的类型，避免无类型 Celery 装饰器污染应用层签名。
 celery_app.task(name="weora.runs.execute")(execute_run)
 
 celery_app.task(name="weora.coordination.execute")(execute_effect)
 celery_app.task(name="weora.coordination.dispatch")(dispatch_effects)
 celery_app.task(name="weora.runs.dispatch")(dispatch_runs)
+celery_app.task(name="weora.runs.generate_title")(generate_task_title)

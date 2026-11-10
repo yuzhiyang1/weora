@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock
 from uuid import UUID
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from tests.api.test_runs import runs as runs
 from tests.api.test_task_collaboration import member
@@ -20,6 +20,7 @@ from tests.coordination.test_engine import result
 from weora.bootstrap import worker as worker_bootstrap
 from weora.bootstrap.coordination import dispatch
 from weora.bootstrap.worker import _pump_context
+from weora.modules.collaboration.infrastructure.tasks import TaskModel
 from weora.modules.computers.openbot import ComputerError, OpenBot
 from weora.modules.computers.policy import ComputerMode
 from weora.modules.computers.tools import register_computer_tools
@@ -269,6 +270,20 @@ async def test_unmentioned_inbox_decision_worker_run_report_reply_and_task_conti
     ticket = state.tickets[0]
     assert ticket.id == ticket_id and ticket.task_id and ticket.assignments[0].run_id
     first_id = UUID(ticket.assignments[0].run_id)
+    first = await h.client.get(f"{h.base}/runs/{first_id}", headers=h.headers)
+    assert first.status_code == 200, first.text
+    assert first.json()["task_title"] == ticket.title
+    listed = await h.client.get(f"{h.base}/runs", headers=h.headers)
+    assert listed.json()["items"][0]["task_title"] == ticket.title
+    async with h.original.sessions() as session, session.begin():
+        task_id = UUID(ticket.task_id)
+        assert await session.scalar(select(TaskModel.title).where(TaskModel.id == task_id)) == ticket.title
+        if followup == "root":
+            # 模拟升级前没有标题快照的任务，仍应读到当时的接单标题。
+            await session.execute(update(TaskModel).where(TaskModel.id == task_id).values(title=None))
+    if followup == "root":
+        historical = await h.client.get(f"{h.base}/runs/{first_id}", headers=h.headers)
+        assert historical.json()["task_title"] == ticket.title
     store = SqlAlchemyExecutionStore(h.original.sessions)
     lease = await store.claim(workspace_id=workspace_id, run_id=first_id, owner="test", lease_seconds=30)
     assert lease
@@ -374,6 +389,8 @@ async def test_unmentioned_inbox_decision_worker_run_report_reply_and_task_conti
     latest = state.tickets[0]
     assert latest.task_id == ticket.task_id
     assert latest.assignments[-1].run_id != str(first_id)
+    continued = await h.client.get(f"{h.base}/runs/{latest.assignments[-1].run_id}", headers=h.headers)
+    assert continued.json()["task_title"] == ticket.title
     # 同一 Task 的后续汇总可以使用前一轮截图，不必重新操作网站。
     inherited = await delivery.reply_screenshots(
         h.actor, UUID(str(latest.assignments[-1].run_id)), artifact_ids=(str(screenshot.id),)
@@ -390,6 +407,8 @@ async def test_unmentioned_inbox_decision_worker_run_report_reply_and_task_conti
         lambda old: dict(old or {}, expires_at=(datetime.now(UTC) - timedelta(seconds=1)).isoformat()),
     )
     assert {first_id, UUID(str(latest.assignments[-1].run_id))} <= await h.context.expired_run_ids(workspace_id)
+    expired = await h.client.get(f"{h.base}/runs", headers=h.headers)
+    assert all(item["task_title"] is None for item in expired.json()["items"])
 
 
 @pytest.mark.anyio

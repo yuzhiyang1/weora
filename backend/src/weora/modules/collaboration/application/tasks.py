@@ -6,6 +6,12 @@ from typing import Literal, Protocol
 from uuid import UUID
 
 
+def summarize_task_title(text: str, limit: int = 48) -> str:
+    """用单行摘要做标题，保留原请求供任务详情读取。"""
+    title = " ".join(text.split())
+    return title if len(title) <= limit else title[: limit - 1].rstrip() + "…"
+
+
 @dataclass(frozen=True, slots=True)
 class TaskRecord:
     """固定发起人与初始目标的持续任务；受众由 audience 决定，执行状态由各次 Run 表达。"""
@@ -20,6 +26,16 @@ class TaskRecord:
     origin_metadata: dict[str, object] | None = None
     # 冻结本次选中项目/仓库的白名单资料，不含凭据；更新项目不会回写历史任务。
     project_context: dict[str, object] | None = None
+    # 私有运行标题与显式发布到协作区的标题各自独立。
+    title: str | None = None
+
+    @property
+    def display_title(self) -> str:
+        if self.title:
+            return self.title
+        if self.audience == "group":
+            return "仓库任务" if self.origin == "code_hosting" else "飞书任务"
+        return summarize_task_title(self.instruction) or "未命名任务"
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,6 +104,10 @@ class TaskStore(Protocol):
     async def add(self, task: TaskRecord) -> None: ...
 
     async def get_private(self, *, workspace_id: UUID, task_id: UUID, user_id: UUID) -> TaskRecord | None: ...
+
+    async def list_private(self, workspace_id: UUID, user_id: UUID, task_ids: set[UUID]) -> list[TaskRecord]: ...
+    async def claim_title(self, now: datetime, lease_until: datetime) -> TaskRecord | None: ...
+    async def finish_title(self, task: TaskRecord, lease_until: datetime, title: str | None) -> bool: ...
 
     async def purge_content(self, workspace_id: UUID, task_ids: set[UUID]) -> None: ...
 
@@ -160,6 +180,7 @@ class TaskService:
             task_id, workspace_id, user_id, str(context["instruction"]),
             datetime.fromisoformat(str(context["created_at"])),
             project_context=project if isinstance(project, dict) else None,
+            title=state.title,
         )
 
     async def create_private_console_task(self, task: TaskRecord) -> None:
@@ -178,6 +199,15 @@ class TaskService:
         """即使同工作空间管理员也不隐式获得个人任务正文。"""
         return await self._store.get_private(workspace_id=workspace_id, task_id=task_id, user_id=user_id)
 
+    async def list_private(self, workspace_id: UUID, user_id: UUID, task_ids: set[UUID]) -> list[TaskRecord]:
+        return await self._store.list_private(workspace_id, user_id, task_ids)
+
+    async def claim_title(self, now: datetime, lease_until: datetime) -> TaskRecord | None:
+        return await self._store.claim_title(now, lease_until)
+
+    async def finish_title(self, task: TaskRecord, lease_until: datetime, title: str | None) -> bool:
+        return await self._store.finish_title(task, lease_until, title)
+
     async def purge_content(self, workspace_id: UUID, task_ids: set[UUID]) -> None:
         """仅保留审计关联，不再保留已过期的请求正文副本。"""
         await self._store.purge_content(workspace_id, task_ids)
@@ -191,7 +221,10 @@ class TaskService:
         item = await self.input_for_run(task, run_id)
         if item is None:
             return task
-        return replace(task, instruction=item.instruction, origin_metadata=item.origin_metadata or task.origin_metadata)
+        return replace(
+            task, title=task.display_title if task.audience == "private" else task.title, instruction=item.instruction,
+            origin_metadata=item.origin_metadata or task.origin_metadata,
+        )
 
     async def input_for_run(self, task: TaskRecord, run_id: UUID) -> TaskInput | None:
         """只有本 Task、本发起人的持久输入才能作为续接依据。"""

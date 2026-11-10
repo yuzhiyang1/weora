@@ -24,8 +24,10 @@ def runs(postgres_runs: PostgresHarness) -> RunsHarness:
     return postgres_runs.runs
 
 
-async def test_postgres_native_task_launch_continuation_receipt_and_retention(contextual: ContextRuns) -> None:
-    await acceptance(contextual, root_present=False)
+async def test_postgres_native_task_launch_continuation_receipt_and_retention(
+    contextual: ContextRuns, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await acceptance(contextual, followup="topic", monkeypatch=monkeypatch)
 
 
 async def test_outbox_reserves_send_once_and_rejects_expired_owner(contextual: ContextRuns) -> None:
@@ -34,6 +36,9 @@ async def test_outbox_reserves_send_once_and_rejects_expired_owner(contextual: C
     workspace_id = h.context_actor.workspace_id
     await receive(h, coordinator)
     ticket_id = await decide(h, coordinator, scope_id)
+    # 飞书接单回执需要先绑定原生任务编号，之后才进入发送租约竞争。
+    state = await coordinator.store.snapshot(workspace_id, scope_id)
+    await coordinator.launch(workspace_id, scope_id, next(item for item in state.effects if item.kind == "worker"))
     answer = await coordinator.tool(
         workspace_id,
         scope_id,

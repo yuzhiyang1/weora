@@ -9,4 +9,4 @@ HarnessId = Literal["pi", "oh-my-pi"]
 PI_RUNTIME = "pi-agent-core@1.3.0"
 OMP_RUNTIME = "oh-my-pi@18.16.0"
 ToolCaller = Callable[[str, str, dict[str, object]], Awaitable[dict[str, object]]]
-HarnessFactory = Callable[[RuntimeSession | None, ToolCaller], TextRuntime]
+HarnessFactory = Callable[[RuntimeSession | None, ToolCaller | None], TextRuntime]

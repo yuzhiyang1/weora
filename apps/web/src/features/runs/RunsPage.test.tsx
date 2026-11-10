@@ -22,6 +22,7 @@ const run = {
   agent_version_id: "version-1",
   agent_name: "研发助手",
   agent_version: "1.0.0",
+  task_title: "排查登录异常",
   status: "RUNNING",
   last_sequence: 2,
   created_at: "2026-10-17T01:00:00Z",
@@ -132,7 +133,8 @@ describe("Console 运行", () => {
     window.history.replaceState({}, "", "/runs");
     mockRunRequests();
     render(<App />);
-    expect(await screen.findByText("研发助手")).toBeInTheDocument();
+    expect(await screen.findByText("排查登录异常")).toBeInTheDocument();
+    expect(screen.getByText("研发助手 · 固定版本 1.0.0")).toBeInTheDocument();
     expect(screen.getByText("运行中")).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "发起任务" }),
@@ -153,7 +155,8 @@ describe("Console 运行", () => {
     );
     render(<App />);
     // 冷启动会先加载路由及 Markdown 模块；正文安全断言应在页面就绪后执行。
-    await screen.findByRole("heading", { name: /^研发助手$/ }, { timeout: 5000 });
+    await screen.findByRole("heading", { name: "排查登录异常" }, { timeout: 5000 });
+    expect(screen.getByText(/研发助手 · 固定版本 1.0.0/)).toBeInTheDocument();
     expect(
       await screen.findByText("<img src=x onerror=alert(1)>已完成"),
     ).toBeInTheDocument();
@@ -171,20 +174,24 @@ describe("Console 运行", () => {
     mockRunRequests();
     const user = userEvent.setup();
     render(<App />);
-    expect(await screen.findByText("研发助手")).toBeInTheDocument();
+    expect(await screen.findByText("排查登录异常")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "失败" }));
     expect(screen.getByText("没有匹配的任务")).toBeInTheDocument();
     expect(screen.getByText(/筛选当前已加载的 1 项任务/)).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "全部" }));
+    const search = screen.getByRole("searchbox", { name: "搜索运行" });
+    await user.type(search, "登录异常");
+    expect(screen.getByText("排查登录异常")).toBeInTheDocument();
+    await user.clear(search);
     await user.type(
       screen.getByRole("searchbox", { name: "搜索运行" }),
       "不存在的任务",
     );
-    expect(screen.queryByText("研发助手")).not.toBeInTheDocument();
+    expect(screen.queryByText("排查登录异常")).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "清除筛选" }));
     expect(screen.getByRole("searchbox", { name: "搜索运行" })).toHaveValue("");
     expect(screen.getByRole("searchbox", { name: "搜索运行" })).toHaveFocus();
-    expect(screen.getByText("研发助手")).toBeInTheDocument();
+    expect(screen.getByText("排查登录异常")).toBeInTheDocument();
   });
 
   it("任务加载失败时可以就地重试，失败期间不显示空列表", async () => {
@@ -205,7 +212,7 @@ describe("Console 运行", () => {
     expect(screen.queryByText("还没有运行记录")).not.toBeInTheDocument();
     available = true;
     await user.click(retry);
-    expect(await screen.findByText("研发助手")).toBeInTheDocument();
+    expect(await screen.findByText("排查登录异常")).toBeInTheDocument();
     expect(screen.queryByText("运行暂时无法加载")).not.toBeInTheDocument();
   });
 
