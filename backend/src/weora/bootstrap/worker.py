@@ -70,6 +70,27 @@ celery_app.conf.update(
         },
     },
 )
+if get_settings().repository_sync_enabled:
+    celery_app.conf.beat_schedule["sync-project-repositories"] = {
+        "task": "weora.projects.sync_repository",
+        "schedule": 5.0,
+        "options": {"queue": "weora.repositories.sync", "expires": 10},
+    }
+    celery_app.conf.beat_schedule["purge-retired-repositories"] = {
+        "task": "weora.projects.purge_retired_repositories",
+        "schedule": 300.0,
+        "options": {"queue": "weora.repositories.sync", "expires": 60},
+    }
+
+
+async def _sync_repository(*, purge: bool = False) -> bool:
+    settings = get_settings()
+    if not settings.repository_sync_enabled:
+        return False
+    app = create_app(settings)
+    async with app.router.lifespan_context(app):
+        sync = app.state.project_service.repository_sync
+        return bool(sync and (await sync.purge_retired() if purge else await sync.run_one()))
 
 
 async def _generate_title() -> bool:
@@ -551,6 +572,21 @@ def generate_task_title() -> bool:
         raise RuntimeError("TASK_TITLE_INFRASTRUCTURE_ERROR") from None
 
 
+def sync_repository() -> bool:
+    """Beat 唤醒同步队列，只有 PostgreSQL 领取成功的仓库才会发起 Git 请求。"""
+    try:
+        return asyncio.run(_sync_repository())
+    except Exception:
+        raise RuntimeError("REPOSITORY_SYNC_INFRASTRUCTURE_ERROR") from None
+
+
+def purge_retired_repositories() -> bool:
+    try:
+        return asyncio.run(_sync_repository(purge=True))
+    except Exception:
+        raise RuntimeError("REPOSITORY_SYNC_CLEANUP_ERROR") from None
+
+
 # 保留普通函数的类型，避免无类型 Celery 装饰器污染应用层签名。
 celery_app.task(name="weora.runs.execute")(execute_run)
 
@@ -558,3 +594,5 @@ celery_app.task(name="weora.coordination.execute")(execute_effect)
 celery_app.task(name="weora.coordination.dispatch")(dispatch_effects)
 celery_app.task(name="weora.runs.dispatch")(dispatch_runs)
 celery_app.task(name="weora.runs.generate_title")(generate_task_title)
+celery_app.task(name="weora.projects.sync_repository")(sync_repository)
+celery_app.task(name="weora.projects.purge_retired_repositories")(purge_retired_repositories)

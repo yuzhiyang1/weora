@@ -78,8 +78,25 @@ class RunRepositoryModel(Base):
     repository_id: Mapped[UUID] = mapped_column(ForeignKey("project_repositories.id"), primary_key=True)
     workspace_id: Mapped[UUID] = mapped_column(ForeignKey("workspaces.id"), index=True)
     connection_version: Mapped[int] = mapped_column(Integer())
-    revision: Mapped[str] = mapped_column(String(64))
+    revision: Mapped[str | None] = mapped_column(String(64), nullable=True)
     status: Mapped[str] = mapped_column(String(16))
     cache_id: Mapped[UUID | None] = mapped_column(nullable=True)
     error_code: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class RepositorySyncModel(Base):
+    """后台同步的领取状态和最后发布的本地提交，按连接版本隔离。"""
+
+    __tablename__ = "project_repository_syncs"
+    repository_id: Mapped[UUID] = mapped_column(ForeignKey("project_repositories.id"), primary_key=True)
+    connection_version: Mapped[int] = mapped_column(Integer(), primary_key=True)
+    workspace_id: Mapped[UUID] = mapped_column(ForeignKey("workspaces.id"), index=True)
+    cache_id: Mapped[UUID] = mapped_column(unique=True)
+    revision: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    next_sync_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    lease_id: Mapped[UUID | None] = mapped_column(nullable=True)
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(80), nullable=True)

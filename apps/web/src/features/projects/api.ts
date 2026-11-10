@@ -130,7 +130,8 @@ export const checkRepository = (
 
 export type RunRepository = {
   repository_id: string;
-  revision: string;
+  // 默认分支解析失败时还没有固定提交。
+  revision: string | null;
   status: "PREPARING" | "READY" | "FAILED";
   error_code: string | null;
 };

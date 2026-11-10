@@ -168,3 +168,36 @@ async def test_clone_cancellation_discards_only_own_uuid_directory(tmp_path: Pat
     with pytest.raises(asyncio.CancelledError):
         await task
     assert await asyncio.to_thread(lambda: list(tmp_path.iterdir())) == []
+
+
+@pytest.mark.anyio
+async def test_large_archive_is_stopped_without_discarding_synced_objects(tmp_path: Path) -> None:
+    """本地裸库允许比沙箱更大的仓库，超限归档必须停止并只清理归档文件。"""
+    stopped = asyncio.Event()
+
+    def write_oversize_archive(target: Path) -> None:
+        with target.open("wb") as archive:
+            archive.truncate(64 * 1024 * 1024 + 1)
+
+    class LargeArchive(Runner):
+        async def run(self, cwd: Path, env: Mapping[str, str], *args: str, stdin: bytes | None = None) -> bytes:
+            if args[0] != "archive":
+                return await super().run(cwd, env, *args, stdin=stdin)
+            target = Path(next(arg.removeprefix("--output=") for arg in args if arg.startswith("--output=")))
+            await asyncio.to_thread(write_oversize_archive, target)
+            try:
+                await asyncio.Event().wait()
+            finally:
+                stopped.set()
+            return b""
+
+    cache_id = uuid4()
+    root = tmp_path / str(cache_id)
+    root.mkdir()
+    retained = root / "HEAD"
+    retained.write_text("ref: refs/weora/synced", encoding="utf-8")
+    reader = GitRepositoryReader(tmp_path, runner=LargeArchive())
+    with pytest.raises(ProjectError, match="归档超过沙箱预算"):
+        async with asyncio.timeout(3):
+            await reader.archive(cache_id, REVISION)
+    assert stopped.is_set() and list(root.iterdir()) == [retained]

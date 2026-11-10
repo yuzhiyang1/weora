@@ -704,7 +704,7 @@ class CoordinationService:
                     value = engine.read_eval(eval_id)
                     for identity, data in evidence_state.items():
                         if (
-                            identity.startswith("eval_revision:")
+                            identity.startswith(("eval_revision:", "eval_repo_version:"))
                             and identity in current.checkpoints
                             and current.checkpoints[identity] != data
                         ):
@@ -852,16 +852,22 @@ class CoordinationService:
             if not self.projects or not state.config.project_id or repository_id not in state.config.repository_ids:
                 raise CoordinationError("REPOSITORY_NOT_SELECTED")
             revision_key = f"eval_revision:{evaluation.id}:{repository_id}"
-            evidence = await self.projects.assessment_read(
-                ProjectActor(actor.user_id, workspace_id),
-                UUID(state.config.project_id),
-                tuple(UUID(value) for value in state.config.repository_ids),
-                UUID(repository_id),
-                str(arguments.get("path", "")),
-                revision=cast(str | None, state.checkpoints.get(revision_key)),
-                directory=resource == "directory",
-            )
+            version_key = f"eval_repo_version:{evaluation.id}:{repository_id}"
+            try:
+                evidence = await self.projects.assessment_read(
+                    ProjectActor(actor.user_id, workspace_id),
+                    UUID(state.config.project_id),
+                    tuple(UUID(value) for value in state.config.repository_ids),
+                    UUID(repository_id),
+                    str(arguments.get("path", "")),
+                    revision=cast(str | None, state.checkpoints.get(revision_key)),
+                    connection_version=cast(int | None, state.checkpoints.get(version_key)),
+                    directory=resource == "directory",
+                )
+            except ProjectError as error:
+                raise CoordinationError(error.code) from None
             evidence_state[revision_key] = evidence["revision"]
+            evidence_state[version_key] = evidence["connection_version"]
         else:
             evidence = await self.context.channel_messages(
                 actor,

@@ -110,6 +110,12 @@ class AppSettings(BaseSettings):
     repository_private_origins: tuple[str, ...] = ()
     repository_tls_ca_files: dict[str, str] = Field(default_factory=dict)
     repository_snapshot_max_bytes: int = Field(default=134217728, ge=1048576, le=1073741824)
+    # 大仓同步独立于 Run 超时；所有进程需共同访问受控持久卷。
+    repository_sync_enabled: bool = False
+    repository_sync_timeout_seconds: int = Field(default=900, ge=60, le=3600)
+    repository_sync_interval_seconds: int = Field(default=300, ge=30, le=86400)
+    repository_sync_max_age_seconds: int = Field(default=900, ge=30, le=172800)
+    repository_sync_max_bytes: int = Field(default=2 * 1024**3, ge=1048576, le=100 * 1024**3)
     sandbox_image: str | None = None
     # 仅部署管理员启用；不因保存可写 Git 凭据而隐式获得项目执行权。
     project_sandbox_enabled: bool = False
@@ -196,6 +202,11 @@ class AppSettings(BaseSettings):
                 raise ValueError("生产审批链接必须使用 HTTPS")
         if self.readonly_repository_path and not self.readonly_repository_workspace_id:
             raise ValueError("只读仓库必须指定获授权工作空间")
+        if self.repository_sync_enabled and (
+            not self.repository_cache_path
+            or self.repository_sync_max_age_seconds <= self.repository_sync_interval_seconds
+        ):
+            raise ValueError("服务端仓库同步需要持久缓存目录，提交有效期必须长于同步间隔")
         if self.project_sandbox_enabled and (not self.sandbox_image or not self.repository_cache_path):
             raise ValueError("项目隔离执行必须配置固定镜像和只读仓库缓存")
         if self.project_sandbox_resources != ProjectSandboxResources() and not self.project_sandbox_image:
