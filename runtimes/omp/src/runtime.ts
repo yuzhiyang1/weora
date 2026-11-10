@@ -45,7 +45,8 @@ export async function runOmp(
       systemPrompt: [input.system_prompt],
       model,
       tools,
-      messages: session ? modelToolHistory(session.messages, input.tools ?? []) as unknown as AgentMessage[] : undefined,
+      // OMP 会合并初始状态。没有协调会话时也要传数组，避免覆盖它的默认消息列表。
+      messages: session ? modelToolHistory(session.messages, input.tools ?? []) as unknown as AgentMessage[] : [],
     },
     transformContext: async messages => {
       for (const message of messages as InputMessage[]) {

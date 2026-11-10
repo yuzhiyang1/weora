@@ -1,5 +1,6 @@
 """使用真实事务验证多仓提交固定、最小选择、连接变更与工具只读范围。"""
 
+import asyncio
 from dataclasses import replace
 from uuid import UUID, uuid4
 
@@ -29,6 +30,7 @@ class Reader:
         self.discarded: list[UUID] = []
         self.check_failures: set[UUID] = set()
         self.clone_failures: set[UUID] = set()
+        self.slow_clones: set[UUID] = set()
 
     async def check(self, source: RepositorySource) -> str:
         self.checked.append(source.repository_id)
@@ -38,6 +40,8 @@ class Reader:
 
     async def clone(self, source: RepositorySource, revision: str) -> UUID:
         self.cloned.append((source.repository_id, revision))
+        if source.repository_id in self.slow_clones:
+            await asyncio.Event().wait()
         if source.repository_id in self.clone_failures:
             raise ProjectError("REPOSITORY_TIMEOUT", "测试：快照拉取超时")
         return uuid4()
@@ -102,12 +106,6 @@ async def test_only_selected_cloned_fixed_across_replay_and_tool_scope(runs: Run
     assert created.status_code == 201
     data = created.json()
     run_id, actor = UUID(data["id"]), ProjectActor(UUID(runs.user_id), UUID(runs.workspace_id))
-    prepared = await service.prepare(actor, run_id, data["project_context"])
-    assert len(prepared) == 2 and all(r["status"] == "READY" for r in prepared)
-    assert {r[0] for r in reader.cloned} == {UUID(str(a["id"])), UUID(str(b["id"]))}
-    reader.revision = "b" * 40
-    assert await service.prepare(actor, run_id, data["project_context"]) == prepared
-    assert len(reader.checked) == 2 and len(reader.cloned) == 2
     lease = await runs.app.state.execution_store.claim(
         workspace_id=actor.workspace_id, run_id=run_id, owner="clone-test", lease_seconds=30
     )
@@ -118,11 +116,27 @@ async def test_only_selected_cloned_fixed_across_replay_and_tool_scope(runs: Run
         lease.fencing_token,
     )
     gateway = runs.app.state.tool_gateway
-    for r in (a, b):
-        result = await gateway.invoke(
-            scope, str(r["id"]), "repo.file.read", {"repository_id": r["id"], "path": "README.md"}
+    assert await service.run_repositories(actor, run_id) == []
+    assert reader.checked == reader.cloned == []
+    invalid = await gateway.invoke(
+        scope, "invalid-path", "repo.file.read", {"repository_id": a["id"], "path": "../README.md"}
+    )
+    assert invalid == {"ok": False, "error": {"code": "REPOSITORY_PATH_DENIED"}}
+    assert reader.checked == reader.cloned == []
+    first, second = await asyncio.gather(
+        *(
+            gateway.invoke(scope, key, "repo.file.read", {"repository_id": a["id"], "path": "README.md"})
+            for key in ("first", "concurrent")
         )
-        assert result["ok"] is True and result["revision"] == "a" * 40
+    )
+    assert first["ok"] and first["revision"] == second["revision"] == "a" * 40
+    assert set(reader.checked) == {UUID(str(a["id"]))}
+    assert {item[0] for item in reader.cloned} == set(reader.checked)
+    checks, clones = len(reader.checked), len(reader.cloned)
+    reader.revision = "b" * 40
+    replay = await gateway.invoke(scope, "follow-up", "repo.file.read", {"repository_id": a["id"], "path": "README.md"})
+    assert replay["revision"] == "a" * 40
+    assert len(reader.checked) == checks and len(reader.cloned) == clones
     denied = await gateway.invoke(
         scope, "excluded", "repo.file.read", {"repository_id": excluded["id"], "path": "README.md"}
     )
@@ -130,27 +144,32 @@ async def test_only_selected_cloned_fixed_across_replay_and_tool_scope(runs: Run
     assert "REPOSITORY_SELECTION_REQUIRED" in str(
         await gateway.invoke(scope, "missing", "repo.file.read", {"path": "README.md"})
     )
-    assert (await runs.client.get(f"{runs.path}/{run_id}/repositories")).json()["items"] == prepared
+    statuses = (await runs.client.get(f"{runs.path}/{run_id}/repositories")).json()["items"]
+    assert statuses == [{"repository_id": a["id"], "revision": "a" * 40, "status": "READY", "error_code": None}]
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("has_ready_repository", [True, False])
-async def test_run_isolates_repository_preparation_failures(runs: RunsHarness, has_ready_repository: bool) -> None:
-    """走真实准备和 Run 终态链路，分别验证部分就绪、全量失败及原提交恢复。"""
+@pytest.mark.parametrize("read_repositories", [True, False])
+async def test_run_isolates_repository_preparation_failures(
+    runs: RunsHarness, read_repositories: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """仓库超时只进入工具记录。文档任务即使绑定了不可用的仓库也能完成。"""
     profile = replace(PROFILE, timeout_seconds=30)
     runs.app.state.run_service._execution_profile = profile
     reader = Reader()
     service = runs.app.state.project_service
     service.reader = reader
     p = await project(runs)
-    dns = await repository(runs, p["id"], "a-dns")
-    android = await repository(runs, p["id"], "b-android")
-    backend = await repository(runs, p["id"], "c-backend")
-    dns_id, android_id, backend_id = (UUID(str(repo["id"])) for repo in (dns, android, backend))
-    reader.check_failures.add(dns_id)
-    reader.clone_failures.add(android_id)
-    selected = [dns, android, backend] if has_ready_repository else [dns, android]
-    created = await task(runs, p["id"], [repo["id"] for repo in selected])
+    unused = await repository(runs, p["id"], "unused")
+    android = await repository(runs, p["id"], "android")
+    backend = await repository(runs, p["id"], "backend")
+    android_id, backend_id = (UUID(str(repo["id"])) for repo in (android, backend))
+    reader.slow_clones.add(android_id)
+    reader.check_failures.add(UUID(str(unused["id"])))
+    if not read_repositories:
+        reader.check_failures.add(backend_id)
+    monkeypatch.setattr("weora.modules.projects.service.REPOSITORY_PREPARATION_TIMEOUT_SECONDS", 1)
+    created = await task(runs, p["id"], [repo["id"] for repo in (unused, android, backend)])
     assert created.status_code == 201, created.text
     data = created.json()
     run_id = UUID(data["id"])
@@ -168,14 +187,16 @@ async def test_run_isolates_repository_preparation_failures(runs: RunsHarness, h
         async def run(self, payload: RuntimeInput, profile: ExecutionProfile) -> str:
             scope = ToolScope(run_id, actor, self.lease.owner, self.lease.fencing_token)
             gateway = runs.app.state.tool_gateway
-            read = await gateway.invoke(
-                scope, "backend", "repo.file.read", {"repository_id": str(backend_id), "path": "README.md"}
-            )
-            assert read["ok"] is True and read["revision"] == "a" * 40
-            failed = await gateway.invoke(
-                scope, "android", "repo.file.read", {"repository_id": str(android_id), "path": "README.md"}
-            )
-            assert failed == {"ok": False, "error": {"code": "REPOSITORY_TIMEOUT"}}
+            assert reader.checked == reader.cloned == []
+            if read_repositories:
+                failed = await gateway.invoke(
+                    scope, "android", "repo.file.read", {"repository_id": str(android_id), "path": "README.md"}
+                )
+                assert failed == {"ok": False, "error": {"code": "REPOSITORY_TIMEOUT"}}
+                read = await gateway.invoke(
+                    scope, "backend", "repo.file.read", {"repository_id": str(backend_id), "path": "README.md"}
+                )
+                assert read["ok"] is True and read["revision"] == "a" * 40
             return await super().run(payload, profile)
 
     runtime = RepositoryRuntime()
@@ -196,31 +217,30 @@ async def test_run_isolates_repository_preparation_failures(runs: RunsHarness, h
     assert await executor.execute(workspace_id=actor.workspace_id, run_id=run_id, owner="repository-test")
     result = (await runs.client.get(f"{runs.path}/{run_id}")).json()
     statuses = (await runs.client.get(f"{runs.path}/{run_id}/repositories")).json()["items"]
-    by_id = {repo["repository_id"]: repo for repo in statuses}
-    assert by_id[str(dns_id)] == {
-        "repository_id": str(dns_id),
-        "status": "FAILED",
-        "revision": None,
-        "error_code": "REPOSITORY_DNS_FAILED",
-    }
-    assert by_id[str(android_id)]["status"] == "FAILED" and by_id[str(android_id)]["revision"] == "a" * 40
-    if has_ready_repository:
-        assert result["status"] == "SUCCEEDED" and by_id[str(backend_id)]["status"] == "READY"
-        assert len(runtime.calls) == 1
-        assert "REPOSITORY_TIMEOUT" in runtime.calls[0].instruction
-        assert "报告 blocked" in runtime.calls[0].instruction
-    else:
-        assert result["status"] == "FAILED" and result["failure_code"] == "PROJECT_REPOSITORIES_UNAVAILABLE"
-        assert runtime.calls == []
+    assert result["status"] == "SUCCEEDED" and len(runtime.calls) == 1
+    if not read_repositories:
+        assert statuses == [] and reader.checked == reader.cloned == []
+        return
 
-    # 恢复只为未解析仓库查分支，已固定的仓库继续用原提交。
-    reader.check_failures.clear()
-    reader.clone_failures.clear()
+    by_id = {repo["repository_id"]: repo for repo in statuses}
+    assert set(by_id) == {str(android_id), str(backend_id)}
+    assert by_id[str(android_id)] == {
+        "repository_id": str(android_id),
+        "status": "FAILED",
+        "revision": "a" * 40,
+        "error_code": "REPOSITORY_TIMEOUT",
+    }
+    assert by_id[str(backend_id)]["status"] == "READY"
+
+    # 失败后重读沿用之前固定的提交，即使远端默认分支已经前进。
+    reader.slow_clones.clear()
     reader.revision = "b" * 40
-    recovered = await service.prepare(ProjectActor(actor.user_id, actor.workspace_id), run_id, data["project_context"])
-    assert all(repo["status"] == "READY" for repo in recovered)
-    assert reader.checked.count(android_id) == 1 and reader.cloned.count((android_id, "a" * 40)) == 2
-    assert (dns_id, "b" * 40) in reader.cloned
+    recovered = await service.read_file(
+        ProjectActor(actor.user_id, actor.workspace_id), run_id, data["project_context"], android_id, "README.md"
+    )
+    assert recovered["revision"] == "a" * 40
+    assert reader.checked == [android_id, backend_id]
+    assert reader.cloned.count((android_id, "a" * 40)) == 2
 
 
 @pytest.mark.anyio
@@ -242,9 +262,11 @@ async def test_connection_check_and_change_invalidate_old_run_binding(runs: Runs
     assert changed.json()["repositories"][0]["connection_status"] == "registered"
     assert (await runs.client.get(f"{runs.path}/{created.json()['id']}")).status_code == 404
     with pytest.raises(ProjectError, match="授权已变化"):
-        await service.prepare(
+        await service.read_file(
             ProjectActor(UUID(runs.user_id), UUID(runs.workspace_id)),
             UUID(created.json()["id"]),
             created.json()["project_context"],
+            UUID(str(repo["id"])),
+            "README.md",
         )
     assert reader.cloned == []

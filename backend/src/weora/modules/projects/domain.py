@@ -1,7 +1,7 @@
 """项目资料是模型参考数据；登记仓库不等于授予网络、代码执行或推送权限。"""
 
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Protocol, runtime_checkable
 from urllib.parse import urlsplit
 from uuid import UUID
@@ -99,3 +99,23 @@ def git_address(value: str) -> str:
         path = url.path.rstrip("/")
         value = url._replace(path=path if path.endswith(".git") else path + ".git").geturl()
     return value
+
+
+def validate_repository_file_path(path: str) -> None:
+    """在读取或准备仓库前拒绝越界路径和常见凭据文件。"""
+    parts = PurePosixPath(path).parts
+    if (
+        not parts
+        or path.startswith("/")
+        or any(ord(c) < 32 for c in path)
+        or "\\" in path
+        or ":" in path
+        or any(
+            p in {"..", "."}
+            or p != p.rstrip(" .")
+            or p.casefold() in {".git", ".env", ".npmrc", ".pypirc", "id_rsa", "id_ed25519"}
+            or p.casefold().startswith(".env.")
+            for p in parts
+        )
+    ):
+        raise ProjectError("REPOSITORY_PATH_DENIED", "文件路径不可读取")

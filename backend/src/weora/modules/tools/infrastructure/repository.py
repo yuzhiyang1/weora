@@ -20,6 +20,8 @@ READ_FILE = ToolSpec(
         "required": ["path"],
         "additionalProperties": False,
     },
+    # 兼容首次远端准备，Git 准备预算为 90 秒，余量用于受控读取与记录。
+    timeout_seconds=100,
 )
 
 

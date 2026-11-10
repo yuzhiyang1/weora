@@ -36,10 +36,18 @@ async def test_selected_revision_export_has_no_default_fallback_and_rechecks_acc
     created = (await task(runs, p["id"], [a["id"]])).json()
     actor = RunActor(UUID(runs.user_id), UUID(runs.workspace_id))
     run_id = UUID(created["id"])
-    await projects.prepare(ProjectActor(actor.user_id, actor.workspace_id), run_id, created["project_context"])
     docker = CaptureDocker(archive)
     bridge = ProjectExecution(projects, runs.app.state.run_service, docker, enabled=True)
     scope = PlanScope(str(a["id"]), "a" * 40, ("src",), (), ("file.write", "git.diff"))
+    with pytest.raises(DeliveryError, match="尚未准备固定提交"):
+        await bridge.validate(actor, run_id, scope)
+    await projects.read_file(
+        ProjectActor(actor.user_id, actor.workspace_id),
+        run_id,
+        created["project_context"],
+        UUID(str(a["id"])),
+        "README.md",
+    )
     await bridge.validate(actor, run_id, scope)
     for bad in [replace(scope, repository_id=str(b["id"])), replace(scope, base_revision="b" * 40)]:
         with pytest.raises(DeliveryError):

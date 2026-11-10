@@ -9,6 +9,8 @@ export default defineConfig({
   html: {
     title: "Weora",
     template: "./index.html",
+    // 让开发服务和生产构建使用同一份浏览器标签页图标。
+    favicon: "./src/components/brand/favicon.svg",
   },
   output: {
     // 随浏览器产物分发实际复用组件的版权与许可声明。

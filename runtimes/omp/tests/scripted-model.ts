@@ -10,6 +10,7 @@ const model = createMockModel({
     const text = last?.role === 'user' && Array.isArray(last.content)
       ? last.content.find(block => block.type === 'text')?.text
       : undefined;
+    if (text === '普通运行检查') return { content: ['已完成'] };
     if (text === '恢复检查') {
       const restored = JSON.stringify(context.messages.slice(0, -1)).includes('审批记录标记');
       return { content: [restored ? '已恢复' : '历史缺失'] };

@@ -1,7 +1,7 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Copy, Ellipsis, UserPlus } from "lucide-react";
 import { Dropdown } from "@heroui/react";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import {
   Avatar,
   Banner,
@@ -62,6 +62,34 @@ const dialogTitles = {
   remove: "移除成员？",
 };
 
+function copyWithSelection(url: string, linkInput: HTMLInputElement | null) {
+  const previousFocus = document.activeElement;
+  const input = linkInput ?? document.createElement("input");
+  if (!linkInput) {
+    // 列表没有链接输入框，临时添加只读输入框供浏览器选中文本。
+    input.value = url;
+    input.readOnly = true;
+    input.tabIndex = -1;
+    Object.assign(input.style, { position: "fixed", top: "0", opacity: "0" });
+    document.body.append(input);
+  }
+  try {
+    // 弹窗内复用可见输入框，避免焦点被弹窗拦回；失败时也能直接手动复制。
+    input.focus({ preventScroll: true });
+    input.select();
+    return document.execCommand("copy");
+  } catch {
+    return false;
+  } finally {
+    if (!linkInput) {
+      input.remove();
+      if (previousFocus instanceof HTMLElement) {
+        previousFocus.focus({ preventScroll: true });
+      }
+    }
+  }
+}
+
 export function WorkspaceMembersPage() {
   const { principal } = useAuth();
   if (!principal) throw new Error("缺少工作空间身份");
@@ -89,6 +117,7 @@ export function WorkspaceMembersPage() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const linkInput = useRef<HTMLInputElement>(null);
 
   function open(next: Dialog | null) {
     setDialog(next);
@@ -121,14 +150,19 @@ export function WorkspaceMembersPage() {
   }
 
   async function copy(url: string) {
-    try {
-      await navigator.clipboard.writeText(url);
-      setNotice("已复制邀请链接");
-      return true;
-    } catch {
-      // 剪贴板受浏览器权限或 HTTP 限制时，保留原链接供用户手动复制。
-      return false;
+    if (navigator.clipboard?.writeText) {
+      try {
+        await navigator.clipboard.writeText(url);
+        setNotice("已复制邀请链接");
+        return true;
+      } catch {
+        // 浏览器拒绝 Clipboard API 时，继续尝试基于选区的复制。
+      }
     }
+    // 局域网 HTTP 页面没有 Clipboard API，直接在本次点击中复制选区。
+    const copied = copyWithSelection(url, linkInput.current);
+    if (copied) setNotice("已复制邀请链接");
+    return copied;
   }
 
   function create() {
@@ -418,6 +452,7 @@ export function WorkspaceMembersPage() {
                 </p>
                 <div className="workspace-invite-copy">
                   <Input
+                    ref={linkInput}
                     aria-label="邀请地址"
                     value={dialog.url}
                     readOnly
@@ -431,7 +466,7 @@ export function WorkspaceMembersPage() {
                         setError(
                           copied
                             ? ""
-                            : "无法访问剪贴板，请手动选中并复制上方链接。",
+                            : "无法自动复制，请手动复制下方已选中的邀请地址。",
                         );
                         if (copied) showInvites();
                       });

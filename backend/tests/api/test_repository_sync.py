@@ -101,7 +101,12 @@ async def test_background_sync_reuses_local_objects_for_runs_and_assessment(runs
         run_id = UUID(data["id"])
         snapshot = data["project_context"]
         assert snapshot["repository_source_mode"] == "service-local-v1"
-        rows = await service.prepare(actor, run_id, snapshot)
+        try:
+            await service.read_file(actor, run_id, snapshot, repo_id, "README.md")
+        except ProjectError as error:
+            # 同步缺失和最近一次失败由读取工具按仓库反馈。
+            assert error.code in {"REPOSITORY_SYNC_PENDING", "REPOSITORY_TIMEOUT"}
+        rows = await service.run_repositories(actor, run_id)
         return run_id, snapshot, rows[0]
 
     _, _, pending = await prepare("before-sync")
@@ -158,7 +163,7 @@ async def test_background_sync_reuses_local_objects_for_runs_and_assessment(runs
     await due()
     assert await sync.run_one()
     assert (await runs.client.get(repo_path + "/sync")).json()["revision"] == next_revision
-    assert (await service.prepare(actor, run_id, snapshot))[0]["revision"] == first
+    assert (await service.read_file(actor, run_id, snapshot, repo_id, "README.md"))["revision"] == first
     later_run, later_snapshot, later = await prepare("after-successful-sync")
     assert later["revision"] == next_revision
     assert (await service.read_file(actor, later_run, later_snapshot, repo_id, "README.md"))[

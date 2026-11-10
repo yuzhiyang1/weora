@@ -44,6 +44,13 @@ def omp(runs: RunsHarness) -> HarnessFactory:
 
 
 @pytest.mark.anyio
+async def test_omp_runs_without_coordination_session(omp: HarnessFactory) -> None:
+    """普通任务没有协调会话，仍应进入模型调用并正常退出子进程。"""
+    profile = replace(PROFILE, max_tokens=None, timeout_seconds=5, execution_timeout_seconds=8)
+    assert await omp(None, None).run(RuntimeInput("测试普通运行", "普通运行检查"), profile) == "已完成"
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize("decision", ["approve", "reject"])
 async def test_omp_approval_revokes_old_lease_and_resumes_checkpoint(
     runs: RunsHarness, omp: HarnessFactory, decision: str
