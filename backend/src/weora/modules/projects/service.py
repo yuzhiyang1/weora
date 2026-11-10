@@ -25,6 +25,7 @@ from weora.modules.projects.domain import (
     git_address,
 )
 from weora.modules.projects.persistence import CodeSourceModel, ProjectModel, ProjectRepositoryModel, RunRepositoryModel
+from weora.modules.projects.repository_sync import RepositorySync, utc
 from weora.shared.infrastructure.database import SessionFactory
 
 
@@ -77,6 +78,7 @@ class ProjectService:
     ) -> None:
         self.sessions, self.members, self.secrets = sessions, members, secrets
         self.reader = reader
+        self.repository_sync: RepositorySync | None = None
         # 管理员在装配层登记镜像，普通用户只能选择 ID，不能输入宿主路径或任意镜像。
         self.build_profiles: dict[str, tuple[str, str]] = {}
 
@@ -413,6 +415,8 @@ class ProjectService:
                 repo["build_profile_fingerprint"] = hashlib.sha256(configured[1].encode()).hexdigest()
         if self.reader is not None:
             snapshot["read_protocol"] = "git-objects-v1"
+            if self.repository_sync is not None:
+                snapshot["repository_source_mode"] = "service-local-v1"
             for repo in public_repos:
                 repo["execution_status"] = "pending_readonly"
         if len(json.dumps(snapshot, ensure_ascii=False).encode()) > 48000:
@@ -460,14 +464,22 @@ class ProjectService:
                 or row.connection_version != expected_version
             ):
                 raise ProjectError("PROJECT_ACCESS_REVOKED", "项目或仓库不再可读")
-            if row.credential_ciphertext and self.secrets is None:
+            return self.repository_source(row)
+
+    def repository_source(self, row: ProjectRepositoryModel) -> RepositorySource:
+        """只有已鉴权的用例或后台领取的当前连接能进入凭据装配。"""
+        token = ""
+        if row.credential_ciphertext:
+            if self.secrets is None:
                 raise ProjectError("PROJECT_SECRETS_UNAVAILABLE", "连接凭据不可用")
-            token = (
-                self.secrets.decrypt(row.credential_ciphertext) if self.secrets and row.credential_ciphertext else ""
-            )
-            return RepositorySource(
-                actor.workspace_id, row.id, git_address(row.git_url), row.default_branch, row.credential_username, token
-            )
+            try:
+                token = self.secrets.decrypt(row.credential_ciphertext)
+            except Exception:
+                # 凭据提供方的解密异常可能携带内部细节，统一转为安全业务错误。
+                raise ProjectError("PROJECT_SECRETS_UNAVAILABLE", "连接凭据不可用") from None
+        return RepositorySource(
+            row.workspace_id, row.id, git_address(row.git_url), row.default_branch, row.credential_username, token
+        )
 
     async def check_connection(
         self, actor: ProjectActor, project_id: UUID, repository_id: UUID, version: int
@@ -509,8 +521,25 @@ class ProjectService:
             )
             if changed.rowcount != 1:  # type: ignore[attr-defined]
                 raise ProjectError("PROJECT_CHANGED", "校验期间连接已变化，请刷新重试")
+            if self.repository_sync is not None and result["status"] == "connected":
+                current = await session.get(ProjectRepositoryModel, repository_id)
+                assert current is not None
+                await self.repository_sync.enqueue(session, current)
             await session.commit()
         return result
+
+    async def sync_status(self, actor: ProjectActor, project_id: UUID, repository_id: UUID) -> dict[str, object]:
+        detail = await self.detail(actor, project_id)
+        repositories = cast(list[dict[str, object]], detail["repositories"])
+        repo = next((item for item in repositories if item["id"] == str(repository_id)), None)
+        if repo is None:
+            raise ProjectError("PROJECT_NOT_FOUND", "项目仓库不存在或无权访问")
+        if self.repository_sync is None:
+            return {"status": "DISABLED"}
+        if detail["status"] != "active" or repo["status"] != "active":
+            return {"status": "INACTIVE"}
+        version = int(str(repo["connection_version"]))
+        return await self.repository_sync.status(actor.workspace_id, repository_id, version)
 
     async def run_repositories(self, actor: ProjectActor, run_id: UUID) -> list[dict[str, object]]:
         await self._role(actor)
@@ -531,6 +560,7 @@ class ProjectService:
                     "revision": row.revision,
                     "status": row.status,
                     "error_code": row.error_code,
+                    **({"synced_at": utc(row.synced_at).isoformat()} if row.synced_at else {}),
                 }
                 for row in rows
             ]
@@ -547,22 +577,16 @@ class ProjectService:
                 raise ProjectError("PROJECT_ACCESS_REVOKED", "项目或连接授权已变化")
             repository_id = UUID(repo["id"])
             key = (run_id, repository_id)
-            source = await self._source(
-                actor, UUID(str(snapshot["project_id"])), repository_id, repo["connection_version"]
-            )
             async with self.sessions() as session:
                 existing = await session.get(RunRepositoryModel, key)
-            if existing is None:
-                # 首次解析成功的提交成为权威；恢复时不再跟随移动的默认分支。
-                revision = await self.reader.check(source)
-                async with self.sessions() as session:
+                if existing is None:
                     session.add(
                         RunRepositoryModel(
                             run_id=run_id,
                             repository_id=repository_id,
                             workspace_id=actor.workspace_id,
                             connection_version=repo["connection_version"],
-                            revision=revision,
+                            revision=None,
                             status="PREPARING",
                             cache_id=None,
                             error_code=None,
@@ -573,26 +597,59 @@ class ProjectService:
                         await session.commit()
                     except IntegrityError:
                         await session.rollback()
-                async with self.sessions() as session:
                     existing = await session.get(RunRepositoryModel, key)
             assert existing is not None
             if existing.status == "READY":
                 continue
+            if snapshot.get("repository_source_mode") == "service-local-v1":
+                await self._bind_synced_repository(actor, existing)
+                continue
+            source = await self._source(
+                actor, UUID(str(snapshot["project_id"])), repository_id, repo["connection_version"]
+            )
+            revision = existing.revision
             try:
-                cache_id = await self.reader.clone(source, existing.revision)
+                if revision is None:
+                    resolved = await self.reader.check(source)
+                    if not await self.authorize_snapshot(actor, snapshot):
+                        raise ProjectError("PROJECT_ACCESS_REVOKED", "解析提交期间授权已变化")
+                    async with self.sessions() as session:
+                        # 只采用第一个成功解析的提交；重试和并发执行均复用已固定的提交。
+                        await session.execute(
+                            update(RunRepositoryModel)
+                            .where(
+                                RunRepositoryModel.run_id == run_id,
+                                RunRepositoryModel.repository_id == repository_id,
+                                RunRepositoryModel.workspace_id == actor.workspace_id,
+                                RunRepositoryModel.revision.is_(None),
+                            )
+                            .values(revision=resolved, status="PREPARING", error_code=None)
+                        )
+                        await session.commit()
+                        fixed = await session.get(RunRepositoryModel, key)
+                    assert fixed is not None and fixed.revision is not None
+                    if fixed.status == "READY":
+                        continue
+                    revision = fixed.revision
+                cache_id = await self.reader.clone(source, revision)
             except ProjectError as error:
+                if error.code == "PROJECT_ACCESS_REVOKED":
+                    raise
                 async with self.sessions() as session:
                     await session.execute(
                         update(RunRepositoryModel)
                         .where(
                             RunRepositoryModel.run_id == run_id,
                             RunRepositoryModel.repository_id == repository_id,
+                            RunRepositoryModel.workspace_id == actor.workspace_id,
+                            RunRepositoryModel.revision == revision,
                             RunRepositoryModel.cache_id.is_(None),
                         )
                         .values(status="FAILED", error_code=error.code)
                     )
                     await session.commit()
-                raise
+                # 仓库连接/快照故障只影响本仓；剩余仓库仍可能提供完成任务所需的证据。
+                continue
             try:
                 if not await self.authorize_snapshot(actor, snapshot):
                     raise ProjectError("PROJECT_ACCESS_REVOKED", "克隆期间授权已变化")
@@ -615,7 +672,38 @@ class ProjectService:
                 await self.reader.discard(cache_id)
                 raise
             await self.reader.discard(cache_id)  # 并发落后者只清理自己的克隆，不覆盖赢家。
+        if not await self.authorize_snapshot(actor, snapshot):
+            raise ProjectError("PROJECT_ACCESS_REVOKED", "项目或连接授权已变化")
         return await self.run_repositories(actor, run_id)
+
+    async def _bind_synced_repository(self, actor: ProjectActor, row: RunRepositoryModel) -> None:
+        values: dict[str, object]
+        try:
+            if self.repository_sync is None:
+                raise ProjectError("REPOSITORY_SYNC_DISABLED", "服务端同步当前不可用")
+            bound = await self.repository_sync.binding(actor.workspace_id, row.repository_id, row.connection_version)
+            values = {
+                "revision": bound.revision,
+                "cache_id": bound.cache_id,
+                "synced_at": bound.synced_at,
+                "status": "READY",
+                "error_code": None,
+            }
+        except ProjectError as error:
+            values = {"status": "FAILED", "error_code": error.code}
+        async with self.sessions() as session:
+            # 同一 Run 只采用第一个成功绑定的版本，后续同步不会改变已有证据。
+            await session.execute(
+                update(RunRepositoryModel)
+                .where(
+                    RunRepositoryModel.run_id == row.run_id,
+                    RunRepositoryModel.repository_id == row.repository_id,
+                    RunRepositoryModel.workspace_id == actor.workspace_id,
+                    RunRepositoryModel.cache_id.is_(None),
+                )
+                .values(**values)
+            )
+            await session.commit()
 
     async def assessment_read(
         self,
@@ -626,17 +714,26 @@ class ProjectService:
         path: str,
         *,
         revision: str | None = None,
+        connection_version: int | None = None,
         directory: bool = False,
     ) -> dict[str, object]:
-        """接单前的受限只读端口；不创建假 Run，不暴露 URL/凭据，读取完立即回收临时克隆。"""
+        """接单前读取固定提交。只有兼容旧模式的临时裸库会在读取后回收。"""
         snapshot = await self.snapshot(actor, project_id, repository_ids)
         repositories = cast(list[dict[str, object]], snapshot["repositories"])
         selected = next((item for item in repositories if item["id"] == str(repository_id)), None)
         if not selected or self.reader is None:
             raise ProjectError("REPOSITORY_NOT_SELECTED", "评估只能读取当前选中的可读仓库")
-        source = await self._source(actor, project_id, repository_id, int(str(selected["connection_version"])))
-        fixed_revision = revision or await self.reader.check(source)
-        cache = await self.reader.clone(source, fixed_revision)
+        version = int(str(selected["connection_version"]))
+        if connection_version is not None and version != connection_version:
+            raise ProjectError("PROJECT_ACCESS_REVOKED", "接单评估期间仓库连接已变化")
+        shared = self.repository_sync
+        if shared is not None:
+            bound = await shared.binding(actor.workspace_id, repository_id, version, revision)
+            cache, fixed_revision = bound.cache_id, bound.revision
+        else:
+            source = await self._source(actor, project_id, repository_id, version)
+            fixed_revision = revision or await self.reader.check(source)
+            cache = await self.reader.clone(source, fixed_revision)
         try:
             if not await self.authorize_snapshot(actor, snapshot):
                 raise ProjectError("PROJECT_ACCESS_REVOKED", "读取前项目授权已变化")
@@ -648,9 +745,14 @@ class ProjectService:
                 result = await self.reader.read(cache, fixed_revision, path)
             if not await self.authorize_snapshot(actor, snapshot):
                 raise ProjectError("PROJECT_ACCESS_REVOKED", "读取期间项目授权已变化")
-            return result | {"revision": fixed_revision, "repository_id": str(repository_id)}
+            return result | {
+                "revision": fixed_revision,
+                "repository_id": str(repository_id),
+                "connection_version": version,
+            }
         finally:
-            await self.reader.discard(cache)
+            if shared is None:
+                await self.reader.discard(cache)
 
     async def read_file(
         self, actor: ProjectActor, run_id: UUID, snapshot: dict[str, object], repository_id: UUID, path: str
@@ -663,11 +765,14 @@ class ProjectService:
             raise ProjectError("REPOSITORY_NOT_SELECTED", "仓库不在本次任务范围内")
         async with self.sessions() as session:
             row = await session.get(RunRepositoryModel, (run_id, repository_id))
+            if row and row.workspace_id == actor.workspace_id and row.status == "FAILED" and row.error_code:
+                raise ProjectError(row.error_code, "本次仓库只读快照准备失败")
             if (
                 row is None
                 or row.workspace_id != actor.workspace_id
                 or row.status != "READY"
                 or row.cache_id is None
+                or row.revision is None
                 or self.reader is None
             ):
                 raise ProjectError("PROJECT_REPOSITORY_NOT_PREPARED", "本次仓库固定提交尚未准备完成")

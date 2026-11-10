@@ -67,6 +67,7 @@ from weora.modules.projects.api import source_router
 from weora.modules.projects.code_sources import CodeSourceService
 from weora.modules.projects.domain import ProjectActor, ProjectError
 from weora.modules.projects.git_reader import GitRepositoryReader
+from weora.modules.projects.repository_sync import RepositorySync
 from weora.modules.projects.service import ProjectService
 from weora.modules.runs.api.routes import router as runs_router
 from weora.modules.runs.application.harness import OMP_RUNTIME
@@ -217,11 +218,21 @@ def create_app(
             ca_files=resolved_settings.repository_tls_ca_files,
             ssh_credentials=ConfiguredCredentials(resolved_settings.hosting_credentials),
             max_bytes=resolved_settings.repository_snapshot_max_bytes,
+            sync_timeout_seconds=resolved_settings.repository_sync_timeout_seconds,
+            sync_max_bytes=resolved_settings.repository_sync_max_bytes,
         )
         if resolved_settings.repository_cache_path
         else None
     )
-    app.state.project_service = ProjectService(session_factory, ProjectMemberships(), project_cipher, project_reader)
+    projects = ProjectService(session_factory, ProjectMemberships(), project_cipher, project_reader)
+    if project_reader is not None and resolved_settings.repository_sync_enabled:
+        projects.repository_sync = RepositorySync(
+            session_factory, project_reader, projects.repository_source,
+            timeout_seconds=resolved_settings.repository_sync_timeout_seconds,
+            interval_seconds=resolved_settings.repository_sync_interval_seconds,
+            max_age_seconds=resolved_settings.repository_sync_max_age_seconds,
+        )
+    app.state.project_service = projects
     app.state.code_source_service = CodeSourceService(session_factory, ProjectMemberships(), project_cipher)
     if resolved_settings.sandbox_image:
         app.state.project_service.build_profiles["default"] = ("基础构建环境", resolved_settings.sandbox_image)

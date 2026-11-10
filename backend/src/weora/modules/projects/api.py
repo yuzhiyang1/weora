@@ -375,3 +375,17 @@ async def check_repository(
         )
     except ProjectError as error:
         raise _error(error) from None
+
+
+@router.get("/{project_id}/repositories/{repository_id}/sync")
+async def repository_sync_status(
+    workspace_id: UUID,
+    project_id: UUID,
+    repository_id: UUID,
+    request: Request,
+    principal: Annotated[PrincipalRecord, Depends(current_principal)],
+) -> dict[str, object]:
+    try:
+        return await _service(request).sync_status(_actor(principal, workspace_id), project_id, repository_id)
+    except ProjectError as error:
+        raise _error(error) from None

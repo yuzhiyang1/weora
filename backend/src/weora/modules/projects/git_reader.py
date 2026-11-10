@@ -41,6 +41,8 @@ class GitRepositoryReader:
         ca_files: Mapping[str, str] | None = None,
         ssh_credentials: ConfiguredCredentials | None = None,
         max_bytes: int = 128 * 1024 * 1024,
+        sync_timeout_seconds: int = 600,
+        sync_max_bytes: int = 2 * 1024**3,
     ) -> None:
         self.root = root.resolve()
         self.runner = runner or IsolatedGitRunner(timeout=45)
@@ -48,6 +50,8 @@ class GitRepositoryReader:
         self.ca_files = dict(ca_files or {})
         self.ssh_credentials = ssh_credentials
         self.max_bytes = max_bytes
+        self.sync_runner = runner or IsolatedGitRunner(timeout=sync_timeout_seconds)
+        self.sync_max_bytes = sync_max_bytes
 
     def _path(self, cache_id: UUID) -> Path:
         target = self.root / str(cache_id)
@@ -172,9 +176,9 @@ class GitRepositoryReader:
             env[f"GIT_CONFIG_KEY_{index}"], env[f"GIT_CONFIG_VALUE_{index}"] = key, value
         return env
 
-    async def _run(self, path: Path, env: Mapping[str, str], *args: str) -> bytes:
+    async def _run(self, path: Path, env: Mapping[str, str], *args: str, runner: GitRunner | None = None) -> bytes:
         try:
-            return await self.runner.run(path, env, *args)
+            return await (runner or self.runner).run(path, env, *args)
         except TimeoutError:
             raise ProjectError("REPOSITORY_TIMEOUT", "仓库连接或读取超时") from None
         except DeliveryError:
@@ -205,6 +209,114 @@ class GitRepositoryReader:
                     size += entry.stat().st_size
         return size
 
+    async def _run_bounded(
+        self,
+        path: Path,
+        env: Mapping[str, str],
+        *args: str,
+        measure: Callable[[], int],
+        max_bytes: int,
+        error: ProjectError,
+        runner: GitRunner | None = None,
+    ) -> None:
+        process = asyncio.create_task(self._run(path, env, *args, runner=runner))
+        try:
+            while not process.done():
+                await asyncio.wait({process}, timeout=0.2)
+                if await asyncio.to_thread(measure) > max_bytes:
+                    raise error
+            await process
+        finally:
+            if not process.done():
+                process.cancel()
+            with suppress(asyncio.CancelledError, ProjectError):
+                await process
+
+    async def _fetch(
+        self, path: Path, env: Mapping[str, str], *args: str, max_bytes: int, runner: GitRunner | None = None
+    ) -> None:
+        await self._run_bounded(
+            path,
+            env,
+            "fetch",
+            *args,
+            measure=lambda: self._size(path),
+            max_bytes=max_bytes,
+            error=ProjectError("REPOSITORY_SIZE_LIMIT", "仓库超出本地存储预算"),
+            runner=runner,
+        )
+
+    async def sync(self, source: RepositorySource, cache_id: UUID) -> str:
+        """后台更新服务端裸库。旧提交有独立引用，运行只读取已发布的 SHA。"""
+        source = replace(source, git_url=git_address(source.git_url))
+        revision = await self.check(source)
+        path = self._path(cache_id)
+        created = not path.exists()
+        if created:
+            await asyncio.to_thread(path.mkdir, parents=True, exist_ok=False)
+        try:
+            return await self._sync_objects(path, source, revision)
+        except BaseException:
+            # 仅清理本次新建、尚未发布的目录，增量同步失败后旧提交仍需供已有任务读取。
+            if created:
+                await self.discard(cache_id)
+            raise
+
+    async def _sync_objects(self, path: Path, source: RepositorySource, revision: str) -> str:
+        env = await self._environment(path, source)
+        object_format = "sha256" if len(revision) == 64 else "sha1"
+        if not (path / "HEAD").is_file():
+            await self._run(path, env, "init", "--bare", f"--object-format={object_format}", "--template=", ".")
+        retained = f"refs/weora/commits/{revision}"
+        if await asyncio.to_thread(self._size, path) > self.sync_max_bytes:
+            raise ProjectError("REPOSITORY_SIZE_LIMIT", "仓库超出本地存储预算")
+        try:
+            if revision_id(await self._run(path, env, "rev-parse", "--verify", retained + "^{commit}")) == revision:
+                return revision
+        except ProjectError as error:
+            if error.code != "REPOSITORY_GIT_FAILED":
+                raise
+        # 同步引用提供下一次协商的已有对象。首次只取一个提交，后续复用已下载的内容。
+        depth = () if (path / "refs" / "weora" / "synced").is_file() else ("--depth=1",)
+        await self._fetch(
+            path,
+            env,
+            "--no-tags",
+            "--no-auto-gc",
+            "--no-write-fetch-head",
+            "--no-recurse-submodules",
+            *depth,
+            "--",
+            source.git_url,
+            f"+{revision}:refs/weora/synced",
+            max_bytes=self.sync_max_bytes,
+            runner=self.sync_runner,
+        )
+        actual = revision_id(await self._run(path, env, "rev-parse", "--verify", "refs/weora/synced^{commit}"))
+        if actual != revision:
+            raise ProjectError("REPOSITORY_REVISION_MISMATCH", "同步结果与目标提交不一致")
+        await self._run(path, env, "update-ref", retained, revision)
+        return revision
+
+    async def has_synced_revision(self, cache_id: UUID, revision: str) -> bool:
+        revision_id(revision.encode())
+        path = self._path(cache_id)
+        if not (path / "HEAD").is_file():
+            return False
+        try:
+            actual = await self._run(
+                path,
+                await self._environment(path),
+                "rev-parse",
+                "--verify",
+                f"refs/weora/commits/{revision}^{{commit}}",
+            )
+        except ProjectError as error:
+            if error.code == "REPOSITORY_GIT_FAILED":
+                return False
+            raise
+        return revision_id(actual) == revision
+
     async def clone(self, source: RepositorySource, revision: str) -> UUID:
         source = replace(source, git_url=git_address(source.git_url))
         revision_id(revision.encode())
@@ -215,30 +327,17 @@ class GitRepositoryReader:
             env = await self._environment(path, source)
             object_format = "sha256" if len(revision) == 64 else "sha1"
             await self._run(path, env, "init", "--bare", f"--object-format={object_format}", "--template=", ".")
-            fetch = asyncio.create_task(
-                self._run(
-                    path,
-                    env,
-                    "fetch",
-                    "--no-tags",
-                    "--depth=1",
-                    "--no-recurse-submodules",
-                    "--",
-                    source.git_url,
-                    revision,
-                )
+            await self._fetch(
+                path,
+                env,
+                "--no-tags",
+                "--depth=1",
+                "--no-recurse-submodules",
+                "--",
+                source.git_url,
+                revision,
+                max_bytes=self.max_bytes,
             )
-            try:
-                while not fetch.done():
-                    await asyncio.wait({fetch}, timeout=0.2)
-                    if await asyncio.to_thread(self._size, path) > self.max_bytes:
-                        raise ProjectError("REPOSITORY_SIZE_LIMIT", "仓库超出当前只读快照大小限制")
-                await fetch
-            finally:
-                if not fetch.done():
-                    fetch.cancel()
-                with suppress(asyncio.CancelledError, ProjectError):
-                    await fetch
             actual = revision_id(await self._run(path, env, "rev-parse", "--verify", revision + "^{commit}"))
             if actual != revision:
                 raise ProjectError("REPOSITORY_REVISION_MISMATCH", "仓库提交与固定快照不一致")
@@ -324,11 +423,28 @@ class GitRepositoryReader:
         revision_id(revision.encode())
         root = self._path(cache_id)
         target = root / ("weora-export-" + uuid4().hex + ".tar")
+        limit = 64 * 1024 * 1024
+
+        def archive_size() -> int:
+            try:
+                return target.stat().st_size
+            except FileNotFoundError:
+                return 0
+
         try:
-            await self._run(
-                root, await self._environment(root), "archive", "--format=tar", "--output=" + str(target), revision
+            # 同步裸库可容纳大仓，归档仍在生成过程中遵守原沙箱预算。
+            await self._run_bounded(
+                root,
+                await self._environment(root),
+                "archive",
+                "--format=tar",
+                "--output=" + str(target),
+                revision,
+                measure=archive_size,
+                max_bytes=limit,
+                error=ProjectError("REPOSITORY_ARCHIVE_LIMIT", "固定提交归档超过沙箱预算"),
             )
-            if target.is_symlink() or target.resolve().parent != root or target.stat().st_size > 64 * 1024 * 1024:
+            if target.is_symlink() or target.resolve().parent != root or target.stat().st_size > limit:
                 raise ProjectError("REPOSITORY_ARCHIVE_LIMIT", "固定提交归档超过沙箱预算或路径无效")
             digest = await asyncio.to_thread(lambda: hashlib.sha256(target.read_bytes()).hexdigest())
             return RepositoryArchive(target, revision, digest)
