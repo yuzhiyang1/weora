@@ -329,16 +329,27 @@ describe("Console 运行", () => {
     ).toBe(JSON.stringify({ mode: "read_only" }));
   });
 
-  it("SSE从已交付序号续读，撤权事件立即隐藏正文", async () => {
+  it("通过单条状态流更新详情，事实记录首次打开才读历史", async () => {
     vi.stubGlobal("EventSource", TestEventSource);
     window.history.replaceState({}, "", "/runs/run-1");
-    mockRunRequests();
+    let current = run;
+    const mock = mockRunRequests((path) => path.endsWith("/runs/run-1") ? response(current) : undefined);
     render(<App />);
     expect(await screen.findByText(run.instruction)).toBeInTheDocument();
     await waitFor(() => expect(TestEventSource.instances).toHaveLength(1));
     const stream = TestEventSource.instances[0]!;
-    expect(stream.url).toContain("/events/stream?after=1");
+    expect(stream.url).toContain("/runs/run-1/watch");
     expect(stream.options).toEqual({ withCredentials: true });
+    expect(mock.mock.calls.some(([input]) => String(input).includes("/events?"))).toBe(false);
+    current = { ...run, status: "SUCCEEDED" };
+    act(() => {
+      stream.dispatchEvent(new MessageEvent("run_state", {
+        data: JSON.stringify({ status: current.status, last_sequence: current.last_sequence, title: null }),
+      }));
+    });
+    expect(await screen.findByText("执行成功")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("tab", { name: "事实记录" }));
+    expect(await screen.findByText("run.created")).toBeInTheDocument();
     act(() => {
       stream.dispatchEvent(new Event("access_revoked"));
     });
@@ -347,44 +358,45 @@ describe("Console 运行", () => {
     expect(stream.closed).toBe(true);
   });
 
-  it("成功终态和SSE收尾后仍定期复验，来源撤权隐藏回答并清除相关缓存", async () => {
+  it("成功终态轮换SSE后不轮询详情和事件，撤权仍清除正文缓存", async () => {
     vi.stubGlobal("EventSource", TestEventSource);
     window.history.replaceState({}, "", "/runs/run-1");
-    let allowed = true;
-    let reads = 0;
     const removed = vi.spyOn(QueryClient.prototype, "removeQueries");
-    mockRunRequests((path) => {
+    const mock = mockRunRequests((path) => {
       if (!path.endsWith("/runs/run-1")) return undefined;
-      reads += 1;
-      return allowed
-        ? response({
+      return response({
             ...run,
             status: "SUCCEEDED",
             output_text: "只能在有效授权下继续展示的答案",
-          })
-        : response(
-            { detail: { code: "SOURCE_REVOKED", message: "来源授权已撤销" } },
-            403,
-          );
+          });
     });
     render(<App />);
     expect(
       await screen.findByText("只能在有效授权下继续展示的答案"),
     ).toBeInTheDocument();
     await waitFor(() => expect(TestEventSource.instances).toHaveLength(1));
-    act(() => {
-      TestEventSource.instances[0]!.dispatchEvent(new Event("stream_end"));
-    });
-    allowed = false;
-    // 事件接口仍可读，确认撤权是终态详情的低频复验发现，而非依赖 SSE 通知。
-    expect(
-      await screen.findByText("无法访问此任务", {}, { timeout: 7000 }),
-    ).toBeInTheDocument();
+    vi.useFakeTimers();
+    try {
+      act(() => {
+        TestEventSource.instances[0]!.dispatchEvent(new Event("stream_rotate"));
+      });
+      await act(() => vi.advanceTimersByTimeAsync(400));
+      expect(TestEventSource.instances).toHaveLength(2);
+      for (let index = 0; index < 120; index++) {
+        act(() => TestEventSource.instances[1]!.dispatchEvent(new Event("access_confirmed")));
+        await act(() => vi.advanceTimersByTimeAsync(5000));
+      }
+      const reads = mock.mock.calls.filter(([input]) => String(input).includes("/runs/run-1"));
+      expect(reads.map(([input]) => String(input))).toEqual(["/api/v1/workspaces/workspace-1/runs/run-1"]);
+    } finally {
+      vi.useRealTimers();
+    }
+    act(() => TestEventSource.instances[1]!.dispatchEvent(new Event("access_revoked")));
+    expect(await screen.findByText("无法访问此任务")).toBeInTheDocument();
     expect(
       screen.queryByText("只能在有效授权下继续展示的答案"),
     ).not.toBeInTheDocument();
     expect(screen.queryByText(run.instruction)).not.toBeInTheDocument();
-    expect(reads).toBeGreaterThanOrEqual(2);
     const client = removed.mock.contexts.find(
       (value) => value instanceof QueryClient,
     )!;
@@ -415,6 +427,34 @@ describe("Console 运行", () => {
       );
     }
   }, 10000);
+
+  it("实时接口持续失败时退避并停止重试，正文和两路轮询都不恢复", async () => {
+    vi.stubGlobal("EventSource", TestEventSource);
+    window.history.replaceState({}, "", "/runs/run-1");
+    const mock = mockRunRequests();
+    render(<App />);
+    expect(await screen.findByText(run.instruction)).toBeInTheDocument();
+    await waitFor(() => expect(TestEventSource.instances).toHaveLength(1));
+    vi.useFakeTimers();
+    vi.spyOn(Math, "random").mockReturnValue(0);
+    try {
+      for (const [index, delay] of [1000, 2000, 4000, 8000, 16000].entries()) {
+        act(() => TestEventSource.instances.at(-1)!.onerror?.());
+        await act(() => vi.advanceTimersByTimeAsync(delay - 1));
+        expect(TestEventSource.instances).toHaveLength(index + 1);
+        await act(() => vi.advanceTimersByTimeAsync(1));
+        expect(TestEventSource.instances).toHaveLength(index + 2);
+      }
+      act(() => TestEventSource.instances.at(-1)!.onerror?.());
+      await act(() => vi.advanceTimersByTimeAsync(60_000));
+      expect(TestEventSource.instances).toHaveLength(6);
+      expect(screen.getByRole("button", { name: "重试连接" })).toBeInTheDocument();
+      expect(screen.queryByText(run.instruction)).not.toBeInTheDocument();
+      expect(mock.mock.calls.filter(([input]) => String(input).includes("/runs/run-1"))).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 
   it.each([401, 404])(
     "窗口重新聚焦时复验成功终态，HTTP %s不能继续展示缓存正文",

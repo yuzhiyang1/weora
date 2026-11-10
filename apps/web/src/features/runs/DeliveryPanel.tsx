@@ -125,21 +125,18 @@ export function DeliveryPanel({
     queryFn: () =>
       consoleRequest<{ plan: Plan | null }>(workspaceId, `${base}/plan`),
     retry: false,
-    refetchInterval: 5000,
   });
   const artifacts = useQuery({
     queryKey: [...key, "artifacts"],
     queryFn: () =>
       consoleRequest<{ items: Artifact[] }>(workspaceId, `${base}/artifacts`),
     retry: false,
-    refetchInterval: 5000,
   });
   const deliveries = useQuery({
     queryKey: [...key, "deliveries"],
     queryFn: () =>
       consoleRequest<{ items: Delivery[] }>(workspaceId, `${base}/deliveries`),
     retry: false,
-    refetchInterval: 5000,
   });
   const [decision, setDecision] = useState<Decision | null>(null);
   const [reviewedPlan, setReviewedPlan] = useState<Plan | null>(null);

@@ -3,6 +3,7 @@
 应用工厂集中完成框架装配，业务模块不能依赖这里的全局应用实例。
 """
 
+import asyncio
 from collections.abc import AsyncIterator, Callable
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import replace
@@ -79,6 +80,7 @@ from weora.modules.runs.infrastructure.models import RunModel
 from weora.modules.runs.infrastructure.module_access import RunContentGuard
 from weora.modules.runs.infrastructure.project_catalog import ProjectsModuleCatalog
 from weora.modules.runs.infrastructure.unit_of_work import SqlAlchemyRunsUnitOfWork
+from weora.modules.runs.infrastructure.watch import RunWatch
 from weora.modules.skills.api.routes import router as skills_router
 from weora.modules.skills.application.service import SkillRegistryService
 from weora.modules.skills.infrastructure.unit_of_work import SqlAlchemySkillsUnitOfWork
@@ -99,10 +101,17 @@ def create_app(
     if session_factory is None:
         owned_engine, session_factory = create_database(resolved_settings.database_url)
     object_storage = object_storage_factory(resolved_settings)
+    run_watch = RunWatch()
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         """统一释放对象存储和数据库连接池。"""
+        async def stop_listener() -> None:
+            if listener is not None:
+                listener.cancel()
+                await asyncio.gather(listener, return_exceptions=True)
+
+        listener = asyncio.create_task(run_watch.listen(owned_engine)) if owned_engine is not None else None
         try:
             yield
         finally:
@@ -116,6 +125,7 @@ def create_app(
                     cleanup.push_async_callback(app.state.github_tokens.aclose)
                 if app.state.context_reader is not None:
                     cleanup.push_async_callback(app.state.context_reader.aclose)
+                cleanup.push_async_callback(stop_listener)
 
     app = FastAPI(
         title=resolved_settings.app_name,
@@ -124,6 +134,7 @@ def create_app(
         lifespan=lifespan,
     )
     app.state.settings = resolved_settings
+    app.state.run_watch = run_watch
 
     @app.exception_handler(RequestValidationError)
     async def safe_validation_error(_: Request, error: RequestValidationError) -> JSONResponse:

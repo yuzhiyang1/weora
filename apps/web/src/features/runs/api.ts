@@ -137,8 +137,8 @@ export function listRuns(
     `/runs?limit=20${before ? `&before_id=${encodeURIComponent(before)}` : ""}`,
   );
 }
-export function getRun(workspaceId: string, runId: string): Promise<RunDetail> {
-  return consoleRequest(workspaceId, `/runs/${encodeURIComponent(runId)}`);
+export function getRun(workspaceId: string, runId: string, signal?: AbortSignal): Promise<RunDetail> {
+  return consoleRequest(workspaceId, `/runs/${encodeURIComponent(runId)}`, { signal: signal ?? null });
 }
 export function createRun(
   workspaceId: string,
@@ -175,10 +175,12 @@ export function getRunEvents(
   workspaceId: string,
   runId: string,
   after: number,
+  signal?: AbortSignal,
 ): Promise<EventPage> {
   return consoleRequest(
     workspaceId,
     `/runs/${encodeURIComponent(runId)}/events?after=${after}&limit=100`,
+    { signal: signal ?? null },
   );
 }
 export const runKey = (workspaceId: string, userId: string, runId?: string) => [

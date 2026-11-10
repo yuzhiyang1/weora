@@ -42,7 +42,6 @@ export function ToolInvocationsPanel({
         `/runs/${encodeURIComponent(runId)}/tools`,
       ),
     retry: false,
-    refetchInterval: 5000,
   });
   return (
     <section className="detail-card">
