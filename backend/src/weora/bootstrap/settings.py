@@ -86,6 +86,7 @@ class AppSettings(BaseSettings):
     omp_runtime_entry: str | None = None
     pi_model: str | None = None
     deepseek_api_key: SecretStr | None = None
+    # 兼容旧预算 API 和已有运行快照，新运行使用执行内核默认值。
     run_model_max_tokens: int = Field(default=4096, ge=1, le=16384)
     run_model_timeout_seconds: int = Field(default=120, ge=1, le=600)
     # 模型等待与包含克隆、工具的整体执行分别计时，不能让长构建消耗模型预算。

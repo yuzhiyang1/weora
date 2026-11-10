@@ -10,12 +10,10 @@ const catalog: ModelCatalog = {
   primary_id: "main",
   runtime_enabled: false,
   effective_budget: {
-    max_tokens: 4096,
     timeout_seconds: 120,
     execution_timeout_seconds: 1800,
   },
   budget: {
-    max_tokens: null,
     timeout_seconds: null,
     execution_timeout_seconds: null,
   },

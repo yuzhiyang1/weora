@@ -10,19 +10,19 @@ afterEach(() => {
 
 it("输入仍为空但生效默认值已被更新时，使用草稿原版本提交", async () => {
   const user = userEvent.setup();
+  const legacyBudget = {
+    max_tokens: 4096,
+    timeout_seconds: null,
+    execution_timeout_seconds: null,
+  };
   const catalog: ModelCatalog = {
     revision: 4,
     primary_id: "m1",
     items: [],
     providers: [],
     runtime_enabled: false,
-    budget: {
-      max_tokens: null,
-      timeout_seconds: null,
-      execution_timeout_seconds: null,
-    },
+    budget: legacyBudget,
     effective_budget: {
-      max_tokens: 4096,
       timeout_seconds: 120,
       execution_timeout_seconds: 1800,
     },
@@ -37,7 +37,8 @@ it("输入仍为空但生效默认值已被更新时，使用草稿原版本提�
     onSaved: vi.fn(),
   };
   const view = render(<ModelBudgetForm catalog={catalog} {...props} />);
-  await user.type(screen.getByLabelText("最大输出 Token"), "5000");
+  expect(screen.queryByLabelText("最大输出 Token")).not.toBeInTheDocument();
+  await user.type(screen.getByLabelText("整次执行超时（秒）"), "2500");
   view.rerender(
     <ModelBudgetForm
       catalog={{
@@ -49,9 +50,10 @@ it("输入仍为空但生效默认值已被更新时，使用草稿原版本提�
     />,
   );
   await user.click(screen.getByRole("button", { name: "保存运行预算" }));
-  expect(JSON.parse(String(fetch.mock.calls[0]?.[1]?.body))).toMatchObject({
+  expect(JSON.parse(String(fetch.mock.calls[0]?.[1]?.body))).toEqual({
     revision: 4,
-    max_tokens: 5000,
+    timeout_seconds: null,
+    execution_timeout_seconds: 2500,
   });
 });
 
@@ -64,12 +66,10 @@ it("其他管理员修改预算后保留本地草稿，并用原版本提交以�
     providers: [],
     runtime_enabled: true,
     effective_budget: {
-      max_tokens: 4096,
       timeout_seconds: 120,
       execution_timeout_seconds: 1800,
     },
     budget: {
-      max_tokens: 4096,
       timeout_seconds: 120,
       execution_timeout_seconds: 1800,
     },
@@ -124,12 +124,10 @@ it("预算可以分别清空，null 保存后保持空白，不转换为零", as
     providers: [],
     runtime_enabled: false,
     effective_budget: {
-      max_tokens: 4096,
       timeout_seconds: 120,
       execution_timeout_seconds: 1800,
     },
     budget: {
-      max_tokens: 4096,
       timeout_seconds: 120,
       execution_timeout_seconds: 1800,
     },
@@ -138,7 +136,6 @@ it("预算可以分别清空，null 保存后保持空白，不转换为零", as
     ...catalog,
     revision: 2,
     budget: {
-      max_tokens: null,
       timeout_seconds: null,
       execution_timeout_seconds: null,
     },

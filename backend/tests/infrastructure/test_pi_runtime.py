@@ -113,6 +113,7 @@ async def test_installed_pi_protocol_rejects_unknown_model_before_network(provid
                 PROFILE,
                 provider=provider,
                 model_id="weora-test-model-does-not-exist",
+                max_tokens=None,
                 # 这里验证目录拒绝，不测试 SDK 冷启动速度；避免高负载下先命中无关时限。
                 timeout_seconds=60,
                 execution_timeout_seconds=60,

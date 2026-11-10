@@ -6,7 +6,6 @@ import { SettingsResult } from "./SettingsPage";
 
 function sameBudget(first: ModelBudget, second: ModelBudget) {
   return (
-    first.max_tokens === second.max_tokens &&
     first.timeout_seconds === second.timeout_seconds &&
     first.execution_timeout_seconds === second.execution_timeout_seconds
   );
@@ -96,7 +95,7 @@ export function ModelBudgetForm({
     <form className="settings-stack" onSubmit={submit}>
       <Card
         title="运行预算"
-        description="团队共用，与当前选择的 Key 分开保存。"
+        description="团队共用的超时设置。模型输出上限由所选执行内核决定。"
         className="model-budget-card"
       >
         <fieldset
@@ -105,7 +104,6 @@ export function ModelBudgetForm({
         >
           {field("单次模型超时（秒）", "timeout_seconds", 600)}
           {field("整次执行超时（秒）", "execution_timeout_seconds", 3600)}
-          {field("最大输出 Token", "max_tokens", 16384)}
         </fieldset>
         <p className="model-settings-help">
           可单独留空，使用保存时的部署默认值。已有任务及其续接保留固定预算。

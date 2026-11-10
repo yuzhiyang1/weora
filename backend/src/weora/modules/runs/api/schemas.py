@@ -66,7 +66,7 @@ class ExecutionProfileResponse(BaseModel):
     runtime_id: str
     provider: str
     model_id: str
-    max_tokens: int
+    max_tokens: int | None
     timeout_seconds: int
     execution_timeout_seconds: int | None = None
 

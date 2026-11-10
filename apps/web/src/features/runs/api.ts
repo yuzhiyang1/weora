@@ -33,7 +33,7 @@ export type RunDetail = RunSummary & {
     runtime_id: string;
     provider: string;
     model_id: string;
-    max_tokens: number;
+    max_tokens: number | null;
     timeout_seconds: number;
   } | null;
 };

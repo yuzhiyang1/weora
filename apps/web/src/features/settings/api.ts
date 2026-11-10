@@ -34,7 +34,6 @@ export type ModelConnection = {
   key_source: "deployment" | "saved" | "missing";
 };
 export type ModelBudget = {
-  max_tokens: number | null;
   timeout_seconds: number | null;
   execution_timeout_seconds: number | null;
 };
@@ -102,6 +101,11 @@ export const saveModelBudget = (
   consoleWrite<ModelCatalog>(
     workspace,
     "/settings/model-budget",
-    { revision, ...budget },
+    {
+      revision,
+      // 旧 API 响应仍可能包含 Token 上限，当前表单只提交超时设置。
+      timeout_seconds: budget.timeout_seconds,
+      execution_timeout_seconds: budget.execution_timeout_seconds,
+    },
     "PUT",
   );

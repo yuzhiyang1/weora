@@ -16,7 +16,7 @@ from sqlalchemy import update
 from tests.api.test_run_execution import PROFILE
 from tests.api.test_runs import RunsHarness
 from tests.api.test_runs import runs as runs
-from weora.bootstrap import worker
+from weora.bootstrap import harness, worker
 from weora.modules.agents.application.service import AgentRegistryService
 from weora.modules.collaboration.infrastructure.tasks import TaskModel
 from weora.modules.context.feishu import FernetSecrets
@@ -404,7 +404,7 @@ async def test_worker_rechecks_project_before_persisting_model_result(
             assert archived.status_code == 200
             return "这段输出不能被保存成成功结果"
 
-    monkeypatch.setattr(worker, "PiTextRuntime", Runtime)
+    monkeypatch.setattr(harness, "PiTextRuntime", Runtime)
     run_id = UUID(created.json()["id"])
     assert await worker._execute(UUID(runs.workspace_id), run_id)
     detail = await runs.app.state.run_service.access_metadata(

@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 from uuid import UUID
 
@@ -118,8 +119,11 @@ async def test_omp_cancellation_waits_for_process_exit(omp: HarnessFactory, monk
         raise AssertionError("等待应由取消结束")
 
     tool = ToolSpec("probe.wait", "等候取消", {"type": "object", "properties": {}})
+    # 新运行不携带历史 Token 上限，仍应能进入工具并正常取消。
     task = asyncio.create_task(
-        omp(RuntimeSession("omp-cancel"), hold).run(RuntimeInput("取消测试", "{}", (tool,)), PROFILE)
+        omp(RuntimeSession("omp-cancel"), hold).run(
+            RuntimeInput("取消测试", "{}", (tool,)), replace(PROFILE, max_tokens=None)
+        )
     )
     try:
         await asyncio.wait_for(waiting.wait(), timeout=20)

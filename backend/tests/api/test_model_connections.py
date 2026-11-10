@@ -44,12 +44,12 @@ async def test_nullable_budget_roundtrips_and_freezes_deployment_defaults(runs: 
     first = await runs.client.post(path(runs), json=values(0, "test-key", make_primary=True), headers=runs.headers())
     identifier = first.json()["primary_id"]
     budget_path = f"/api/v1/workspaces/{runs.workspace_id}/settings/model-budget"
-    empty = {"max_tokens": None, "timeout_seconds": None, "execution_timeout_seconds": None}
+    empty = {"timeout_seconds": None, "execution_timeout_seconds": None}
     saved = await runs.client.put(budget_path, json={"revision": 1, **empty}, headers=runs.headers())
     assert saved.status_code == 200, saved.text
-    assert saved.json()["budget"] == empty
+    assert saved.json()["budget"] == {**empty, "max_tokens": None}
     assert saved.json()["effective_budget"]["max_tokens"] == service.defaults.max_tokens
-    assert (await runs.client.get(path(runs))).json()["budget"] == empty
+    assert (await runs.client.get(path(runs))).json()["budget"] == {**empty, "max_tokens": None}
 
     # 空值保留在表单契约中，执行版本必须已经解析成明确的整数预算。
     config = await service.resolve_model(UUID(runs.workspace_id))
@@ -58,9 +58,20 @@ async def test_nullable_budget_roundtrips_and_freezes_deployment_defaults(runs: 
     assert config.preferences.timeout_seconds == original.timeout_seconds
     base = ExecutionProfile("pi-agent-core@1.3.0", "deepseek", "deepseek-chat", 4096, 120, 1800)
     frozen = model_profile(config, base)
+    assert frozen.max_tokens is None
+    legacy_frozen = replace(frozen, max_tokens=original.max_tokens)
     service.defaults = replace(original, max_tokens=8000, timeout_seconds=300, execution_timeout_seconds=3000)
     resolved, key = await resolve_run_profile(service, UUID(runs.workspace_id), frozen, base)
     assert resolved == frozen and key == "test-key"
+    resolved, key = await resolve_run_profile(service, UUID(runs.workspace_id), legacy_frozen, base)
+    assert resolved == legacy_frozen and key == "test-key"
+
+    # 经过真实运行仓储和详情 API 回读，空上限表示使用执行内核默认值。
+    runs.app.state.run_service._execution_profile = frozen
+    created = await runs.client.post(runs.path, json=runs.payload(), headers=runs.headers())
+    assert created.status_code == 201
+    detail = await runs.client.get(f"{runs.path}/{created.json()['id']}")
+    assert detail.status_code == 200 and detail.json()["execution_profile"]["max_tokens"] is None
 
     # 仅切换主要项不能重新解析预算，否则旧任务之外的新任务也会被意外改变。
     selected = await runs.client.post(
@@ -81,6 +92,7 @@ async def test_nullable_budget_roundtrips_and_freezes_deployment_defaults(runs: 
     assert partial.status_code == 200 and partial.json()["budget"]["timeout_seconds"] is None
     current = await service.resolve_model(UUID(runs.workspace_id))
     assert current.preferences.max_tokens == 900
+    assert model_profile(current, base).max_tokens is None
     assert current.preferences.timeout_seconds == 300
     assert (
         await service.resolve_model(UUID(runs.workspace_id), config.configuration_id)

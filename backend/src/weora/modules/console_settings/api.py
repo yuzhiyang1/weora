@@ -80,8 +80,9 @@ class ConnectionInput(VersionInput):
 
 
 class BudgetInput(VersionInput):
+    # 旧客户端仍可提交此字段，新运行由执行内核决定输出上限。
+    max_tokens: int | None = Field(default=None, ge=1, le=16384, json_schema_extra={"deprecated": True})
     # null 表示采用保存时的部署默认值；仍校验显式填写的预算边界。
-    max_tokens: int | None = Field(ge=1, le=16384)
     timeout_seconds: int | None = Field(ge=1, le=600)
     execution_timeout_seconds: int | None = Field(ge=1, le=3600)
 

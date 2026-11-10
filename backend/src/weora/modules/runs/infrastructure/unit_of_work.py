@@ -49,7 +49,7 @@ def _record(model: RunModel) -> RunRecord:
             runtime_id=str(profile["runtime_id"]),
             provider=str(profile["provider"]),
             model_id=str(profile["model_id"]),
-            max_tokens=int(profile["max_tokens"]),
+            max_tokens=int(profile["max_tokens"]) if profile.get("max_tokens") is not None else None,
             timeout_seconds=int(profile["timeout_seconds"]),
             configuration_id=str(profile["configuration_id"]) if profile.get("configuration_id") else None,
             execution_timeout_seconds=(

@@ -55,7 +55,8 @@ export async function runOmp(
       return messages;
     },
     streamFn: (selected, context, options) => stream(selected, context, {
-      ...options, apiKey: input.api_key, maxTokens: input.max_tokens,
+      ...options, apiKey: input.api_key,
+      ...(input.max_tokens === undefined ? {} : { maxTokens: input.max_tokens }),
     }),
   });
   const received = new Set<string>();

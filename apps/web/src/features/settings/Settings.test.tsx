@@ -38,12 +38,10 @@ const originalCatalog: ModelCatalog = {
     },
   ],
   effective_budget: {
-    max_tokens: 4096,
     timeout_seconds: 120,
     execution_timeout_seconds: 1800,
   },
   budget: {
-    max_tokens: 4096,
     timeout_seconds: 120,
     execution_timeout_seconds: 1800,
   },
@@ -148,7 +146,6 @@ function setup(
           ...catalog,
           revision: catalog.revision + 1,
           budget: {
-            max_tokens: Number(body.max_tokens),
             timeout_seconds: Number(body.timeout_seconds),
             execution_timeout_seconds: Number(body.execution_timeout_seconds),
           },
@@ -496,7 +493,6 @@ it("可添加另一家厂商的备用 Key，预算草稿保留，切换主要项
     revision: 2,
     timeout_seconds: 200,
     execution_timeout_seconds: 1800,
-    max_tokens: 4096,
   });
   await user.click(
     within(screen.getByRole("row", { name: /OpenAI 备用/ })).getByRole(

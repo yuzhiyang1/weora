@@ -26,7 +26,7 @@ Weora 负责 Task/Run、权限、版本、待调度记录和运行状态。独�
 
 本机实际检查的固定包模型目录包含 `deepseek-flash` 与 `deepseek-v4-pro`。这只是包支持列表，不代表账号已具备额度或本次已请求模型。模型名必须由管理员显式配置，不自动选择、不回退到其他账号或模型。厂商服务背后的模型可能更新；Weora 固定的是请求的模型 ID 和 Pi 包版本，不保证供应商模型权重永远不变。
 
-新 Run 保存 `execution_profile`，包含 Runtime 标识、提供方、模型 ID、输出 token 上限和请求超时。密钥、Node 路径和个人登录态不进入该快照。Worker 配置与快照不同则失败，不悄悄换模型。启用 Runtime 前创建的无配置任务也不会自动套用新模型；需显式创建新任务。
+新 Run 保存 `execution_profile`，固定 Runtime 标识、提供方、模型 ID 和超时。新 Run 的输出 Token 上限由 Pi 根据模型和剩余上下文计算，历史 Run 续接时沿用快照中的显式上限。密钥、Node 路径和个人登录态不进入该快照。Worker 配置与快照不同则失败，不悄悄换模型。启用 Runtime 前创建的无配置任务也不会自动套用新模型；需显式创建新任务。
 
 ## 3. 调度与恢复语义
 
@@ -77,11 +77,12 @@ WEORA_PI_NODE_EXECUTABLE=node
 WEORA_PI_RUNTIME_ENTRY=D:/projects/weora/runtimes/pi/dist/index.js
 WEORA_PI_MODEL=请填写明确的模型ID
 WEORA_DEEPSEEK_API_KEY=仅在本地填写真实值
-WEORA_RUN_MODEL_MAX_TOKENS=4096
 WEORA_RUN_MODEL_TIMEOUT_SECONDS=120
 WEORA_RUN_LEASE_SECONDS=30
 WEORA_CELERY_BROKER_URL=redis://127.0.0.1:6379/0
 ```
+
+`WEORA_RUN_MODEL_MAX_TOKENS` 只用于兼容历史快照和旧设置 API。
 
 不要把密钥粘贴到聊天、命令行参数、Run 输入或前端。未准备好时保持 `WEORA_RUN_RUNTIME=disabled`。这不是动态热更新配置；修改后需重启 API、Worker 和 Beat，新任务才使用新快照。
 

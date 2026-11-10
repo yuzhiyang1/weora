@@ -63,7 +63,7 @@ export interface RuntimeRequest {
   api_key: string;
   provider?: SupportedProvider;
   model_id: string;
-  max_tokens: number;
+  max_tokens?: number;
   timeout_seconds: number;
   execution_timeout_seconds?: number;
   tools?: RuntimeTool[];
@@ -85,8 +85,11 @@ export function parseRequest(value: unknown): RuntimeRequest {
     if (typeof record[key] !== 'string') throw new SafeRuntimeError('PROTOCOL_ERROR');
   }
   if (record.provider !== undefined && !isSupportedProvider(record.provider)) throw new SafeRuntimeError('PROTOCOL_ERROR');
+  // 仅旧任务传显式输出上限，省略时由 Pi 按模型选择。
+  if (record.max_tokens !== undefined && (
+    !Number.isInteger(record.max_tokens) || Number(record.max_tokens) < 1 || Number(record.max_tokens) > 16384
+  )) throw new SafeRuntimeError('PROTOCOL_ERROR');
   if (!record.instruction || !record.api_key || !record.model_id ||
-      !Number.isInteger(record.max_tokens) || Number(record.max_tokens) < 1 || Number(record.max_tokens) > 16384 ||
       !Number.isInteger(record.timeout_seconds) || Number(record.timeout_seconds) < 1 || Number(record.timeout_seconds) > 600) {
     throw new SafeRuntimeError('PROTOCOL_ERROR');
   }
@@ -263,7 +266,8 @@ export async function runConfiguredModel(input: RuntimeRequest, signal?: AbortSi
     },
     // 凭据来自父进程的专用 stdin，不读取其他提供方或个人登录态。
     streamFn: withModelRetry((selected, context, options) => models.streamSimple(selected, context, {
-      ...options, apiKey: input.api_key, maxTokens: input.max_tokens, maxRetries: 0,
+      ...options, apiKey: input.api_key, maxRetries: 0,
+      ...(input.max_tokens === undefined ? {} : { maxTokens: input.max_tokens }),
     }), session?.retry),
   });
 }

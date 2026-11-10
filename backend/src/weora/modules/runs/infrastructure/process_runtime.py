@@ -81,8 +81,8 @@ class ProcessRuntime:
                 "api_key": self._api_key,
                 "provider": profile.provider,
                 "model_id": profile.model_id,
-                "max_tokens": profile.max_tokens,
                 "timeout_seconds": profile.timeout_seconds,
+                **({"max_tokens": profile.max_tokens} if profile.max_tokens is not None else {}),
                 **(
                     {
                         "session": {

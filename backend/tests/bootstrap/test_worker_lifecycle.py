@@ -11,7 +11,7 @@ from tests.api.test_run_execution import PROFILE, configured
 from tests.api.test_runs import RunsHarness
 from tests.api.test_runs import runs as runs
 from tests.delivery.fakes import Sandbox
-from weora.bootstrap import worker
+from weora.bootstrap import harness, worker
 from weora.bootstrap.run_profile import execution_profile
 from weora.bootstrap.settings import AppSettings
 from weora.modules.delivery.application.service import DeliveryService
@@ -60,7 +60,7 @@ async def test_worker_releases_owned_sandbox_on_success_or_model_failure(
             return "仅用于平台生命周期测试的回答。"
 
     cast(DeliveryService, runs.app.state.delivery_service).sandbox = OwnedSandbox()
-    monkeypatch.setattr(worker, "PiTextRuntime", Runtime)
+    monkeypatch.setattr(harness, "PiTextRuntime", Runtime)
     created = await runs.client.post(runs.path, json=runs.payload(), headers=runs.headers())
     run_id = UUID(created.json()["id"])
     assert await worker._execute(UUID(runs.workspace_id), run_id) is True

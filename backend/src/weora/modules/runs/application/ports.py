@@ -84,7 +84,8 @@ class ExecutionProfile:
     runtime_id: str
     provider: str
     model_id: str
-    max_tokens: int
+    # 仅历史快照携带显式上限。空值由执行内核按模型选择。
+    max_tokens: int | None
     timeout_seconds: int
     # 新任务显式冻结整体时限；旧任务缺省保留原来的模型/整体同一预算语义。
     execution_timeout_seconds: int | None = None

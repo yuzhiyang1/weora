@@ -20,7 +20,8 @@ def model_profile(config: ModelConfiguration, base: ExecutionProfile) -> Executi
         configuration_id=config.configuration_id,
         provider=values.provider,
         model_id=values.model_id,
-        max_tokens=values.max_tokens,
+        # 新运行交由执行内核按模型和上下文决定输出上限。
+        max_tokens=None,
         timeout_seconds=values.timeout_seconds,
         execution_timeout_seconds=values.execution_timeout_seconds,
     )
@@ -40,18 +41,26 @@ async def resolve_run_profile(
         # 无版本的历史运行保持部署配置，不被后来保存的控制台设置改变。
         key = service.deployment_key() if deployment_key is None else deployment_key
         expected = deployment
+        legacy_max_tokens = deployment.max_tokens
     else:
         try:
             config = await service.resolve_model(workspace_id, frozen.configuration_id)
         except SettingsError as error:
             raise RuntimeFailure(error.code) from None
         key, expected = config.api_key, model_profile(config, deployment)
+        legacy_max_tokens = config.preferences.max_tokens
     if not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", frozen.model_id):
         raise RuntimeFailure("MODEL_CONFIGURATION_MISMATCH")
     # 内部协调配置可以为此运行固定其他模型，提供方、预算和凭据仍由平台控制。
     if frozen.runtime_id == OMP_RUNTIME and expected.provider != "deepseek":
         raise RuntimeFailure("MODEL_CONFIGURATION_MISMATCH")
-    expected = replace(expected, model_id=frozen.model_id, runtime_id=frozen.runtime_id)
+    # 旧快照仍校验当时固定的上限，新快照继续使用执行内核默认值。
+    expected = replace(
+        expected,
+        model_id=frozen.model_id,
+        runtime_id=frozen.runtime_id,
+        max_tokens=legacy_max_tokens if frozen.max_tokens is not None else None,
+    )
     if expected != frozen or not key:
         raise RuntimeFailure("MODEL_CONFIGURATION_MISMATCH" if key else "MODEL_KEY_REQUIRED")
     return expected, key

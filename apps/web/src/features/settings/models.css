@@ -90,9 +90,6 @@
 .model-connections-table td:nth-child(3) {
   overflow-wrap: anywhere;
 }
-.settings-grid.model-budget-grid {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-}
 .model-connection-editor .form-help {
   font-size: 12px;
   line-height: 20px;
