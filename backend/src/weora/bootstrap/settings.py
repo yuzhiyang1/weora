@@ -86,6 +86,8 @@ class AppSettings(BaseSettings):
     omp_runtime_entry: str | None = None
     pi_model: str | None = None
     deepseek_api_key: SecretStr | None = None
+    # 多工作空间部署可以仅使用各空间自己保存的模型密钥。
+    run_workspace_model_keys_only: bool = False
     # 兼容旧预算 API 和已有运行快照，新运行使用执行内核默认值。
     run_model_max_tokens: int = Field(default=4096, ge=1, le=16384)
     run_model_timeout_seconds: int = Field(default=120, ge=1, le=600)
@@ -159,10 +161,13 @@ class AppSettings(BaseSettings):
     @model_validator(mode="after")
     def validate_runtime(self) -> Self:
         """显式启用时失败即停止，不回退到宿主机其他账号或模型。"""
-        if self.run_runtime == "pi" and (
-            not self.pi_runtime_entry or not self.pi_model or not self.pi_model.strip() or self.deepseek_api_key is None
-        ):
-            raise ValueError("启用 Pi 必须配置入口、明确的模型名和后端 DeepSeek 密钥")
+        if self.run_workspace_model_keys_only and self.deepseek_api_key is not None:
+            raise ValueError("仅使用工作空间模型密钥时不能配置全局 DeepSeek 密钥")
+        if self.run_runtime == "pi":
+            if not self.pi_runtime_entry or not self.pi_model or not self.pi_model.strip():
+                raise ValueError("启用 Pi 必须配置入口和明确的模型名")
+            if not self.run_workspace_model_keys_only and self.deepseek_api_key is None:
+                raise ValueError("启用 Pi 必须配置后端 DeepSeek 密钥，或显式使用工作空间模型密钥")
         return self
 
     @model_validator(mode="after")
