@@ -33,6 +33,7 @@ import { DeliveryPanel } from "./DeliveryPanel";
 import { ComputerPanel } from "./ComputerPanel";
 import { RunReport } from "./RunReport";
 import { ToolInvocationsPanel } from "./ToolInvocationsPanel";
+import { useRunWatch } from "./useRunWatch";
 import "./runs.css";
 import { RunProjectPanel } from "../projects/RunProjectPanel";
 
@@ -57,13 +58,14 @@ function RunDetailContent({ runId }: { runId: string }) {
   const key = runKey(workspace.id, user.id, runId);
   const [accessRevoked, setAccessRevoked] = useState(false);
   const revoked = useRef(false);
-  const [streamState, setStreamState] = useState("正在连接实时事件");
   const [searchParams] = useSearchParams();
   const [activeTab, setActiveTab] = useState(() => searchParams.get("tab") === "delivery" ? "delivery" : "overview");
   const [cancelOpen, setCancelOpen] = useState(false);
   const detailNavigation = useRef<HTMLElement>(null);
   const [events, setEvents] = useState<RunEvent[]>([]);
+  const eventCursor = useRef<number | null>(null);
   const [eventError, setEventError] = useState<string | null>(null);
+  const [eventAttempt, setEventAttempt] = useState(0);
   const clearPrivateCache = useCallback(() => {
     const privatePrefixes = new Set([
       "runs",
@@ -100,9 +102,9 @@ function RunDetailContent({ runId }: { runId: string }) {
   }, [accessRevoked, clearPrivateCache]);
   const query = useQuery({
     queryKey: key,
-    queryFn: async () => {
+    queryFn: async ({ signal }) => {
       try {
-        return await getRun(workspace.id, runId);
+        return await getRun(workspace.id, runId, signal);
       } catch (error) {
         if (
           error instanceof ConsoleApiError &&
@@ -113,17 +115,15 @@ function RunDetailContent({ runId }: { runId: string }) {
       }
     },
     enabled: !accessRevoked,
-    // 执行终态不是授权终态；持续展示时仍低频复验来源权限，回到窗口也立即复验。
     staleTime: 0,
-    refetchOnWindowFocus: "always",
-    refetchIntervalInBackground: true,
-    refetchInterval: (state) =>
-      state.state.data && isTerminal(state.state.data.status) ? 5000 : 2000,
-    retry: (count, error) =>
-      !("status" in error && [401, 403, 404].includes(Number(error.status))) &&
-      count < 1,
+    refetchOnWindowFocus: typeof EventSource === "undefined" ? "always" : false,
+    refetchOnReconnect: false,
+    retry: false,
   });
   const run = query.data;
+  const detailReady = !!run && query.isFetchedAfterMount && !accessRevoked;
+  const watch = useRunWatch(workspace.id, user.id, runId, detailReady, forgetPrivateRun);
+  const lastSequence = run?.last_sequence;
   const cancel = useMutation({
     mutationFn: () => cancelRun(workspace.id, runId),
     onSuccess: (value) => {
@@ -139,117 +139,35 @@ function RunDetailContent({ runId }: { runId: string }) {
   });
 
   useEffect(() => {
-    if (accessRevoked) return;
-    let active = true;
-    let after = 0;
-    let source: EventSource | undefined;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    function append(values: RunEvent[]) {
-      if (!active) return;
-      setEvents((current) =>
-        [
-          ...new Map(
-            [...current, ...values].map((value) => [value.sequence, value]),
-          ).values(),
-        ].sort((a, b) => a.sequence - b.sequence),
-      );
-      after = Math.max(after, ...values.map((value) => value.sequence));
-    }
-    async function readPersisted() {
+    if (!detailReady || watch.interrupted || !watch.visible || activeTab !== "events" || lastSequence === undefined)
+      return;
+    if (eventCursor.current !== null && eventCursor.current >= lastSequence) return;
+    const controller = new AbortController();
+    async function readEvents() {
+      // 页签首次展开才读取历史。续读只使用已成功交付的持久序号。
+      let after = eventCursor.current ?? 0;
       try {
-        let more = true;
-        while (active && more) {
-          const page = await getRunEvents(workspace.id, runId!, after);
-          if (!active) return;
-          append(page.items);
-          after = Math.max(after, page.next_after);
-          more = page.has_more;
-          if (more && page.items.length === 0)
-            throw new Error("事件分页没有前进");
+        for (;;) {
+          const page = await getRunEvents(workspace.id, runId, after, controller.signal);
+          if (controller.signal.aborted) return;
+          if (page.has_more && page.next_after <= after) throw new Error("事件分页没有前进");
+          setEvents((current) => [...current, ...page.items]);
+          after = page.next_after;
+          eventCursor.current = after;
+          if (!page.has_more) break;
         }
         setEventError(null);
       } catch (error) {
-        if (
-          active &&
-          error instanceof ConsoleApiError &&
-          [401, 403, 404].includes(error.status)
-        ) {
-          active = false;
-          source?.close();
-          if (timer) clearTimeout(timer);
-          forgetPrivateRun();
-          return;
-        }
-        if (active) setEventError(errorMessage(error));
+        if (controller.signal.aborted) return;
+        if (error instanceof ConsoleApiError && [401, 403, 404].includes(error.status)) forgetPrivateRun();
+        else setEventError(errorMessage(error));
       }
     }
-    function poll() {
-      if (!active) return;
-      timer = setTimeout(() => void readPersisted().finally(poll), 3000);
-    }
-    void readPersisted().then(() => {
-      if (!active) return;
-      if (typeof EventSource === "undefined") {
-        setStreamState("实时通道不可用，正在按序号补读");
-        poll();
-        return;
-      }
-      source = new EventSource(
-        `/api/v1/workspaces/${encodeURIComponent(workspace.id)}/runs/${encodeURIComponent(runId!)}/events/stream?after=${after}`,
-        { withCredentials: true },
-      );
-      source.onopen = () => active && setStreamState("实时事件已连接");
-      const receive = (event: MessageEvent<string>) => {
-        try {
-          const value = JSON.parse(event.data) as RunEvent;
-          // SSE 只用于触发刷新；输出、权限和最终状态仍以持久 API 为准。
-          if (
-            value.run_id === runId &&
-            Number.isInteger(value.sequence) &&
-            value.sequence > 0
-          )
-            append([value]);
-          void queryClient.invalidateQueries({
-            queryKey: runKey(workspace.id, user.id, runId),
-          });
-        } catch {
-          setEventError("实时记录格式异常，正在回读持久记录。");
-          void readPersisted();
-        }
-      };
-      source.onmessage = receive;
-      source.addEventListener("run_event", receive as EventListener);
-      source.addEventListener("stream_end", () => {
-        source?.close();
-        if (!active) return;
-        setStreamState("实时记录已同步，持续补读新增事件");
-        poll();
-      });
-      source.onerror = () => {
-        source?.close();
-        if (!active) return;
-        setStreamState("实时连接中断，正在按序号补读");
-        poll();
-      };
-      source.addEventListener("access_revoked", () => {
-        source?.close();
-        if (!active) return;
-        forgetPrivateRun();
-        setEventError("访问权限已失效，请重新确认任务授权。");
-      });
-    });
-    return () => {
-      active = false;
-      source?.close();
-      if (timer) clearTimeout(timer);
-    };
+    void readEvents();
+    return () => controller.abort();
   }, [
-    workspace.id,
-    user.id,
-    runId,
-    queryClient,
-    accessRevoked,
-    forgetPrivateRun,
+    detailReady, activeTab, lastSequence, watch.visible, watch.interrupted,
+    workspace.id, runId, forgetPrivateRun, eventAttempt,
   ]);
 
   const backToList = (
@@ -268,16 +186,31 @@ function RunDetailContent({ runId }: { runId: string }) {
         <Banner
           closeIcon={null}
           title="无法访问此任务"
-          description={
-            accessRevoked
-              ? "访问权限已失效，请重新确认任务授权。"
-              : errorMessage(query.error)
-          }
+          description={accessRevoked ? "访问权限已失效，请重新确认任务授权。" : (
+            <>
+              <p>{errorMessage(query.error)}</p>
+              <Button onClick={() => void query.refetch()}>重试读取</Button>
+            </>
+          )}
           type="danger"
         />
       </section>
     );
-  if (!run) return <Spin tip="正在读取运行记录" />;
+  if (!run || !detailReady) return <Spin tip="正在读取运行记录" />;
+  if (!watch.visible || watch.interrupted)
+    return (
+      <section className="detail-page run-detail-page">
+        {backToList}
+        {watch.exhausted ? (
+          <Banner
+            closeIcon={null}
+            title="暂时无法连接任务"
+            description={<Button onClick={watch.retry}>重试连接</Button>}
+            type="warning"
+          />
+        ) : <Spin tip="正在重新验证任务访问权限" />}
+      </section>
+    );
   const canCancel =
     [
       "QUEUED",
@@ -313,7 +246,12 @@ function RunDetailContent({ runId }: { runId: string }) {
               任务协作
             </Link>
           )}
-          <Button onClick={() => void query.refetch()}>刷新状态</Button>
+          <Button onClick={() => {
+            void query.refetch();
+            setEventAttempt((value) => value + 1);
+            void queryClient.invalidateQueries({ queryKey: ["run-tools", workspace.id, user.id, runId] });
+            void queryClient.invalidateQueries({ queryKey: ["run-delivery", workspace.id, user.id, runId] });
+          }}>刷新状态</Button>
           {["RECOVERY_REQUIRED", "WAITING_CONTEXT"].includes(run.status) ? (
             <Button
               loading={recover.isPending}
@@ -481,7 +419,7 @@ function RunDetailContent({ runId }: { runId: string }) {
             <section className="detail-card">
               <div className="run-section-heading">
                 <Typography.Title heading={3}>运行事实记录</Typography.Title>
-                <small>{streamState}</small>
+                <small>按运行变更更新</small>
               </div>
               {eventError ? (
                 <Banner

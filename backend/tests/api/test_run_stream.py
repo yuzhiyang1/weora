@@ -29,3 +29,18 @@ async def test_stream_checks_private_run_before_sending_headers(runs: RunsHarnes
 
     response = await runs.client.get(f"{runs.path}/{uuid4()}/events/stream")
     assert response.status_code == 404
+
+
+@pytest.mark.anyio
+async def test_watch_rejects_foreign_workspace_and_revoked_session(runs: RunsHarness) -> None:
+    from uuid import uuid4
+
+    created = await runs.client.post(runs.path, json=runs.payload(), headers=runs.headers())
+    run_id = created.json()["id"]
+    foreign = runs.path.replace(runs.workspace_id, str(uuid4()))
+    for path in (f"{foreign}/{run_id}/watch", f"{runs.path}/{uuid4()}/watch"):
+        response = await runs.client.get(path)
+        assert response.text == "event: access_revoked\ndata: {}\n\n"
+    await runs.client.post("/api/v1/auth/logout", headers=runs.headers())
+    response = await runs.client.get(f"{runs.path}/{run_id}/watch")
+    assert response.text == "event: access_revoked\ndata: {}\n\n"

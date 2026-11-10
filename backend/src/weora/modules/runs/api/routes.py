@@ -1,6 +1,7 @@
 """运行 API：认证、CSRF 与私有任务隔离，不在请求中调用模型。"""
 
 import asyncio
+import json
 import time
 from collections.abc import AsyncIterator
 from dataclasses import asdict
@@ -28,6 +29,7 @@ from weora.modules.runs.application.ports import RunActor
 from weora.modules.runs.application.service import RunService
 from weora.modules.runs.domain.errors import RunError, RunNotFoundError, RunVersionNotFoundError
 from weora.modules.runs.infrastructure.execution_store import SqlAlchemyExecutionStore
+from weora.modules.runs.infrastructure.watch import RunWatch
 from weora.modules.tools.application.gateway import ToolScope
 from weora.modules.tools.infrastructure.store import SqlAlchemyToolStore
 from weora.shared.api.request_id import get_request_id
@@ -193,7 +195,7 @@ async def list_run_events(
 ) -> RunEventsResponse:
     """JSON 分页与 SSE 共用持久序号，断线无需重新运行模型。"""
     try:
-        events, latest = await _service(request).events(
+        events, latest, _ = await _service(request).events(
             actor=_actor(principal),
             workspace_id=workspace_id,
             run_id=run_id,
@@ -208,6 +210,57 @@ async def list_run_events(
         next_after=next_after,
         latest_sequence=latest,
         has_more=next_after < latest,
+    )
+
+
+@router.get("/{run_id}/watch")
+async def watch_run(
+    workspace_id: UUID,
+    run_id: UUID,
+    request: Request,
+) -> StreamingResponse:
+    """订阅轻量状态。终态继续复验授权，历史事件和正文由各自接口按需读取。"""
+    service = _service(request)
+    watch = cast(RunWatch, request.app.state.run_watch)
+
+    async def snapshots() -> AsyncIterator[str]:
+        deadline = time.monotonic() + 55
+        previous = None
+        actor = None
+        # 先登记通知，再读快照，避免提交发生在读取与登记之间。
+        with watch.subscribe(run_id) as changed:
+            while time.monotonic() < deadline and not await request.is_disconnected():
+                changed.clear()
+                try:
+                    active = _actor(await current_principal(request))
+                    if actor is not None and active != actor:
+                        raise HTTPException(401)
+                    actor = active
+                    current = await service.watch_state(active, workspace_id, run_id)
+                except (HTTPException, RunNotFoundError):
+                    # EventSource 读不到 HTTP 错误码；初连与断线续连都用同一撤权事件清理客户端。
+                    yield 'event: access_revoked\ndata: {}\n\n'
+                    return
+                if current != previous:
+                    previous = current
+                    run_status, sequence, title = current
+                    payload = json.dumps({"status": run_status, "last_sequence": sequence, "title": title})
+                    yield f"event: run_state\ndata: {payload}\n\n"
+                else:
+                    yield "event: access_confirmed\ndata: {}\n\n"
+                # 五秒复验来源授权，也能补偿通知丢失；突发通知合并为一次读取。
+                try:
+                    await asyncio.wait_for(changed.wait(), timeout=min(5, max(0, deadline - time.monotonic())))
+                except TimeoutError:
+                    pass
+                else:
+                    await asyncio.sleep(0.25)
+        yield "event: stream_rotate\ndata: {}\n\n"
+
+    return StreamingResponse(
+        snapshots(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
     )
 
 
@@ -241,10 +294,9 @@ async def stream_run_events(
                 active = await current_principal(request)
                 if _actor(active) != _actor(principal):
                     raise HTTPException(401)
-                items, latest = await _service(request).events(
+                items, latest, run_status = await _service(request).events(
                     actor=_actor(active), workspace_id=workspace_id, run_id=run_id, after=cursor, limit=100
                 )
-                detail = await _service(request).get(actor=_actor(active), workspace_id=workspace_id, run_id=run_id)
             except (HTTPException, RunError):
                 yield 'event: access_revoked\ndata: {"code":"ACCESS_REVOKED"}\n\n'
                 return
@@ -254,7 +306,7 @@ async def stream_run_events(
                 yield f"id: {cursor}\nevent: run_event\ndata: {data}\n\n"
             if cursor < latest:
                 continue
-            if detail.run.status in {
+            if run_status in {
                 "SUCCEEDED",
                 "FAILED",
                 "CANCELLED",

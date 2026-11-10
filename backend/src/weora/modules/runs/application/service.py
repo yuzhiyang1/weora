@@ -17,6 +17,7 @@ from weora.modules.runs.application.ports import (
     RunDetail,
     RunEventRecord,
     RunRecord,
+    RunStatus,
     RunSubmission,
     RunsUnitOfWork,
     RunsUnitOfWorkFactory,
@@ -561,18 +562,14 @@ class RunService:
         run_id: UUID,
         after: int,
         limit: int,
-    ) -> tuple[list[RunEventRecord], int]:
-        """按持久序号补读，后续 SSE 可复用，不把当前分页接口称为 SSE。"""
+    ) -> tuple[list[RunEventRecord], int, RunStatus]:
+        """按持久序号补读；事件与正文共用当前来源授权。"""
         self._require_workspace(actor, workspace_id)
         async with self._uow_factory() as uow:
-            run = await uow.store.get_private(actor=actor, run_id=run_id)
-            if run is None:
-                raise RunNotFoundError
-            if run.collaboration_context is not None:
-                await self._detail(uow, actor, run_id)
+            run, _ = await self._authorized_run(uow, actor, run_id)
             # 限定到先读取的高水位，避免并发追加导致同页边界自相矛盾。
             events = await uow.store.list_events(actor=actor, run_id=run_id, after=after, limit=limit)
-            return [event for event in events if event.sequence <= run.last_sequence], run.last_sequence
+            return [event for event in events if event.sequence <= run.last_sequence], run.last_sequence, run.status
 
     async def cancel(
         self,
@@ -606,6 +603,19 @@ class RunService:
             return await self._detail(uow, actor, submission.run.id)
 
     async def _detail(self, uow: RunsUnitOfWork, actor: RunActor, run_id: UUID) -> RunDetail:
+        run, task = await self._authorized_run(uow, actor, run_id)
+        return RunDetail(replace(run, task_title=await self._display_title(task)), task)
+
+    async def watch_state(self, actor: RunActor, workspace_id: UUID, run_id: UUID) -> tuple[RunStatus, int, str | None]:
+        """复验正文授权，只取订阅所需的状态、持久序号和已生成标题。"""
+        self._require_workspace(actor, workspace_id)
+        async with self._uow_factory() as uow:
+            run, task = await self._authorized_run(uow, actor, run_id)
+            return run.status, run.last_sequence, task.title
+
+    async def _authorized_run(
+        self, uow: RunsUnitOfWork, actor: RunActor, run_id: UUID,
+    ) -> tuple[RunRecord, TaskRecord]:
         run = await uow.store.get_private(actor=actor, run_id=run_id)
         if run is None:
             raise RunNotFoundError
@@ -614,7 +624,7 @@ class RunService:
             raise RunNotFoundError
         if self._content_authorizer and not await self._content_authorizer(actor, run, task):
             raise RunNotFoundError
-        return RunDetail(replace(run, task_title=await self._display_title(task)), task)
+        return run, task
 
     async def _display_title(self, task: TaskRecord) -> str:
         if task.title is None and self._historical_title and (task.origin_metadata or {}).get("coordination_ticket_id"):
