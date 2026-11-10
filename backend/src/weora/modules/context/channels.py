@@ -107,6 +107,45 @@ class FeishuChannels:
             return False
         return await self.context.access.can_manage(grantor)
 
+    async def _reply_actor(
+        self,
+        workspace_id: UUID,
+        connection_id: UUID,
+        chat_id: str,
+        thread_id: str | None,
+        root_id: str | None,
+        open_id: str,
+    ) -> str | None:
+        """仅在发起人自己的话题中续接已送达的 Run 回复，群里普通聊天仍需 @。"""
+        if not thread_id or not root_id:
+            return None
+        root = await self.context.store.get(workspace_id, "inbox", f"{connection_id}:{root_id}")
+        if (
+            not root
+            or root.get("status") != "SUBMITTED"
+            or root.get("chat_id") != chat_id
+            or root.get("open_id") != open_id
+            or root.get("thread_id") not in (None, thread_id)
+            or not root.get("run_id")
+            or not isinstance(root.get("actor_id"), str)
+            or timestamp(root["expires_at"]) <= datetime.now(UTC)
+        ):
+            return None
+        # 飞书可在首次回复时创建话题；旧根消息未保存 thread_id，以已发送回执核实。
+        delivery = await self.context.store.get(workspace_id, "delivery", f"run-result:{root['run_id']}")
+        if (
+            delivery
+            and delivery.get("status") == "SENT"
+            and delivery.get("remote_message_id")
+            and delivery.get("inbox_id") == root["id"]
+            and delivery.get("connection_id") == str(connection_id)
+            and delivery.get("chat_id") == chat_id
+            and delivery.get("message_id") == root_id
+            and timestamp(delivery["expires_at"]) > datetime.now(UTC)
+        ):
+            return str(root["actor_id"])
+        return None
+
     async def receive(
         self,
         workspace_id: UUID,
@@ -166,20 +205,23 @@ class FeishuChannels:
         mentioned = bool(bot_open_id) and any(
             _event_object(item.get("id", {})).get("open_id") == bot_open_id for item in mentions
         )
-        if not mentioned:
-            chat = _event_id(message.get("chat_id"))
-            thread = _event_id(message["thread_id"]) if message.get("thread_id") else None
-            root = _event_id(message["root_id"]) if message.get("root_id") else None
-            if not self.candidate_admission or not await self.candidate_admission(
-                workspace_id, connection_id, chat, thread, root
-            ):
-                return {"status": "ignored", "reason": "no_explicit_bot_mention"}
+        chat_id = _event_id(message.get("chat_id"))
+        thread_id = _event_id(message["thread_id"]) if message.get("thread_id") is not None else None
+        root_id = _event_id(message["root_id"]) if message.get("root_id") is not None else None
+        open_id = _event_id(_event_object(sender.get("sender_id"))["open_id"])
+        reply_actor = (
+            await self._reply_actor(workspace_id, connection_id, chat_id, thread_id, root_id, open_id)
+            if not mentioned
+            else None
+        )
+        addressed = mentioned or reply_actor is not None
+        if not addressed and (
+            not self.candidate_admission
+            or not await self.candidate_admission(workspace_id, connection_id, chat_id, thread_id, root_id)
+        ):
+            return {"status": "ignored", "reason": "no_explicit_bot_mention"}
         try:
-            chat_id = _event_id(message.get("chat_id"))
-            open_id = _event_id(_event_object(sender.get("sender_id"))["open_id"])
-            thread_id = _event_id(message["thread_id"]) if message.get("thread_id") is not None else None
             quote_id = _event_id(message["parent_id"]) if message.get("parent_id") is not None else None
-            root_id = _event_id(message["root_id"]) if message.get("root_id") is not None else None
             content = _event_object(json.loads(str(message["content"])))
             instruction = (
                 content["text"]
@@ -213,7 +255,8 @@ class FeishuChannels:
                 "quote_id": quote_id,
                 **({"root_id": root_id} if root_id else {}),
                 "open_id": open_id,
-                "addressed": mentioned,
+                "addressed": addressed,
+                **({"actor_id": reply_actor} if reply_actor else {}),
                 "ingress": ingress,
                 "instruction": self.context.cipher.encrypt(instruction),
                 "created_at": created_at.isoformat(),

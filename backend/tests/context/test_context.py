@@ -599,6 +599,49 @@ def test_bot_ordinary_message_and_edits_do_not_start_run() -> None:
     asyncio.run(scenario())
 
 
+def test_same_sender_can_follow_up_after_bot_reply_without_mention() -> None:
+    """飞书首次回复可创建话题，根消息入库时没有 thread_id。"""
+    async def scenario() -> None:
+        f = await setup()
+        channels = await prepare_channels(f)
+        await f.service.bind_identity(f.actor, f.connection, "ou_user", f.actor.user_id)
+        ws = f.actor.workspace_id
+        root = await channels.receive(ws, f.connection, inbound())
+        calls: list[Json] = []
+
+        async def submit(actor: ContextActor, payload: Json) -> str:
+            calls.append(payload)
+            return str(f.scope.run_id)
+
+        await channels.process(ws, str(root["inbox_id"]), submit)
+        scope = replace(f.scope, audience="group", source_id=f.source)
+        key = f"run-result:{f.scope.run_id}"
+        await channels.enqueue_delivery(scope, str(root["inbox_id"]), "处理完成", key)
+
+        def follow_up(event_id: str, open_id: str = "ou_user", chat_id: str = "oc_project") -> Json:
+            payload = inbound(event_id, f"om_{event_id}", open_id)
+            cast(Json, cast(Json, payload["event"])["message"]).update(
+                chat_id=chat_id, thread_id="omt_topic", root_id="om_trigger", parent_id="om_trigger",
+                mentions=[], content='{"text":"请用飞书 CLI 读取表格"}',
+            )
+            return payload
+
+        assert (await channels.receive(ws, f.connection, follow_up("pending")))["status"] == "ignored"
+        assert (await channels.deliver(scope, key))["status"] == "SENT"
+        assert (await channels.receive(ws, f.connection, follow_up("other", "ou_other")))["status"] == "ignored"
+        other_chat = await channels.receive(ws, f.connection, follow_up("different_chat", chat_id="oc_other"))
+        assert other_chat["status"] == "ignored"
+        payload = follow_up("continued")
+        accepted = await channels.receive(ws, f.connection, payload)
+        assert accepted["status"] == "persisted"
+        assert (await channels.receive(ws, f.connection, payload))["inbox_id"] == accepted["inbox_id"]
+        await channels.process(ws, str(accepted["inbox_id"]), submit)
+        assert calls[-1]["addressed"] is True and calls[-1]["root_id"] == "om_trigger"
+        assert calls[-1]["instruction"] == "请用飞书 CLI 读取表格"
+        assert len(calls) == 2
+    asyncio.run(scenario())
+
+
 def test_outbox_unknown_result_not_retried_and_private_audience_denied() -> None:
     async def scenario() -> None:
         f = await setup()

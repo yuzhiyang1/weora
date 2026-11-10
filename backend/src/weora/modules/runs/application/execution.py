@@ -27,6 +27,8 @@ class RuntimeInput:
     system_prompt: str
     instruction: str
     tools: tuple[ToolSpec, ...] = ()
+    # 飞书读表纠正只使用本轮用户原文，避免把历史答复当作能力事实。
+    explicit_feishu_sheet_read: str | None = None
 
 
 @dataclass

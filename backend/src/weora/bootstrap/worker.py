@@ -36,6 +36,7 @@ from weora.modules.runs.application.task_titles import TITLE_TIMEOUT_SECONDS, ge
 from weora.modules.runs.domain.errors import RunError
 from weora.modules.runs.infrastructure.execution_access import ModulesExecutionAccess
 from weora.modules.runs.infrastructure.execution_store import SqlAlchemyExecutionStore
+from weora.modules.runs.infrastructure.feishu_sheet_runtime import FeishuSheetReadRuntime
 from weora.modules.runs.infrastructure.pi_runtime import PiTextRuntime
 from weora.modules.runs.infrastructure.unit_of_work import SqlAlchemyRunsUnitOfWork
 from weora.modules.tools.application.gateway import ToolGateway, ToolScope
@@ -135,6 +136,7 @@ async def _execute(workspace_id: UUID, run_id: UUID) -> bool:
     async with app.router.lifespan_context(app):
         sessions = cast(SessionFactory, app.state.db_session_factory)
         gateway = cast(ToolGateway, app.state.tool_gateway)
+        tool_store = cast(SqlAlchemyToolStore, app.state.tool_store)
         delivery = cast(DeliveryService, app.state.delivery_service)
         runs = cast(RunService, app.state.run_service)
         context = cast(ContextService | None, app.state.context_service)
@@ -199,6 +201,14 @@ async def _execute(workspace_id: UUID, run_id: UUID) -> bool:
 
             assert lease.run.execution_profile is not None
             create_runtime = harness_factory(settings, lease.run.execution_profile, resolved_key)
+
+            def with_cli_read_check(runtime: TextRuntime) -> TextRuntime:
+                # 纠正读取只核对本轮租约里的工具证据，旧 Run 的回答和调用不参与。
+                scope = ToolScope(
+                    lease.run.id, RunActor(lease.run.created_by, workspace_id), lease.owner, lease.fencing_token
+                )
+                return FeishuSheetReadRuntime(runtime, lambda: tool_store.list_calls(scope))
+
             if app.state.coordination_service:
                 from weora.modules.coordination.worker_runtime import CoordinatedRuntime
 
@@ -207,14 +217,15 @@ async def _execute(workspace_id: UUID, run_id: UUID) -> bool:
                         claimed_actor, lease.run.id, lease.fencing_token, lease.owner
                     )
 
-                return CoordinatedRuntime(
+                runtime = CoordinatedRuntime(
                     app.state.coordination_service,
                     lease,
                     runtime_factory=create_runtime,
                     call_tool=tool_call,
                     authorize=authorize,
                 )
-            return create_runtime(None, tool_call)
+                return with_cli_read_check(runtime)
+            return with_cli_read_check(create_runtime(None, tool_call))
 
         async def validate_output(lease: RunLease, text: str) -> str:
             # 模型调用期间也可能停用仓库；只读恢复和未启用飞书的部署同样必须复核。
@@ -266,7 +277,7 @@ async def _execute(workspace_id: UUID, run_id: UUID) -> bool:
                 context=context,
                 delivery=delivery,
                 gateway=gateway,
-                tool_store=cast(SqlAlchemyToolStore, app.state.tool_store),
+                tool_store=tool_store,
                 executions=cast(SqlAlchemyExecutionStore, app.state.execution_store),
                 projects=app.state.context_access.projects,
             ),
