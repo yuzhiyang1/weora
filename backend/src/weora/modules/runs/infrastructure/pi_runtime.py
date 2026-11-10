@@ -27,4 +27,5 @@ class PiTextRuntime(ProcessRuntime):
             api_key=api_key,
             call_tool=call_tool,
             session=session,
+            watch_parent=True,
         )

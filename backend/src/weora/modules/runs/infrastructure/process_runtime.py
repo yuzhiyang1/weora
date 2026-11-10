@@ -50,6 +50,7 @@ class ProcessRuntime:
         call_tool: Callable[[str, str, dict[str, object]], Awaitable[dict[str, object]]] | None = None,
         session: RuntimeSession | None = None,
         private_home: bool = False,
+        watch_parent: bool = False,
     ) -> None:
         self._executable = executable
         self._runtime_id, self._providers = runtime_id, providers
@@ -58,6 +59,7 @@ class ProcessRuntime:
         self._call_tool = call_tool
         self._session = session
         self._private_home = private_home
+        self._watch_parent = watch_parent
         self._protocol = "weora.runtime.v2" if session else "weora.runtime.v1"
 
     async def run(self, payload: RuntimeInput, profile: ExecutionProfile) -> str:
@@ -127,6 +129,9 @@ class ProcessRuntime:
                 "LC_ALL",
             }
         }
+        if self._watch_parent:
+            # 由受信适配器声明管道的生命周期语义，不接受宿主环境或请求覆盖。
+            environment["WEORA_RUNTIME_WATCH_PARENT"] = "1"
         process: asyncio.subprocess.Process | None = None
         directory: TemporaryDirectory[str] | None = None
         try:
@@ -181,7 +186,8 @@ class ProcessRuntime:
         assert process.stdin is not None and process.stdout is not None
         process.stdin.write(request + b"\n")
         await process.stdin.drain()
-        if not payload.tools and not self._session:
+        # 受管 Pi 用 stdin EOF 判断父进程已退出，普通运行也保留写端直到收到终态。
+        if not self._watch_parent and not payload.tools and not self._session:
             process.stdin.close()
         # 双向协议的任一方向失效都应终止本轮，尤其不能忽略输入侧的撤权异常。
         reader = asyncio.create_task(self._read_frames(process, payload, model_seconds))

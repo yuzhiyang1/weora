@@ -8,6 +8,10 @@ export async function serve(runModel: typeof runConfiguredModel) {
   process.once('SIGTERM', () => abort.abort());
   process.once('SIGINT', () => abort.abort());
   const lines = createInterface({ input: process.stdin, crlfDelay: Infinity });
+  // 受管进程的 stdin 由 Worker 保持打开。父进程异常退出时同时取消模型请求与退避等待。
+  if (process.env.WEORA_RUNTIME_WATCH_PARENT === '1') {
+    lines.once('close', () => abort.abort());
+  }
   process.stdout.on('error', () => { abort.abort(); lines.close(); process.stdin.destroy(); });
   const iterator = lines[Symbol.asyncIterator]();
   let frameBytes = 0;
@@ -46,7 +50,7 @@ export async function serve(runModel: typeof runConfiguredModel) {
           !result.result || typeof result.result !== 'object' || Array.isArray(result.result)) throw new SafeRuntimeError('PROTOCOL_ERROR');
       return result.result as Record<string, unknown>;
     };
-    // 父 Worker 异常退出后也有子进程自己的请求期限，不依赖父进程一直存活。
+    // 子进程仍有独立的请求期限，覆盖直接调用入口和父进程一直存活的场景。
     const deadline = setTimeout(() => { wallTimedOut = true; abort.abort(); lines.close(); }, (input.execution_timeout_seconds ?? input.timeout_seconds) * 1000);
     deadline.unref();
     let text: string;

@@ -1,7 +1,12 @@
 // 自有协议测试进程，不调用 Pi 或真实模型。不得把该文件配置为生产 Runtime。
-const chunks = [];
-for await (const chunk of process.stdin) chunks.push(chunk);
-const input = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+import { createInterface } from 'node:readline';
+
+// 受管父进程在运行期间保留 stdin，夹具按 JSONL 首行读取请求。
+const lines = createInterface({ input: process.stdin, crlfDelay: Infinity });
+const first = await lines[Symbol.asyncIterator]().next();
+const input = JSON.parse(first.value);
+lines.close();
+process.stdin.destroy();
 const reply = value => process.stdout.write(JSON.stringify({ protocol: 'weora.runtime.v1', ...value }));
 switch (input.instruction) {
   case 'hold':

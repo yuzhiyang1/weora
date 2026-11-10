@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
 import { test } from 'node:test';
 import { createModels, fauxAssistantMessage, fauxProvider, fauxText, fauxToolCall } from '@earendil-works/pi-ai';
 import { ModelDeadline, PROTOCOL, SafeRuntimeError, modelToolHistory, parseRequest, providerToolName, runText } from './runtime.js';
@@ -91,6 +93,48 @@ test('父进程 EOF 和取消均拒绝未完成的工具 Promise，不留下常�
     await failed;
     assert.ok(abort.signal.aborted);
     control.close();
+  }
+});
+
+test('普通 Pi 运行在受管管道关闭时取消，独立入口仍支持 EOF 结束输入', { timeout: 15_000 }, async (t) => {
+  const probe = `
+    import { setTimeout } from 'node:timers/promises';
+    import { serve } from ${JSON.stringify(new URL('./protocol.ts', import.meta.url).href)};
+    import { SafeRuntimeError } from ${JSON.stringify(new URL('./runtime.ts', import.meta.url).href)};
+    await serve(async (_input, signal) => {
+      process.stderr.write('model-started\\n');
+      try {
+        return await setTimeout(process.env.WEORA_RUNTIME_WATCH_PARENT === '1' ? 5000 : 25, 'done', { signal });
+      } catch {
+        throw new SafeRuntimeError('MODEL_ABORTED');
+      }
+    });
+  `;
+  const request = JSON.stringify({
+    protocol: PROTOCOL, type: 'run', system_prompt: '测试', instruction: '测试',
+    api_key: 'fixture', model_id: 'deepseek-chat', max_tokens: 10, timeout_seconds: 8,
+  }) + '\n';
+  for (const managed of [true, false]) {
+    const child = spawn(process.execPath, ['--import', 'tsx', '--input-type=module', '--eval', probe], {
+      env: { ...process.env, WEORA_RUNTIME_WATCH_PARENT: managed ? '1' : '' },
+    });
+    t.after(() => { if (child.exitCode === null && child.signalCode === null) child.kill(); });
+    const closed = once(child, 'close');
+    let output = '';
+    child.stdout.setEncoding('utf8').on('data', (chunk: string) => { output += chunk; });
+    if (managed) {
+      const started = once(child.stderr, 'data');
+      child.stdin.write(request);
+      const marker = await Promise.race([started, closed]);
+      assert.match(String(marker[0]), /model-started/);
+      child.stdin.end();
+    } else {
+      child.stdin.end(request);
+    }
+    assert.deepEqual(await closed, [0, null]);
+    assert.deepEqual(JSON.parse(output), managed
+      ? { protocol: PROTOCOL, type: 'failed', code: 'MODEL_ABORTED' }
+      : { protocol: PROTOCOL, type: 'completed', text: 'done' });
   }
 });
 
