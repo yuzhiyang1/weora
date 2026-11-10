@@ -39,6 +39,21 @@ def test_profile_never_contains_credentials() -> None:
     assert "secret-must-not-appear" not in repr(profile)
 
 
+def test_runtime_can_use_only_workspace_model_keys() -> None:
+    values = {
+        "run_runtime": "pi",
+        "pi_model": "configured-model",
+        "pi_runtime_entry": "/trusted/runtime/index.js",
+        "run_workspace_model_keys_only": True,
+    }
+    settings = IsolatedAppSettings.model_validate(values)
+    assert execution_profile(settings) is not None
+    assert settings.deepseek_api_key is None
+
+    with pytest.raises(ValidationError, match="不能配置全局 DeepSeek 密钥"):
+        IsolatedAppSettings.model_validate({**values, "deepseek_api_key": "secret-must-not-appear"})
+
+
 def test_project_build_budget_requires_separate_image() -> None:
     with pytest.raises(ValidationError, match="项目资源预算必须绑定"):
         IsolatedAppSettings(project_sandbox_resources={"memory_mb": 3072})
