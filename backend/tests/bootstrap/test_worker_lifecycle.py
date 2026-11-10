@@ -1,5 +1,6 @@
 """实际 Worker 编排入口使用隔离数据库与 Fake Runtime，覆盖 finally 容器清理。"""
 
+from dataclasses import replace
 from pathlib import Path
 from typing import cast
 from uuid import UUID
@@ -16,6 +17,7 @@ from weora.bootstrap.run_profile import execution_profile
 from weora.bootstrap.settings import AppSettings
 from weora.modules.delivery.application.service import DeliveryService
 from weora.modules.runs.application.execution import RuntimeFailure, RuntimeInput
+from weora.modules.runs.application.harness import OMP_RUNTIME, PI_RUNTIME
 from weora.modules.runs.application.ports import ExecutionProfile
 
 worker_runs = configured
@@ -67,3 +69,43 @@ async def test_worker_releases_owned_sandbox_on_success_or_model_failure(
     detail = await runs.client.get(f"{runs.path}/{run_id}")
     assert detail.json()["status"] == ("FAILED" if fail else "SUCCEEDED")
     assert cleaned == [run_id]
+
+
+@pytest.mark.anyio
+async def test_title_uses_pi_with_frozen_model_even_for_omp_run(
+    worker_runs: RunsHarness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runs = worker_runs
+    settings = cast(AppSettings, runs.app.state.settings).model_copy(
+        update={
+            "run_runtime": "pi",
+            "pi_model": PROFILE.model_id,
+            "deepseek_api_key": SecretStr("not-real-key"),
+            "pi_runtime_entry": RUNTIME_ENTRY,
+        }
+    )
+    deployment = execution_profile(settings)
+    assert deployment is not None
+    runs.app.state.run_service._execution_profile = replace(deployment, runtime_id=OMP_RUNTIME)
+    monkeypatch.setattr(worker, "get_settings", lambda: settings)
+    monkeypatch.setattr(worker, "create_app", lambda _: runs.app)
+
+    class TitleRuntime:
+        def __init__(self, **_: object) -> None:
+            pass
+
+        async def run(self, payload: RuntimeInput, profile: ExecutionProfile) -> str:
+            assert profile.runtime_id == PI_RUNTIME
+            assert profile.provider == "deepseek" and profile.model_id == PROFILE.model_id
+            assert not payload.tools
+            return "排查登录失败"
+
+    monkeypatch.setattr(harness, "PiTextRuntime", TitleRuntime)
+    created = await runs.client.post(runs.path, json=runs.payload(), headers=runs.headers())
+    assert created.status_code == 201, created.text
+    assert await worker._generate_title()
+    detail = (await runs.client.get(f"{runs.path}/{created.json()['id']}")).json()
+    assert detail["task_title"] == "排查登录失败"
+    assert detail["status"] == "QUEUED"
+    assert detail["execution_profile"]["runtime_id"] == OMP_RUNTIME

@@ -29,6 +29,7 @@ from weora.modules.delivery.domain.models import DeliveryError
 from weora.modules.delivery.infrastructure.docker import DockerSandbox
 from weora.modules.identity.application.service import IdentityService
 from weora.modules.runs.application.execution import RunExecutor, RunLease, RuntimeFailure, RuntimeInput, TextRuntime
+from weora.modules.runs.application.harness import PI_RUNTIME
 from weora.modules.runs.application.ports import ExecutionProfile, RunActor
 from weora.modules.runs.application.service import RunService
 from weora.modules.runs.application.task_titles import TITLE_TIMEOUT_SECONDS, generate_next_title
@@ -95,10 +96,10 @@ async def _generate_title() -> bool:
             )
             budget = min(profile.timeout_seconds, TITLE_TIMEOUT_SECONDS)
             profile = replace(
-                profile, max_tokens=min(profile.max_tokens or 128, 128),
+                profile, runtime_id=PI_RUNTIME, max_tokens=min(profile.max_tokens or 128, 128),
                 timeout_seconds=budget, execution_timeout_seconds=budget,
             )
-            # 不装配 Agent 提示、技能、工具或会话历史，只概括原始请求。
+            # 标题用轻量文本执行器，沿用冻结的模型和凭据，不启动任务选用的 Agent 执行器。
             return await harness_factory(settings, profile, api_key)(None, None).run(payload, profile)
 
         return await generate_next_title(lambda: SqlAlchemyRunsUnitOfWork(sessions), generate)
