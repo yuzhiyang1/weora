@@ -10,6 +10,7 @@
 | 职责总览 | 请求、调查、审批、工具与交付的责任分界 | [HTML](weora-overview.html) | [SVG](weora-overview.svg) |
 | 飞书上下文 | 自动补齐与主动查询共用服务及证据快照 | [HTML](feishu-context.html) | [SVG](feishu-context.svg) |
 | 接入与授权 | 渠道、成员、来源和输出受众分别约束 | [HTML](feishu-boundaries.html) | [SVG](feishu-boundaries.svg) |
+| 工作空间邀请 ER 图 | 用户、空间、成员、邀请和会话的关系及键约束 | [HTML](workspace-invites-er.html) | [SVG](workspace-invites-er.svg) |
 
 HTML 是绘图源文件，SVG 由源文件导出。修改时先编辑 HTML，再运行上游 `skills/diagram-design/scripts/export_svg.py <HTML 路径> --system-fonts`，不要分别维护两套几何与文字。HTML 可直接离线打开；在窄屏中局部横向滚动，打印样式允许整体缩放。SVG 可用于 Markdown 内嵌。
 

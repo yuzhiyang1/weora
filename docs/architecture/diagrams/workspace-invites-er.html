@@ -1,0 +1,314 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Weora 工作空间邀请 ER 图</title>
+<style>
+:root {
+  color-scheme: light;
+  background: #f7f8fa;
+  color: #1c1f23;
+  font-family: Geist, Aptos, 'Segoe UI Variable', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+}
+body { margin: 0; }
+main { max-width: 1384px; padding: 28px 24px 24px; margin: 0 auto; }
+header { margin: 0 0 16px; padding-inline: 12px; }
+.eyebrow { color: #005fd7; font-size: 12px; font-weight: 600; margin: 0 0 8px; }
+h1 { font: 400 28px/1.35 'Instrument Serif', 'Noto Serif', 'Songti SC', SimSun, serif; margin: 0 0 8px; }
+header p:last-child { color: #646a73; font-size: 14px; margin: 0; }
+.diagram-scroll { overflow-x: auto; }
+.diagram-scroll:focus-visible { outline: 2px solid #005fd7; outline-offset: 2px; }
+svg { display: block; width: 100%; min-width: 1320px; height: auto; }
+@media (max-width: 600px) { main { padding-inline: 12px; } }
+@media print {
+  main { max-width: none; padding: 0; }
+  .diagram-scroll { overflow: visible; }
+  svg { min-width: 0; }
+}
+</style>
+</head>
+<body>
+<main>
+<header>
+<p class="eyebrow">WEORA · IDENTITY</p>
+<h1>工作空间邀请 ER 图</h1>
+<p>五张表、八条外键，标注键约束、可空性与关系基数。</p>
+</header>
+<div class="diagram-scroll" tabindex="0" role="region" aria-label="工作空间邀请 ER 图，可横向滚动">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1320 1104" role="img" aria-labelledby="workspace-invites-er-title workspace-invites-er-desc">
+<title id="workspace-invites-er-title">Weora 工作空间邀请 ER 图</title>
+<desc id="workspace-invites-er-desc">用户与工作空间通过成员关系形成多对多，邀请关联目标空间、创建者和可空兑换者，会话关联用户和可空的当前空间。</desc>
+<defs>
+<style>
+text { fill: #1c1f23; font-family: Geist, Aptos, 'Segoe UI Variable', 'PingFang SC', 'Microsoft YaHei', sans-serif; font-size: 13px; }
+.table-name { font-size: 16px; font-weight: 600; }
+.entity-label, .note-title { font-size: 14px; font-weight: 600; }
+.column-name, .sql-type, .cardinality, .chip { font-family: 'Geist Mono', Consolas, 'Liberation Mono', monospace; }
+.sql-type, .cardinality, .chip { font-size: 11px; fill: #646a73; }
+.cardinality, .chip { font-weight: 600; }
+.muted { fill: #646a73; }
+</style>
+</defs>
+<rect x="0" y="0" width="1320" height="1104" rx="0" fill="#f7f8fa"/>
+<g class="relation" data-fk="workspace_memberships.user_id → users.id"><title>workspace_memberships.user_id → users.id</title>
+<path d="M340 156 H420 Q428 156 428 148 V128 Q428 120 436 120 H448" fill="none" stroke="#646a73" stroke-width="1.35"/>
+<rect x="344" y="141" width="11" height="12" rx="0" fill="#f7f8fa"/>
+<text x="346" y="151" class="cardinality" text-anchor="start">1</text>
+<rect x="412" y="101" width="32" height="12" rx="0" fill="#f7f8fa"/>
+<text x="442" y="111" class="cardinality" text-anchor="end">0..*</text>
+</g>
+<g class="relation" data-fk="workspace_invites.created_by → users.id"><title>workspace_invites.created_by → users.id</title>
+<path d="M340 172 H400 Q408 172 408 180 V476 Q408 484 416 484 H448" fill="none" stroke="#646a73" stroke-width="1.35"/>
+<rect x="344" y="157" width="11" height="12" rx="0" fill="#f7f8fa"/>
+<text x="346" y="167" class="cardinality" text-anchor="start">1</text>
+<rect x="412" y="465" width="32" height="12" rx="0" fill="#f7f8fa"/>
+<text x="442" y="475" class="cardinality" text-anchor="end">0..*</text>
+</g>
+<g class="relation" data-fk="workspace_invites.used_by → users.id"><title>workspace_invites.used_by → users.id</title>
+<path d="M340 188 H376 Q384 188 384 196 V508 Q384 516 392 516 H448" fill="none" stroke="#646a73" stroke-width="1.35" stroke-dasharray="4 4"/>
+<rect x="344" y="173" width="32" height="12" rx="0" fill="#f7f8fa"/>
+<text x="346" y="183" class="cardinality" text-anchor="start">0..1</text>
+<rect x="412" y="497" width="32" height="12" rx="0" fill="#f7f8fa"/>
+<text x="442" y="507" class="cardinality" text-anchor="end">0..*</text>
+</g>
+<g class="relation" data-fk="auth_sessions.user_id → users.id"><title>auth_sessions.user_id → users.id</title>
+<path d="M340 204 H352 Q360 204 360 212 V764 Q360 772 368 772 H448" fill="none" stroke="#646a73" stroke-width="1.35"/>
+<rect x="344" y="189" width="11" height="12" rx="0" fill="#f7f8fa"/>
+<text x="346" y="199" class="cardinality" text-anchor="start">1</text>
+<rect x="412" y="753" width="32" height="12" rx="0" fill="#f7f8fa"/>
+<text x="442" y="763" class="cardinality" text-anchor="end">0..*</text>
+</g>
+<g class="relation" data-fk="workspace_memberships.workspace_id → workspaces.id"><title>workspace_memberships.workspace_id → workspaces.id</title>
+<path d="M980 152 H872" fill="none" stroke="#646a73" stroke-width="1.35"/>
+<rect x="965" y="133" width="11" height="12" rx="0" fill="#f7f8fa"/>
+<text x="974" y="143" class="cardinality" text-anchor="end">1</text>
+<rect x="876" y="133" width="32" height="12" rx="0" fill="#f7f8fa"/>
+<text x="878" y="143" class="cardinality" text-anchor="start">0..*</text>
+</g>
+<g class="relation" data-fk="workspace_invites.workspace_id → workspaces.id"><title>workspace_invites.workspace_id → workspaces.id</title>
+<path d="M980 172 H936 Q928 172 928 180 V444 Q928 452 920 452 H872" fill="none" stroke="#646a73" stroke-width="1.35"/>
+<rect x="965" y="157" width="11" height="12" rx="0" fill="#f7f8fa"/>
+<text x="974" y="167" class="cardinality" text-anchor="end">1</text>
+<rect x="876" y="433" width="32" height="12" rx="0" fill="#f7f8fa"/>
+<text x="878" y="443" class="cardinality" text-anchor="start">0..*</text>
+</g>
+<g class="relation" data-fk="auth_sessions.workspace_id → workspaces.id"><title>auth_sessions.workspace_id → workspaces.id</title>
+<path d="M980 192 H960 Q952 192 952 200 V796 Q952 804 944 804 H872" fill="none" stroke="#646a73" stroke-width="1.35" stroke-dasharray="4 4"/>
+<rect x="944" y="177" width="32" height="12" rx="0" fill="#f7f8fa"/>
+<text x="974" y="187" class="cardinality" text-anchor="end">0..1</text>
+<rect x="876" y="785" width="32" height="12" rx="0" fill="#f7f8fa"/>
+<text x="878" y="795" class="cardinality" text-anchor="start">0..*</text>
+</g>
+<g class="relation" data-fk="workspaces.created_by → users.id"><title>workspaces.created_by → users.id</title>
+<path d="M48 176 H28 Q20 176 20 168 V24 Q20 16 28 16 H1304 Q1312 16 1312 24 V216 Q1312 224 1304 224 H1272" fill="none" stroke="#646a73" stroke-width="1.35"/>
+<rect x="33" y="157" width="11" height="12" rx="0" fill="#f7f8fa"/>
+<text x="42" y="167" class="cardinality" text-anchor="end">1</text>
+<rect x="1276" y="205" width="32" height="12" rx="0" fill="#f7f8fa"/>
+<text x="1306" y="215" class="cardinality" text-anchor="end">0..*</text>
+</g>
+<g class="entity" data-table="users"><title>用户 users</title>
+<rect x="48" y="104" width="292" height="328" rx="6" fill="#ffffff"/>
+<text x="60" y="129" class="table-name" text-anchor="start">users</text>
+<text x="328" y="129" class="entity-label" text-anchor="end">用户</text>
+<path d="M48 144 L340 144" stroke="#e5e6eb" fill="none"/>
+<rect x="49" y="144" width="290" height="64" rx="0" fill="#f7f8fa"/>
+<text x="60" y="180.0" class="column-name" text-anchor="start">id</text>
+<rect x="196" y="167.0" width="24" height="18" rx="2" fill="#eef0f3"/>
+<text x="208.0" y="180.0" class="chip" text-anchor="middle">PK</text>
+<text x="328" y="180.0" class="sql-type" text-anchor="end">uuid</text>
+<text x="60" y="228.0" class="column-name" text-anchor="start">email_normalized</text>
+<rect x="196" y="215.0" width="24" height="18" rx="2" fill="#eef0f3"/>
+<text x="208.0" y="228.0" class="chip" text-anchor="middle">UQ</text>
+<text x="328" y="228.0" class="sql-type" text-anchor="end">varchar(255)</text>
+<rect x="49" y="240" width="290" height="32" rx="0" fill="#f7f8fa"/>
+<text x="60" y="260.0" class="column-name" text-anchor="start">display_name</text>
+<text x="328" y="260.0" class="sql-type" text-anchor="end">varchar(80)</text>
+<text x="60" y="292.0" class="column-name" text-anchor="start">password_hash</text>
+<text x="328" y="292.0" class="sql-type" text-anchor="end">varchar(255)</text>
+<rect x="49" y="304" width="290" height="32" rx="0" fill="#f7f8fa"/>
+<text x="60" y="324.0" class="column-name" text-anchor="start">status</text>
+<text x="328" y="324.0" class="sql-type" text-anchor="end">varchar(16)</text>
+<text x="60" y="356.0" class="column-name" text-anchor="start">avatar_data_url</text>
+<rect x="196" y="343.0" width="32" height="18" rx="2" fill="#eef0f3"/>
+<text x="212" y="356.0" class="chip" text-anchor="middle">NULL</text>
+<text x="328" y="356.0" class="sql-type" text-anchor="end">text</text>
+<rect x="49" y="368" width="290" height="32" rx="0" fill="#f7f8fa"/>
+<text x="60" y="388.0" class="column-name" text-anchor="start">created_at</text>
+<text x="328" y="388.0" class="sql-type" text-anchor="end">timestamptz</text>
+<text x="60" y="420.0" class="column-name" text-anchor="start">updated_at</text>
+<text x="328" y="420.0" class="sql-type" text-anchor="end">timestamptz</text>
+<rect x="48" y="104" width="292" height="328" rx="6" fill="none" stroke="#646a73" stroke-width="1.2"/>
+</g>
+<g class="entity" data-table="workspaces"><title>工作空间 workspaces</title>
+<rect x="980" y="104" width="292" height="264" rx="6" fill="#ffffff"/>
+<text x="992" y="129" class="table-name" text-anchor="start">workspaces</text>
+<text x="1260" y="129" class="entity-label" text-anchor="end">工作空间</text>
+<path d="M980 144 L1272 144" stroke="#e5e6eb" fill="none"/>
+<rect x="981" y="144" width="290" height="64" rx="0" fill="#f7f8fa"/>
+<text x="992" y="180.0" class="column-name" text-anchor="start">id</text>
+<rect x="1128" y="167.0" width="24" height="18" rx="2" fill="#eef0f3"/>
+<text x="1140.0" y="180.0" class="chip" text-anchor="middle">PK</text>
+<text x="1260" y="180.0" class="sql-type" text-anchor="end">uuid</text>
+<text x="992" y="228.0" class="column-name" text-anchor="start">created_by</text>
+<rect x="1128" y="215.0" width="24" height="18" rx="2" fill="#eef0f3"/>
+<text x="1140.0" y="228.0" class="chip" text-anchor="middle">FK</text>
+<text x="1260" y="228.0" class="sql-type" text-anchor="end">uuid</text>
+<rect x="981" y="240" width="290" height="32" rx="0" fill="#f7f8fa"/>
+<text x="992" y="260.0" class="column-name" text-anchor="start">name</text>
+<text x="1260" y="260.0" class="sql-type" text-anchor="end">varchar(120)</text>
+<text x="992" y="292.0" class="column-name" text-anchor="start">status</text>
+<text x="1260" y="292.0" class="sql-type" text-anchor="end">varchar(16)</text>
+<rect x="981" y="304" width="290" height="32" rx="0" fill="#f7f8fa"/>
+<text x="992" y="324.0" class="column-name" text-anchor="start">created_at</text>
+<text x="1260" y="324.0" class="sql-type" text-anchor="end">timestamptz</text>
+<text x="992" y="356.0" class="column-name" text-anchor="start">updated_at</text>
+<text x="1260" y="356.0" class="sql-type" text-anchor="end">timestamptz</text>
+<rect x="980" y="104" width="292" height="264" rx="6" fill="none" stroke="#646a73" stroke-width="1.2"/>
+</g>
+<g class="entity" data-table="workspace_memberships"><title>成员关系 workspace_memberships</title>
+<rect x="448" y="32" width="424" height="304" rx="6" fill="#ffffff"/>
+<text x="460" y="57" class="table-name" text-anchor="start">workspace_memberships</text>
+<text x="860" y="57" class="entity-label" text-anchor="end">成员关系</text>
+<path d="M448 72 L872 72" stroke="#e5e6eb" fill="none"/>
+<rect x="449" y="72" width="422" height="32" rx="0" fill="#f7f8fa"/>
+<text x="460" y="92.0" class="column-name" text-anchor="start">id</text>
+<rect x="728" y="79.0" width="24" height="18" rx="2" fill="#eef0f3"/>
+<text x="740.0" y="92.0" class="chip" text-anchor="middle">PK</text>
+<text x="860" y="92.0" class="sql-type" text-anchor="end">uuid</text>
+<text x="460" y="124.0" class="column-name" text-anchor="start">user_id</text>
+<rect x="728" y="111.0" width="24" height="18" rx="2" fill="#eef0f3"/>
+<text x="740.0" y="124.0" class="chip" text-anchor="middle">FK</text>
+<text x="860" y="124.0" class="sql-type" text-anchor="end">uuid</text>
+<rect x="449" y="136" width="422" height="32" rx="0" fill="#f7f8fa"/>
+<text x="460" y="156.0" class="column-name" text-anchor="start">workspace_id</text>
+<rect x="728" y="143.0" width="24" height="18" rx="2" fill="#eef0f3"/>
+<text x="740.0" y="156.0" class="chip" text-anchor="middle">FK</text>
+<text x="860" y="156.0" class="sql-type" text-anchor="end">uuid</text>
+<text x="460" y="188.0" class="column-name" text-anchor="start">role</text>
+<text x="860" y="188.0" class="sql-type" text-anchor="end">varchar(16)</text>
+<rect x="449" y="200" width="422" height="32" rx="0" fill="#f7f8fa"/>
+<text x="460" y="220.0" class="column-name" text-anchor="start">status</text>
+<text x="860" y="220.0" class="sql-type" text-anchor="end">varchar(16)</text>
+<text x="460" y="252.0" class="column-name" text-anchor="start">created_at</text>
+<text x="860" y="252.0" class="sql-type" text-anchor="end">timestamptz</text>
+<text x="460" y="284.0" class="column-name" text-anchor="start">updated_at</text>
+<text x="860" y="284.0" class="sql-type" text-anchor="end">timestamptz</text>
+<path d="M448 296 L872 296" stroke="#e5e6eb" fill="none"/>
+<rect x="460" y="307" width="24" height="18" rx="2" fill="#eef0f3"/>
+<text x="472.0" y="320" class="chip" text-anchor="middle">UQ</text>
+<text x="492" y="320" class="column-name" text-anchor="start">(workspace_id, user_id)</text>
+<text x="860" y="320" class="sql-type" text-anchor="end">uq_workspace_membership</text>
+<rect x="448" y="32" width="424" height="304" rx="6" fill="none" stroke="#646a73" stroke-width="1.2"/>
+</g>
+<g class="entity" data-table="workspace_invites"><title>邀请 workspace_invites</title>
+<rect x="448" y="364" width="424" height="296" rx="6" fill="#ffffff"/>
+<text x="460" y="389" class="table-name" text-anchor="start">workspace_invites</text>
+<text x="860" y="389" class="entity-label" text-anchor="end">邀请</text>
+<path d="M448 404 L872 404" stroke="#e5e6eb" fill="none"/>
+<rect x="449" y="404" width="422" height="32" rx="0" fill="#f7f8fa"/>
+<text x="460" y="424.0" class="column-name" text-anchor="start">id</text>
+<rect x="728" y="411.0" width="24" height="18" rx="2" fill="#eef0f3"/>
+<text x="740.0" y="424.0" class="chip" text-anchor="middle">PK</text>
+<text x="860" y="424.0" class="sql-type" text-anchor="end">uuid</text>
+<text x="460" y="456.0" class="column-name" text-anchor="start">workspace_id</text>
+<rect x="728" y="443.0" width="24" height="18" rx="2" fill="#eef0f3"/>
+<text x="740.0" y="456.0" class="chip" text-anchor="middle">FK</text>
+<text x="860" y="456.0" class="sql-type" text-anchor="end">uuid</text>
+<rect x="449" y="468" width="422" height="32" rx="0" fill="#f7f8fa"/>
+<text x="460" y="488.0" class="column-name" text-anchor="start">created_by</text>
+<rect x="728" y="475.0" width="24" height="18" rx="2" fill="#eef0f3"/>
+<text x="740.0" y="488.0" class="chip" text-anchor="middle">FK</text>
+<text x="860" y="488.0" class="sql-type" text-anchor="end">uuid</text>
+<text x="460" y="520.0" class="column-name" text-anchor="start">used_by</text>
+<rect x="728" y="507.0" width="24" height="18" rx="2" fill="#eef0f3"/>
+<text x="740.0" y="520.0" class="chip" text-anchor="middle">FK</text>
+<rect x="756" y="507.0" width="32" height="18" rx="2" fill="#eef0f3"/>
+<text x="772" y="520.0" class="chip" text-anchor="middle">NULL</text>
+<text x="860" y="520.0" class="sql-type" text-anchor="end">uuid</text>
+<rect x="449" y="532" width="422" height="32" rx="0" fill="#f7f8fa"/>
+<text x="460" y="552.0" class="column-name" text-anchor="start">created_at</text>
+<text x="860" y="552.0" class="sql-type" text-anchor="end">timestamptz</text>
+<text x="460" y="584.0" class="column-name" text-anchor="start">expires_at</text>
+<text x="860" y="584.0" class="sql-type" text-anchor="end">timestamptz</text>
+<rect x="449" y="596" width="422" height="32" rx="0" fill="#f7f8fa"/>
+<text x="460" y="616.0" class="column-name" text-anchor="start">used_at</text>
+<rect x="728" y="603.0" width="32" height="18" rx="2" fill="#eef0f3"/>
+<text x="744" y="616.0" class="chip" text-anchor="middle">NULL</text>
+<text x="860" y="616.0" class="sql-type" text-anchor="end">timestamptz</text>
+<text x="460" y="648.0" class="column-name" text-anchor="start">revoked_at</text>
+<rect x="728" y="635.0" width="32" height="18" rx="2" fill="#eef0f3"/>
+<text x="744" y="648.0" class="chip" text-anchor="middle">NULL</text>
+<text x="860" y="648.0" class="sql-type" text-anchor="end">timestamptz</text>
+<rect x="448" y="364" width="424" height="296" rx="6" fill="none" stroke="#646a73" stroke-width="1.2"/>
+</g>
+<g class="entity" data-table="auth_sessions"><title>认证会话 auth_sessions</title>
+<rect x="448" y="684" width="424" height="296" rx="6" fill="#ffffff"/>
+<text x="460" y="709" class="table-name" text-anchor="start">auth_sessions</text>
+<text x="860" y="709" class="entity-label" text-anchor="end">认证会话</text>
+<path d="M448 724 L872 724" stroke="#e5e6eb" fill="none"/>
+<rect x="449" y="724" width="422" height="32" rx="0" fill="#f7f8fa"/>
+<text x="460" y="744.0" class="column-name" text-anchor="start">id</text>
+<rect x="728" y="731.0" width="24" height="18" rx="2" fill="#eef0f3"/>
+<text x="740.0" y="744.0" class="chip" text-anchor="middle">PK</text>
+<text x="860" y="744.0" class="sql-type" text-anchor="end">uuid</text>
+<text x="460" y="776.0" class="column-name" text-anchor="start">user_id</text>
+<rect x="728" y="763.0" width="24" height="18" rx="2" fill="#eef0f3"/>
+<text x="740.0" y="776.0" class="chip" text-anchor="middle">FK</text>
+<text x="860" y="776.0" class="sql-type" text-anchor="end">uuid</text>
+<rect x="449" y="788" width="422" height="32" rx="0" fill="#f7f8fa"/>
+<text x="460" y="808.0" class="column-name" text-anchor="start">workspace_id</text>
+<rect x="728" y="795.0" width="24" height="18" rx="2" fill="#eef0f3"/>
+<text x="740.0" y="808.0" class="chip" text-anchor="middle">FK</text>
+<rect x="756" y="795.0" width="32" height="18" rx="2" fill="#eef0f3"/>
+<text x="772" y="808.0" class="chip" text-anchor="middle">NULL</text>
+<text x="860" y="808.0" class="sql-type" text-anchor="end">uuid</text>
+<text x="460" y="840.0" class="column-name" text-anchor="start">token_hash</text>
+<rect x="728" y="827.0" width="24" height="18" rx="2" fill="#eef0f3"/>
+<text x="740.0" y="840.0" class="chip" text-anchor="middle">UQ</text>
+<text x="860" y="840.0" class="sql-type" text-anchor="end">varchar(64)</text>
+<rect x="449" y="852" width="422" height="32" rx="0" fill="#f7f8fa"/>
+<text x="460" y="872.0" class="column-name" text-anchor="start">csrf_token_hash</text>
+<text x="860" y="872.0" class="sql-type" text-anchor="end">varchar(64)</text>
+<text x="460" y="904.0" class="column-name" text-anchor="start">created_at</text>
+<text x="860" y="904.0" class="sql-type" text-anchor="end">timestamptz</text>
+<rect x="449" y="916" width="422" height="32" rx="0" fill="#f7f8fa"/>
+<text x="460" y="936.0" class="column-name" text-anchor="start">expires_at</text>
+<text x="860" y="936.0" class="sql-type" text-anchor="end">timestamptz</text>
+<text x="460" y="968.0" class="column-name" text-anchor="start">revoked_at</text>
+<rect x="728" y="955.0" width="32" height="18" rx="2" fill="#eef0f3"/>
+<text x="744" y="968.0" class="chip" text-anchor="middle">NULL</text>
+<text x="860" y="968.0" class="sql-type" text-anchor="end">timestamptz</text>
+<rect x="448" y="684" width="424" height="296" rx="6" fill="none" stroke="#646a73" stroke-width="1.2"/>
+</g>
+<rect x="48" y="476" width="292" height="118" rx="6" fill="#ffffff" stroke="#e5e6eb" stroke-width="1.2"/>
+<text x="64" y="503" class="note-title" text-anchor="start">成员关系决定访问权限</text>
+<text x="64" y="529" class="muted" text-anchor="start">用户和工作空间通过成员表形成多对多。</text>
+<text x="64" y="553" class="muted" text-anchor="start">复合唯一约束保证同一用户在同一空间</text>
+<text x="64" y="577" class="muted" text-anchor="start">只有一条成员记录。</text>
+<rect x="980" y="476" width="292" height="118" rx="6" fill="#ffffff" stroke="#e5e6eb" stroke-width="1.2"/>
+<text x="996" y="503" class="note-title" text-anchor="start">邀请与会话的可空外键</text>
+<text x="996" y="529" class="muted" text-anchor="start">未兑换时，邀请的 used_by 为空。</text>
+<text x="996" y="553" class="muted" text-anchor="start">会话未选定空间时，workspace_id 为空。</text>
+<text x="996" y="577" class="muted" text-anchor="start">认证时仍检查有效的成员关系。</text>
+<rect x="48" y="1008" width="1224" height="72" rx="6" fill="#ffffff" stroke="#e5e6eb" stroke-width="1.2"/>
+<rect x="64" y="1023" width="24" height="18" rx="2" fill="#eef0f3"/>
+<text x="76.0" y="1036" class="chip" text-anchor="middle">PK</text>
+<text x="98" y="1036" class="body" text-anchor="start">主键</text>
+<rect x="156" y="1023" width="24" height="18" rx="2" fill="#eef0f3"/>
+<text x="168.0" y="1036" class="chip" text-anchor="middle">FK</text>
+<text x="190" y="1036" class="body" text-anchor="start">外键</text>
+<rect x="248" y="1023" width="24" height="18" rx="2" fill="#eef0f3"/>
+<text x="260.0" y="1036" class="chip" text-anchor="middle">UQ</text>
+<text x="282" y="1036" class="body" text-anchor="start">唯一约束</text>
+<rect x="364" y="1023" width="32" height="18" rx="2" fill="#eef0f3"/>
+<text x="380" y="1036" class="chip" text-anchor="middle">NULL</text>
+<text x="406" y="1036" class="body" text-anchor="start">可空，其他字段均非空</text>
+<text x="576" y="1036" class="body" text-anchor="start">1 / 0..1 / 0..*  分别表示恰好一个、至多一个、零个或多个</text>
+<text x="64" y="1062" class="muted" text-anchor="start">虚线表示可空外键。所有外键采用数据库默认的删除行为（NO ACTION）。</text>
+<text x="1256" y="1062" class="muted" text-anchor="end">依据 Identity ORM 与 Alembic 迁移 0001、0025</text>
+</svg>
+</div>
+</main>
+</body>
+</html>
