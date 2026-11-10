@@ -52,6 +52,7 @@ class RunSummaryResponse(BaseModel):
     agent_version_id: UUID
     agent_name: str
     agent_version: str
+    task_title: str | None = None
     status: RunStatus
     last_sequence: int
     created_at: datetime
@@ -86,8 +87,10 @@ class RunDetailResponse(RunSummaryResponse):
 
     @classmethod
     def from_detail(cls, detail: RunDetail) -> "RunDetailResponse":
+        summary = RunSummaryResponse.model_validate(detail.run)
+        summary.task_title = summary.task_title or detail.task.display_title
         return cls(
-            **RunSummaryResponse.model_validate(detail.run).model_dump(),
+            **summary.model_dump(),
             instruction=detail.task.instruction,
             audience=detail.task.audience,
             output_text=detail.run.output_text,

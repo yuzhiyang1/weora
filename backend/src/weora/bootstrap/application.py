@@ -34,6 +34,7 @@ from weora.modules.agents.infrastructure.skill_catalog import SkillsModuleVersio
 from weora.modules.agents.infrastructure.unit_of_work import SqlAlchemyAgentsUnitOfWork
 from weora.modules.collaboration.api import router as tasks_router
 from weora.modules.collaboration.application.inbox import InboxService
+from weora.modules.collaboration.application.tasks import TaskRecord
 from weora.modules.collaboration.inbox_api import router as inbox_router
 from weora.modules.collaboration.infrastructure.inbox import InboxStore
 from weora.modules.computers.api import router as computer_router
@@ -259,6 +260,11 @@ def create_app(
         return member.display_name if member else None
 
     agent_catalog = AgentsModuleVersionCatalog(app.state.agent_registry_service)
+
+    async def historical_title(task: TaskRecord) -> str | None:
+        coordinator = app.state.coordination_service
+        return await coordinator.historical_task_title(task) if coordinator is not None else None
+
     app.state.run_service = RunService(
         uow_factory=lambda: SqlAlchemyRunsUnitOfWork(session_factory),
         agent_catalog=agent_catalog,
@@ -268,6 +274,7 @@ def create_app(
         content_authorizer=guard,
         projects=project_catalog,
         channel_project_authorizer=guard.channel_project_allowed,
+        historical_title=historical_title,
     )
     app.state.task_collaboration_service = TaskCollaborationService(
         lambda: SqlAlchemyRunsUnitOfWork(session_factory), workspace_member_name, agent_catalog,

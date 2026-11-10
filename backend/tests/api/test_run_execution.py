@@ -17,6 +17,7 @@ from weora.modules.identity.infrastructure.models import WorkspaceMembershipMode
 from weora.modules.runs.application.execution import RunExecutor, RunLease, RuntimeFailure, RuntimeInput
 from weora.modules.runs.application.ports import ExecutionProfile
 from weora.modules.runs.application.service import RunService
+from weora.modules.runs.application.task_titles import generate_next_title
 from weora.modules.runs.infrastructure.agent_catalog import AgentsModuleVersionCatalog
 from weora.modules.runs.infrastructure.execution_access import ModulesExecutionAccess
 from weora.modules.runs.infrastructure.execution_store import SqlAlchemyExecutionStore
@@ -35,6 +36,46 @@ def configured(runs: RunsHarness) -> RunsHarness:
         execution_profile=PROFILE,
     )
     return runs
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("fail", [False, True])
+async def test_manual_title_has_immediate_summary_and_independent_background_result(
+    configured: RunsHarness, fail: bool,
+) -> None:
+    original = "请查看系统日志，找出登录偶发失败的原因。"
+    created = await configured.client.post(
+        configured.path, json=configured.payload(original), headers=configured.headers(),
+    )
+    assert created.status_code == 201
+    assert created.json()["task_title"] == original
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def generate(task: object, payload: RuntimeInput, profile: ExecutionProfile) -> str:
+        assert original in payload.instruction and not payload.tools and profile == PROFILE
+        started.set()
+        await release.wait()
+        if fail:
+            raise TimeoutError
+        return "排查登录偶发失败"
+
+    def uow() -> SqlAlchemyRunsUnitOfWork:
+        return SqlAlchemyRunsUnitOfWork(configured.sessions)
+
+    job = asyncio.create_task(generate_next_title(uow, generate))
+    await asyncio.wait_for(started.wait(), timeout=5)
+    try:
+        assert not await generate_next_title(uow, generate)
+        path = f"{configured.path}/{created.json()['id']}"
+        assert (await configured.client.get(path)).json()["task_title"] == original
+    finally:
+        release.set()
+        assert await job
+    expected = original if fail else "排查登录偶发失败"
+    assert not await generate_next_title(uow, generate)
+    result = (await configured.client.get(path)).json()
+    assert result["task_title"] == expected and result["status"] == "QUEUED"
+    assert (await configured.client.get(configured.path)).json()["items"][0]["task_title"] == expected
 
 
 class ScriptedRuntime:

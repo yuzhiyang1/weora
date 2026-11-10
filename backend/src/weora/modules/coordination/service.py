@@ -13,6 +13,7 @@ from pydantic import TypeAdapter
 
 from weora.modules.agents.application.service import AgentActor, AgentRegistryService
 from weora.modules.agents.domain.errors import AgentRegistryError
+from weora.modules.collaboration.application.tasks import TaskRecord
 from weora.modules.context.domain import ContextActor, ContextError, ContextRunScope, Json
 from weora.modules.context.service import ContextService, timestamp
 from weora.modules.coordination.domain import (
@@ -242,6 +243,21 @@ class CoordinationService:
             and ticket.assignments[-1].id == origin.get("coordination_assignment_id")
             and ticket.assignments[-1].run_id == str(run_id)
         )
+
+    async def historical_task_title(self, task: TaskRecord) -> str | None:
+        """为已通过正文鉴权的历史运行补读接单标题，并核对原任务和发起人。"""
+        origin = task.origin_metadata or {}
+        scope_id, ticket_id = origin.get("coordination_scope_id"), origin.get("coordination_ticket_id")
+        if not isinstance(scope_id, str) or not isinstance(ticket_id, str):
+            return None
+        try:
+            state = await self.store.snapshot(task.workspace_id, scope_id)
+        except CoordinationError:
+            return None
+        ticket = records(state).tickets.get(ticket_id)
+        if ticket and ticket.task_id == str(task.id) and ticket.mandate.actor_id == str(task.created_by):
+            return ticket.title
+        return None
 
     async def channel_deliveries(self, scope: ContextRunScope) -> list[Json]:
         """沿用原 Run 的私有访问检查，向现有渠道面板投影主会话 Outbox 回执。"""

@@ -61,6 +61,9 @@ class TaskModel(Base):
     workspace_id: Mapped[UUID] = mapped_column(ForeignKey("workspaces.id"))
     created_by: Mapped[UUID] = mapped_column(ForeignKey("users.id"))
     instruction: Mapped[str] = mapped_column(Text())
+    title: Mapped[str | None] = mapped_column(String(200))
+    # 非空表示待生成或已领取。领取时把时间推迟，Worker 崩溃后可重新领取。
+    title_due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     origin: Mapped[str] = mapped_column(String(16), default="console")
     audience: Mapped[str] = mapped_column(String(16), default="private")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
@@ -317,6 +320,8 @@ class SqlAlchemyTaskStore:
                 audience=task.audience,
                 origin_metadata=task.origin_metadata,
                 project_context=task.project_context,
+                title=task.title,
+                title_due_at=task.created_at if task.origin == "console" and task.title is None else None,
             )
         )
         await self._session.flush()
@@ -330,7 +335,7 @@ class SqlAlchemyTaskStore:
         await self._session.execute(
             update(TaskModel)
             .where(TaskModel.workspace_id == workspace_id, TaskModel.id.in_(task_ids))
-            .values(instruction="[正文已过期]", project_context=None)
+            .values(instruction="[正文已过期]", project_context=None, title=None, title_due_at=None)
         )
 
     async def get_private(self, *, workspace_id: UUID, task_id: UUID, user_id: UUID) -> TaskRecord | None:
@@ -342,8 +347,40 @@ class SqlAlchemyTaskStore:
                 TaskModel.created_by == user_id,
             )
         )
-        if model is None:
-            return None
+        return self._record(model) if model is not None else None
+
+    async def list_private(self, workspace_id: UUID, user_id: UUID, task_ids: set[UUID]) -> list[TaskRecord]:
+        if not task_ids:
+            return []
+        models = await self._session.scalars(select(TaskModel).where(
+            TaskModel.workspace_id == workspace_id, TaskModel.created_by == user_id, TaskModel.id.in_(task_ids),
+        ))
+        return [self._record(model) for model in models]
+
+    async def claim_title(self, now: datetime, lease_until: datetime) -> TaskRecord | None:
+        due = TaskModel.title_due_at <= now
+        candidate = select(TaskModel.id).where(due).order_by(TaskModel.title_due_at, TaskModel.id).limit(1)
+        # 条件更新同时支持 PostgreSQL 和 SQLite，并发 Worker 只能领取一次。
+        model = await self._session.scalar(
+            update(TaskModel).where(TaskModel.id == candidate.scalar_subquery(), due)
+            .values(title_due_at=lease_until).returning(TaskModel)
+        )
+        return self._record(model) if model is not None else None
+
+    async def finish_title(self, task: TaskRecord, lease_until: datetime, title: str | None) -> bool:
+        # 过期、清理或重新领取后，旧的模型响应不能写回标题。
+        changed = await self._session.scalar(update(TaskModel).where(
+            TaskModel.workspace_id == task.workspace_id,
+            TaskModel.created_by == task.created_by,
+            TaskModel.id == task.id,
+            TaskModel.title_due_at == lease_until,
+            TaskModel.title_due_at > datetime.now(UTC),
+            TaskModel.title.is_(None),
+        ).values(title=title, title_due_at=None).returning(TaskModel.id))
+        return changed is not None
+
+    @staticmethod
+    def _record(model: TaskModel) -> TaskRecord:
         return TaskRecord(
             id=model.id,
             workspace_id=model.workspace_id,
@@ -354,6 +391,7 @@ class SqlAlchemyTaskStore:
             audience=model.audience,
             origin_metadata=model.origin_metadata,
             project_context=model.project_context,
+            title=model.title,
         )
 
     async def lock_private(self, workspace_id: UUID, task_id: UUID, user_id: UUID) -> TaskRecord | None:

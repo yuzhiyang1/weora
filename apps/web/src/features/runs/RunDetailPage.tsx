@@ -299,9 +299,9 @@ function RunDetailContent({ runId }: { runId: string }) {
       {backToList}
       <header className="page-header">
         <div className="run-detail-heading">
-          <Typography.Title heading={1}>{run.agent_name}</Typography.Title>
+          <Typography.Title heading={1}>{run.task_title || "未命名任务"}</Typography.Title>
           <p>
-            {run.agent_version} ·{" "}
+            {run.agent_name} · 固定版本 {run.agent_version} ·{" "}
             {run.audience === "private" ? "仅发起人可见" : "原会话受众"}
           </p>
           <small className="run-detail-id">任务 ID {run.id}</small>

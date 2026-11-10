@@ -75,6 +75,8 @@ class RunRecord:
     recovery_read_only: bool = False
     # 共享执行冻结经过显式发布的摘要和本轮授权快照。
     collaboration_context: dict[str, object] | None = None
+    # 查询时从已授权的任务投影，不冻结到每条运行记录。
+    task_title: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

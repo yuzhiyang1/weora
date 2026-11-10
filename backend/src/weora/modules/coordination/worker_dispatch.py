@@ -172,6 +172,7 @@ class WorkerDispatcher:
         launch_key = f"launch:{assignment.id}:{anchor_id or 'initial'}"
         draft: Json = {
             "instruction": instruction,
+            "title": ticket.title,
             "request_key": request_key,
             "input_ids": [item.id for item in pending],
             "origin": frozen_origin,
@@ -217,6 +218,7 @@ class WorkerDispatcher:
                 project_id=UUID(state.config.project_id) if state.config.project_id else None,
                 repository_ids=tuple(UUID(item) for item in state.config.repository_ids),
                 model_id=ticket.mandate.worker_model_id,
+                task_title=str(launch.get("title", ticket.title)),
             )
             run_id, task_id = str(detail.run.id), str(detail.task.id)
 

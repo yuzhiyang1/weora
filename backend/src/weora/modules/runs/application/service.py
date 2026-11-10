@@ -8,7 +8,7 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
-from weora.modules.collaboration.application.tasks import TaskInput, TaskRecord
+from weora.modules.collaboration.application.tasks import TaskInput, TaskRecord, summarize_task_title
 from weora.modules.runs.application.ports import (
     ExecutionProfile,
     ProjectContextCatalog,
@@ -47,6 +47,7 @@ class RunService:
         projects: ProjectContextCatalog | None = None,
         channel_project_authorizer: Callable[[RunActor, dict[str, object], dict[str, object]], Awaitable[bool]]
         | None = None,
+        historical_title: Callable[[TaskRecord], Awaitable[str | None]] | None = None,
     ) -> None:
         self._uow_factory = uow_factory
         self._agent_catalog = agent_catalog
@@ -56,6 +57,7 @@ class RunService:
         self._content_authorizer = content_authorizer
         self._projects = projects
         self._channel_project_authorizer = channel_project_authorizer
+        self._historical_title = historical_title
 
     async def create(
         self,
@@ -72,6 +74,7 @@ class RunService:
         repository_ids: tuple[UUID, ...] = (),
         thread_keys: tuple[str, ...] = (),
         model_id: str | None = None,
+        task_title: str | None = None,
     ) -> tuple[RunDetail, bool]:
         """固定版本并原子排队；同键同内容回读，同键异内容拒绝。"""
         self._require_workspace(actor, workspace_id)
@@ -136,6 +139,7 @@ class RunService:
             audience="group" if origin_metadata else "private",
             origin_metadata=origin_metadata,
             project_context=project_context,
+            title=summarize_task_title(task_title or "", 200) or None,
         )
         run = RunRecord(
             id=uuid4(),
@@ -520,9 +524,30 @@ class RunService:
             visible: list[RunRecord] = []
             while len(visible) < limit:
                 batch = await uow.store.list_private(actor=actor, limit=limit, before=before)
+                owned = {
+                    task.id: task
+                    for task in await uow.tasks.list_private(
+                        workspace_id, actor.user_id,
+                        {run.task_id for run in batch if run.collaboration_context is None},
+                    )
+                }
                 for run in batch:
-                    if run.collaboration_context is None or await self._task_for_run(uow, run) is not None:
-                        visible.append(run)
+                    task = owned.get(run.task_id)
+                    if run.collaboration_context is not None:
+                        task = await self._task_for_run(uow, run)
+                        if task is None:
+                            continue
+                    if task is not None and self._content_authorizer and (
+                        task.audience == "group" or task.project_context or run.collaboration_context is not None
+                        or run.failure_code == "CONTEXT_EXPIRED"
+                    ):
+                        # 群聊续接的来源可能已撤权，标题与详情使用相同的内容权限。
+                        if task.audience == "group":
+                            task = await uow.tasks.for_run(task, run.id)
+                        if not await self._content_authorizer(actor, run, task):
+                            task = None
+                    title = await self._display_title(task) if task else None
+                    visible.append(replace(run, task_title=title))
                 if len(batch) < limit:
                     break
                 before = batch[-1]
@@ -589,7 +614,14 @@ class RunService:
             raise RunNotFoundError
         if self._content_authorizer and not await self._content_authorizer(actor, run, task):
             raise RunNotFoundError
-        return RunDetail(run, task)
+        return RunDetail(replace(run, task_title=await self._display_title(task)), task)
+
+    async def _display_title(self, task: TaskRecord) -> str:
+        if task.title is None and self._historical_title and (task.origin_metadata or {}).get("coordination_ticket_id"):
+            title = await self._historical_title(task)
+            if title:
+                return summarize_task_title(title, 200)
+        return task.display_title
 
     async def access_metadata(self, actor: RunActor, run_id: UUID) -> RunDetail | None:
         """仅供跨模块权限装配，不返回给 HTTP，也不递归调用派生正文鉴权。"""

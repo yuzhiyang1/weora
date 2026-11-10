@@ -74,19 +74,19 @@ export function RunsPage() {
                 "RECOVERY_REQUIRED",
               ].includes(item.status)
             : item.status === statusFilter)) &&
-      `${item.agent_name} ${item.id} ${item.agent_version}`
+      `${item.task_title ?? ""} ${item.agent_name} ${item.id} ${item.agent_version}`
         .toLowerCase()
         .includes(keyword.toLowerCase()),
   );
   const columns: TableColumn<RunSummary>[] = [
     {
-      title: "Agent / 固定版本",
-      dataIndex: "agent_name",
+      title: "任务",
+      dataIndex: "task_title",
       render: (_: unknown, run: RunSummary) => (
         <Link className="run-link" to={`/runs/${run.id}`}>
-          <strong>{run.agent_name}</strong>
+          <strong>{run.task_title || "未命名任务"}</strong>
           <small>
-            固定版本 {run.agent_version} · {run.id}
+            {run.agent_name} · 固定版本 {run.agent_version}
           </small>
         </Link>
       ),
@@ -190,7 +190,7 @@ export function RunsPage() {
             className="task-search"
             type="search"
             aria-label="搜索运行"
-            placeholder="搜索 Agent、版本或任务 ID…"
+            placeholder="搜索任务标题、Agent、版本或任务 ID…"
             value={keyword}
             onChange={setKeyword}
           />
