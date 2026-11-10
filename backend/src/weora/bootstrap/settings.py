@@ -52,6 +52,7 @@ class AppSettings(BaseSettings):
     api_prefix: str = "/api/v1"
     database_url: str = "postgresql+asyncpg://weora@127.0.0.1:5432/weora"
     registration_enabled: bool = True
+    workspace_invite_key: SecretStr | None = None
     session_cookie_name: str = "weora_session"
     csrf_cookie_name: str = "weora_csrf"
     session_cookie_secure: bool = False
@@ -141,6 +142,7 @@ class AppSettings(BaseSettings):
         "deepseek_api_key",
         "context_encryption_key",
         "context_cursor_key",
+        "workspace_invite_key",
         "github_private_key",
         mode="before",
     )
@@ -171,6 +173,8 @@ class AppSettings(BaseSettings):
             raise ValueError("启用飞书 CLI 读取必须配置原生二进制的绝对路径")
         if self.context_cursor_key and len(self.context_cursor_key.get_secret_value().encode()) < 32:
             raise ValueError("上下文签名密钥至少 32 字节")
+        if self.workspace_invite_key and len(self.workspace_invite_key.get_secret_value().encode()) < 32:
+            raise ValueError("工作空间邀请签名密钥至少 32 字节")
         if self.console_public_url:
             url = urlsplit(self.console_public_url)
             if (

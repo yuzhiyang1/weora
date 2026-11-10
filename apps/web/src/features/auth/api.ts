@@ -5,19 +5,18 @@ export type AuthPrincipal = {
     email: string;
     avatar_url?: string | null;
   };
-  workspace: {
-    id: string;
-    name: string;
-    role: string;
-  };
+  workspace: Workspace;
 };
+
+export type Workspace = { id: string; name: string; role: string };
 
 export type LoginInput = {
   email: string;
   password: string;
+  invite_token?: string;
 };
 
-export type RegisterInput = LoginInput & {
+export type RegisterInput = Omit<LoginInput, "invite_token"> & {
   display_name: string;
   workspace_name: string;
 };
@@ -46,7 +45,10 @@ export class AuthApiError extends Error {
   }
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+export async function requestAuth<T>(
+  path: string,
+  init?: RequestInit,
+): Promise<T> {
   const response = await fetch(`/api/v1/auth${path}`, {
     ...init,
     credentials: "include",
@@ -76,29 +78,36 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export function getCurrentPrincipal(): Promise<AuthPrincipal> {
-  return request<AuthPrincipal>("/me");
+  return requestAuth<AuthPrincipal>("/me");
+}
+
+export function authWrite(method: string, body?: unknown): RequestInit {
+  const csrfToken = readCookie("weora_csrf");
+  return {
+    method,
+    headers: {
+      ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
+      ...(csrfToken ? { "X-CSRF-Token": decodeURIComponent(csrfToken) } : {}),
+    },
+    ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+  };
 }
 
 export function saveProfile(
   display_name: string,
   avatar?: string | null,
 ): Promise<AuthPrincipal> {
-  const csrfToken = readCookie("weora_csrf");
-  return request<AuthPrincipal>("/profile", {
-    method: "PUT",
-    headers: {
-      "Content-Type": "application/json",
-      ...(csrfToken ? { "X-CSRF-Token": decodeURIComponent(csrfToken) } : {}),
-    },
-    body: JSON.stringify({
+  return requestAuth<AuthPrincipal>(
+    "/profile",
+    authWrite("PUT", {
       display_name,
       ...(avatar !== undefined ? { avatar } : {}),
     }),
-  });
+  );
 }
 
 export function login(input: LoginInput): Promise<AuthPrincipal> {
-  return request<AuthPrincipal>("/login", {
+  return requestAuth<AuthPrincipal>("/login", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(input),
@@ -106,7 +115,7 @@ export function login(input: LoginInput): Promise<AuthPrincipal> {
 }
 
 export function register(input: RegisterInput): Promise<AuthPrincipal> {
-  return request<AuthPrincipal>("/register", {
+  return requestAuth<AuthPrincipal>("/register", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(input),
@@ -123,14 +132,5 @@ function readCookie(name: string): string | undefined {
 }
 
 export function logout(): Promise<void> {
-  const csrfToken = readCookie("weora_csrf");
-  return request<void>(
-    "/logout",
-    csrfToken
-      ? {
-          method: "POST",
-          headers: { "X-CSRF-Token": csrfToken },
-        }
-      : { method: "POST" },
-  );
+  return requestAuth<void>("/logout", authWrite("POST"));
 }

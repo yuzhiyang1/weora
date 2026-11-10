@@ -56,6 +56,8 @@ from weora.modules.delivery.api.routes import router as delivery_router
 from weora.modules.delivery.domain.models import DeliveryError
 from weora.modules.delivery.infrastructure.git import ConfiguredCredentials
 from weora.modules.identity.api.routes import router as identity_router
+from weora.modules.identity.api.workspace_routes import router as workspace_identity_router
+from weora.modules.identity.application.invitations import InviteSigner
 from weora.modules.identity.application.service import IdentityService
 from weora.modules.identity.infrastructure.security import Argon2PasswordHasher, SecureTokenManager
 from weora.modules.identity.infrastructure.unit_of_work import SqlAlchemyIdentityUnitOfWork
@@ -149,6 +151,10 @@ def create_app(
         session_ttl=timedelta(days=resolved_settings.session_ttl_days),
         login_max_failures=resolved_settings.login_max_failures,
         login_failure_window=timedelta(minutes=resolved_settings.login_failure_window_minutes),
+        invite_signer=InviteSigner(
+            resolved_settings.workspace_invite_key.get_secret_value().encode()
+            if resolved_settings.workspace_invite_key else None
+        ),
     )
     skill_registry_service = SkillRegistryService(
         uow_factory=lambda: SqlAlchemySkillsUnitOfWork(session_factory),
@@ -367,6 +373,7 @@ def create_app(
     app.add_middleware(RequestIdMiddleware)
     app.include_router(health_router, prefix=resolved_settings.api_prefix)
     app.include_router(identity_router, prefix=resolved_settings.api_prefix)
+    app.include_router(workspace_identity_router, prefix=resolved_settings.api_prefix)
     app.include_router(skills_router, prefix=resolved_settings.api_prefix)
     app.include_router(agents_router, prefix=resolved_settings.api_prefix)
     app.include_router(runs_router, prefix=resolved_settings.api_prefix)

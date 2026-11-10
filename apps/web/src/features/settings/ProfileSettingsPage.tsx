@@ -5,6 +5,7 @@ import { Button, Card, Input } from "../../components/console";
 import { useAuth } from "../auth/AuthProvider";
 import { useSettingsDirty } from "./SettingsEnvironment";
 import { SettingsPage, SettingsResult } from "./SettingsPage";
+import { AccountWorkspaces } from "./AccountWorkspaces";
 
 /** 上传前重新编码 PNG，去除原始元数据并限制持久化大小。 */
 async function prepareAvatar(file: File): Promise<string> {
@@ -189,6 +190,7 @@ export function ProfileSettingsPage() {
           </div>
         </Card>
       </form>
+      <AccountWorkspaces />
     </SettingsPage>
   );
 }

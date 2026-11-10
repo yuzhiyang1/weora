@@ -22,6 +22,22 @@
   flex-shrink: 0;
   margin-top: 8px;
 }
+.settings-heading-with-action {
+  align-items: center;
+}
+.settings-heading-title {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+@media (max-width: 600px) {
+  .settings-heading-with-action {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 12px;
+  }
+}
 .settings-toolbar {
   display: flex;
   justify-content: flex-end;

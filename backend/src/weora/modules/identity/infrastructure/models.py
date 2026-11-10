@@ -63,10 +63,28 @@ class AuthSessionModel(Base):
 
     id: Mapped[UUID] = mapped_column(primary_key=True)
     user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"), index=True)
+    # 旧会话为空时沿用最早的有效成员关系；每次认证仍复查成员状态。
+    workspace_id: Mapped[UUID | None] = mapped_column(ForeignKey("workspaces.id"), nullable=True)
     token_hash: Mapped[str] = mapped_column(String(64), unique=True)
     csrf_token_hash: Mapped[str] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class WorkspaceInviteModel(Base):
+    """一次性邀请的权威状态；链接签名由部署密钥计算，不存库。"""
+
+    __tablename__ = "workspace_invites"
+    __table_args__ = (Index("ix_workspace_invites_workspace_created", "workspace_id", "created_at"),)
+
+    id: Mapped[UUID] = mapped_column(primary_key=True)
+    workspace_id: Mapped[UUID] = mapped_column(ForeignKey("workspaces.id"))
+    created_by: Mapped[UUID] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    used_by: Mapped[UUID | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 

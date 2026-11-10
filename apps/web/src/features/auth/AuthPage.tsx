@@ -17,10 +17,25 @@ import "./auth.css";
 
 type AuthMode = "login" | "register";
 
-export function AuthPage({ mode }: { mode: AuthMode }) {
+type InviteFlow = {
+  token: string;
+  workspaceName: string;
+  onModeChange: (mode: AuthMode | null) => void;
+  onJoined: () => void;
+  onUnavailable: () => void;
+};
+
+export function AuthPage({
+  mode,
+  invitation,
+}: {
+  mode: AuthMode;
+  invitation?: InviteFlow;
+}) {
   const isRegister = mode === "register";
-  const { login, register } = useAuth();
+  const { login, register, registerInvited } = useAuth();
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [needsRejoin, setNeedsRejoin] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -30,23 +45,44 @@ export function AuthPage({ mode }: { mode: AuthMode }) {
     setIsSubmitting(true);
 
     const form = new FormData(event.currentTarget);
+    const credentials = {
+      email: String(form.get("email")),
+      password: String(form.get("password")),
+    };
     try {
       if (isRegister) {
-        await register({
+        const account = {
           display_name: String(form.get("display_name")),
-          email: String(form.get("email")),
-          password: String(form.get("password")),
-          workspace_name: String(form.get("workspace_name")),
-        });
+          ...credentials,
+        };
+        if (invitation) {
+          await registerInvited({ ...account, token: invitation.token });
+          invitation.onJoined();
+        } else {
+          await register({
+            ...account,
+            workspace_name: String(form.get("workspace_name")),
+          });
+        }
       } else {
         await login({
-          email: String(form.get("email")),
-          password: String(form.get("password")),
+          ...credentials,
+          ...(invitation && needsRejoin
+            ? { invite_token: invitation.token }
+            : {}),
         });
+        // 登录完成后，邀请页保留链接并显示当前账号，由用户确认加入。
       }
 
       // 登录状态更新后由 GuestOnly 统一返回原页面，表单不再发起第二次跳转。
     } catch (requestError) {
+      if (invitation && requestError instanceof AuthApiError) {
+        if (requestError.code === "INVITE_UNAVAILABLE") {
+          invitation.onUnavailable();
+          return;
+        }
+        if (requestError.code === "NO_ACTIVE_WORKSPACE") setNeedsRejoin(true);
+      }
       setError(
         requestError instanceof AuthApiError
           ? requestError.message
@@ -58,49 +94,67 @@ export function AuthPage({ mode }: { mode: AuthMode }) {
   }
 
   return (
-    <main className="auth-page">
-      <section className="auth-story" aria-label="Weora 产品介绍">
-        <Link className="auth-brand" to="/" aria-label="Weora Agent operations">
-          <span className="auth-brand-copy">
-            <BrandWordmark />
-            <small>Agent operations</small>
-          </span>
-        </Link>
-        <div className="auth-story-copy">
-          <span className="page-eyebrow">ENTERPRISE AGENT PLATFORM</span>
-          <h2>把个人的 Agent 实践，变成团队可治理的能力。</h2>
-          <p>
-            连接不同模型和 Runtime，同时保留版本、权限、审批、审计与恢复边界。
-          </p>
-        </div>
-        <div className="auth-principles">
-          <span>
-            <IconShield />
-            工作空间隔离
-          </span>
-          <span>
-            <IconLock />
-            不可变发布版本
-          </span>
-          <span>
-            <IconApps />多 Runtime 接入
-          </span>
-        </div>
-      </section>
+    <main className={invitation ? "auth-page invite-auth-page" : "auth-page"}>
+      {invitation ? (
+        <header className="invite-public-header">
+          <BrandWordmark />
+        </header>
+      ) : (
+        <section className="auth-story" aria-label="Weora 产品介绍">
+          <Link
+            className="auth-brand"
+            to="/"
+            aria-label="Weora Agent operations"
+          >
+            <span className="auth-brand-copy">
+              <BrandWordmark />
+              <small>Agent operations</small>
+            </span>
+          </Link>
+          <div className="auth-story-copy">
+            <span className="page-eyebrow">ENTERPRISE AGENT PLATFORM</span>
+            <h2>把个人的 Agent 实践，变成团队可治理的能力。</h2>
+            <p>
+              连接不同模型和 Runtime，同时保留版本、权限、审批、审计与恢复边界。
+            </p>
+          </div>
+          <div className="auth-principles">
+            <span>
+              <IconShield />
+              工作空间隔离
+            </span>
+            <span>
+              <IconLock />
+              不可变发布版本
+            </span>
+            <span>
+              <IconApps />多 Runtime 接入
+            </span>
+          </div>
+        </section>
+      )}
 
       <section className="auth-form-stage">
         <div className="auth-form-wrap">
           <div className="auth-heading">
             <span className="page-eyebrow">
-              {isRegister ? "CREATE WORKSPACE" : "WELCOME BACK"}
+              {invitation
+                ? "工作空间邀请"
+                : isRegister
+                  ? "CREATE WORKSPACE"
+                  : "WELCOME BACK"}
             </span>
             <Typography.Title heading={2}>
               {isRegister ? "创建 Weora 账户" : "登录 Weora"}
             </Typography.Title>
             <Typography.Paragraph>
-              {isRegister
-                ? "创建账户，并建立你的第一个团队工作空间。"
-                : "使用工作邮箱进入团队控制面。"}
+              {invitation
+                ? isRegister
+                  ? `注册后将以普通成员身份加入「${invitation.workspaceName}」。`
+                  : `登录以继续加入「${invitation.workspaceName}」。`
+                : isRegister
+                  ? "创建账户，并建立你的第一个团队工作空间。"
+                  : "使用工作邮箱进入团队控制面。"}
             </Typography.Paragraph>
           </div>
 
@@ -136,7 +190,7 @@ export function AuthPage({ mode }: { mode: AuthMode }) {
               />
             </label>
 
-            {isRegister ? (
+            {isRegister && !invitation ? (
               <label className="auth-field" htmlFor="workspace_name">
                 <span>团队工作空间</span>
                 <Input
@@ -202,20 +256,46 @@ export function AuthPage({ mode }: { mode: AuthMode }) {
                   ? "正在创建"
                   : "正在登录"
                 : isRegister
-                  ? "创建账户并进入"
-                  : "登录"}
+                  ? invitation
+                    ? "注册并加入工作空间"
+                    : "创建账户并进入"
+                  : needsRejoin
+                    ? "登录并加入工作空间"
+                    : "登录"}
             </Button>
           </form>
 
           <p className="auth-switch">
             {isRegister ? "已有账户？" : "还没有账户？"}
-            <Link to={isRegister ? "/login" : "/register"}>
-              {isRegister ? "去登录" : "创建账户"}
-            </Link>
+            {invitation ? (
+              <Button
+                theme="borderless"
+                onClick={() =>
+                  invitation.onModeChange(isRegister ? "login" : "register")
+                }
+              >
+                {isRegister ? "去登录" : "创建账户"}
+              </Button>
+            ) : (
+              <Link to={isRegister ? "/login" : "/register"}>
+                {isRegister ? "去登录" : "创建账户"}
+              </Link>
+            )}
           </p>
-          <footer className="auth-footer">
-            继续即表示你同意遵守所在组织的 AI 使用与数据安全规范。
-          </footer>
+          {invitation ? (
+            <div className="invite-auth-back">
+              <Button
+                theme="borderless"
+                onClick={() => invitation.onModeChange(null)}
+              >
+                返回邀请
+              </Button>
+            </div>
+          ) : (
+            <footer className="auth-footer">
+              继续即表示你同意遵守所在组织的 AI 使用与数据安全规范。
+            </footer>
+          )}
         </div>
       </section>
     </main>

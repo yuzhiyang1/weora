@@ -30,6 +30,8 @@ class LoginRequest(BaseModel):
 
     email: EmailStr
     password: str = Field(min_length=1, max_length=128)
+    # 仅无有效空间的账户在明确确认重新加入时使用。
+    invite_token: str | None = Field(default=None, min_length=1, max_length=128)
 
 
 class PrincipalUserResponse(BaseModel):

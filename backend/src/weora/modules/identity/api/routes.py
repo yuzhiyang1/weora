@@ -25,6 +25,7 @@ from weora.modules.identity.application.errors import (
     LoginRateLimitedError,
     RegistrationDisabledError,
 )
+from weora.modules.identity.application.invitations import InviteNotConfigured, InviteUnavailable, NoActiveWorkspace
 from weora.modules.identity.application.ports import PrincipalRecord
 from weora.modules.identity.application.service import IdentityService, LoginCommand, RegisterCommand
 from weora.shared.api.request_id import get_request_id
@@ -184,6 +185,7 @@ async def login(payload: LoginRequest, request: Request, response: Response) -> 
                 email=str(payload.email),
                 password=payload.password,
                 request_id=get_request_id() or "unknown",
+                invite_token=payload.invite_token,
             )
         )
     except InvalidCredentialsError as exc:
@@ -195,6 +197,16 @@ async def login(payload: LoginRequest, request: Request, response: Response) -> 
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail={"code": "LOGIN_RATE_LIMITED", "message": "登录尝试过多，请稍后再试"},
+        ) from exc
+    except NoActiveWorkspace as exc:
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "NO_ACTIVE_WORKSPACE", "message": "账户没有可访问的工作空间，请通过新邀请加入。"},
+        ) from exc
+    except (InviteUnavailable, InviteNotConfigured) as exc:
+        raise HTTPException(
+            status_code=410,
+            detail={"code": "INVITE_UNAVAILABLE", "message": "此邀请链接已失效，请联系邀请人获取新链接。"},
         ) from exc
 
     _set_auth_cookies(

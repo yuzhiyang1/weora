@@ -19,6 +19,12 @@ import {
   type RegisterInput,
   saveProfile,
 } from "./api";
+import {
+  acceptInvitation,
+  activateWorkspace,
+  registerFromInvitation,
+  type InviteRegistration,
+} from "./workspace-api";
 
 type AuthStatus = "loading" | "authenticated" | "guest";
 
@@ -27,6 +33,9 @@ type AuthContextValue = {
   principal: AuthPrincipal | null;
   login: (input: LoginInput) => Promise<void>;
   register: (input: RegisterInput) => Promise<void>;
+  registerInvited: (input: InviteRegistration) => Promise<AuthPrincipal>;
+  acceptInvite: (token: string) => Promise<AuthPrincipal>;
+  switchWorkspace: (id: string) => Promise<void>;
   logout: () => Promise<void>;
   refreshPrincipal: () => Promise<void>;
   updateProfile: (
@@ -66,22 +75,39 @@ export function AuthProvider({ children }: PropsWithChildren) {
     };
   }, []);
 
-  const value = useMemo<AuthContextValue>(
-    () => ({
+  const value = useMemo<AuthContextValue>(() => {
+    async function applyPrincipal(next: AuthPrincipal) {
+      if (
+        principal &&
+        (principal.workspace.id !== next.workspace.id ||
+          principal.user.id !== next.user.id)
+      ) {
+        // 活动工作空间保存在会话，切换时同时清掉上一空间的请求与私有缓存。
+        await queryClient.cancelQueries();
+        queryClient.clear();
+      }
+      setPrincipal(next);
+      setStatus("authenticated");
+      return next;
+    }
+    return {
       status,
       principal,
       login: async (input) => {
-        const nextPrincipal = await loginRequest(input);
-        setPrincipal(nextPrincipal);
-        setStatus("authenticated");
+        await applyPrincipal(await loginRequest(input));
       },
       register: async (input) => {
-        const nextPrincipal = await registerRequest(input);
-        setPrincipal(nextPrincipal);
-        setStatus("authenticated");
+        await applyPrincipal(await registerRequest(input));
+      },
+      registerInvited: async (input) =>
+        applyPrincipal(await registerFromInvitation(input)),
+      acceptInvite: async (token) =>
+        applyPrincipal(await acceptInvitation(token)),
+      switchWorkspace: async (id) => {
+        await applyPrincipal(await activateWorkspace(id));
       },
       refreshPrincipal: async () => {
-        setPrincipal(await getCurrentPrincipal());
+        await applyPrincipal(await getCurrentPrincipal());
       },
       updateProfile: async (name, avatar) => {
         // 保存响应已包含完整身份，直接同步，避免第二次读取失败掩盖已成功的写入。
@@ -97,9 +123,8 @@ export function AuthProvider({ children }: PropsWithChildren) {
         setPrincipal(null);
         setStatus("guest");
       },
-    }),
-    [principal, status, queryClient],
-  );
+    };
+  }, [principal, status, queryClient]);
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }

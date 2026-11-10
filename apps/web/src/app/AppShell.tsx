@@ -108,6 +108,7 @@ const settingsSections: typeof sections = [
   {
     label: "团队配置 · 影响所有业务空间",
     items: [
+      { label: "成员与邀请", path: "/settings/members", icon: Users },
       { label: "模型与密钥", path: "/settings/models", icon: KeyRound },
       { label: "Agent 执行内核", path: "/settings/harness", icon: Settings2 },
       { label: "飞书连接", path: "/settings/feishu", icon: MessageSquare },

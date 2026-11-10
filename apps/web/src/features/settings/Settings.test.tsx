@@ -88,6 +88,7 @@ function setup(
         ? (JSON.parse(String(init.body)) as Record<string, unknown>)
         : {};
       if (url.endsWith("/auth/me")) return json(principal);
+      if (url.endsWith("/auth/workspaces")) return json([principal.workspace]);
       if (url.endsWith("/auth/profile")) {
         principal = {
           ...principal,

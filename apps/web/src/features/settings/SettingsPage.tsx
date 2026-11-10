@@ -9,21 +9,36 @@ export function SettingsPage({
   description,
   scope = "业务空间级",
   actions,
+  headingAction,
   children,
 }: PropsWithChildren<{
   title: string;
   description: string;
   scope?: string;
   actions?: ReactNode;
+  headingAction?: ReactNode;
 }>) {
   return (
     <div className="settings-page">
-      <header className="settings-heading">
+      <header
+        className={
+          headingAction
+            ? "settings-heading settings-heading-with-action"
+            : "settings-heading"
+        }
+      >
         <div>
-          <h1>{title}</h1>
+          {headingAction ? (
+            <div className="settings-heading-title">
+              <h1>{title}</h1>
+              <Tag>{scope}</Tag>
+            </div>
+          ) : (
+            <h1>{title}</h1>
+          )}
           <p>{description}</p>
         </div>
-        <Tag>{scope}</Tag>
+        {headingAction || <Tag>{scope}</Tag>}
       </header>
       {actions && <div className="settings-toolbar">{actions}</div>}
       {children}

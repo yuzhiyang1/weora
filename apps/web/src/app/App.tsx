@@ -11,12 +11,22 @@ import {
 } from "react-router-dom";
 import { SettingsEnvironment } from "../features/settings/SettingsEnvironment";
 
-import { AuthProvider } from "../features/auth/AuthProvider";
+import { AuthProvider, useAuth } from "../features/auth/AuthProvider";
 import { GuestOnly, RequireAuth } from "../features/auth/AuthRoutes";
 
 const AuthPage = lazy(() =>
   import("../features/auth/AuthPage").then((module) => ({
     default: module.AuthPage,
+  })),
+);
+const InvitationPage = lazy(() =>
+  import("../features/auth/InvitationPage").then((module) => ({
+    default: module.InvitationPage,
+  })),
+);
+const WorkspaceMembersPage = lazy(() =>
+  import("../features/settings/WorkspaceMembersPage").then((module) => ({
+    default: module.WorkspaceMembersPage,
   })),
 );
 const AgentsPage = lazy(() =>
@@ -63,13 +73,19 @@ const RunDetailPage = lazy(() =>
   })),
 );
 const TasksPage = lazy(() =>
-  import("../features/tasks/TasksPage").then((module) => ({ default: module.TasksPage })),
+  import("../features/tasks/TasksPage").then((module) => ({
+    default: module.TasksPage,
+  })),
 );
 const TaskDetailPage = lazy(() =>
-  import("../features/tasks/TasksPage").then((module) => ({ default: module.TaskDetailPage })),
+  import("../features/tasks/TasksPage").then((module) => ({
+    default: module.TaskDetailPage,
+  })),
 );
 const InboxPage = lazy(() =>
-  import("../features/inbox/InboxPage").then((module) => ({ default: module.InboxPage })),
+  import("../features/inbox/InboxPage").then((module) => ({
+    default: module.InboxPage,
+  })),
 );
 const ConnectionsPage = lazy(() =>
   import("../features/context/ConnectionsPage").then((module) => ({
@@ -181,14 +197,9 @@ export function App() {
               </GuestOnly>
             }
           />
+          <Route path="join" element={<InvitationPage />} />
           <Route element={<RequireAuth />}>
-            <Route
-              element={
-                <SettingsEnvironment>
-                  <AppShell />
-                </SettingsEnvironment>
-              }
-            >
+            <Route element={<WorkspaceShell />}>
               <Route index element={<OverviewPage />} />
               <Route path="agents" element={<AgentsPage />} />
               <Route path="agents/:agentId" element={<AgentDetailPage />} />
@@ -241,11 +252,18 @@ export function App() {
               />
               <Route path="settings/code" element={<CodeSettingsPage />} />
               <Route
+                path="settings/members"
+                element={<WorkspaceMembersPage />}
+              />
+              <Route
                 path="settings/business-space"
                 element={<BusinessSpaceSettingsPage />}
               />
               <Route path="settings/models" element={<ModelSettingsPage />} />
-              <Route path="settings/harness" element={<HarnessSettingsPage />} />
+              <Route
+                path="settings/harness"
+                element={<HarnessSettingsPage />}
+              />
               <Route path="settings/feishu" element={<FeishuSettingsPage />} />
               <Route
                 path="settings/coordination"
@@ -274,6 +292,18 @@ export function App() {
         </Suspense>
       </AuthProvider>
     </QueryClientProvider>
+  );
+}
+
+function WorkspaceShell() {
+  const { principal } = useAuth();
+  // 业务空间选择与草稿都属于当前租户，切换后重新装配控制台。
+  return (
+    <SettingsEnvironment
+      key={`${principal?.user.id}:${principal?.workspace.id}`}
+    >
+      <AppShell />
+    </SettingsEnvironment>
   );
 }
 

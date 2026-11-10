@@ -4,7 +4,7 @@ import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 import pytest
@@ -53,10 +53,16 @@ async def member(
                         user_id=UUID(user_id),
                         role="member",
                         status="active",
-                        created_at=datetime.now(UTC) - timedelta(days=1),
+                        created_at=datetime.now(UTC),
                         updated_at=datetime.now(UTC),
                     )
                 )
+            # 会话现在保留已选空间，夹具通过公开入口进入协作所在的空间。
+            activated = await client.post(
+                f"/api/v1/auth/workspaces/{harness.workspace_id}/activate",
+                headers=headers(client),
+            )
+            assert activated.status_code == 200, activated.text
         yield client, user_id
 
 

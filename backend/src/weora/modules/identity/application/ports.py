@@ -7,6 +7,8 @@ from types import TracebackType
 from typing import Protocol
 from uuid import UUID
 
+from weora.modules.identity.application.invitations import WorkspaceInvite, WorkspaceMember, WorkspaceRecord
+
 
 @dataclass(frozen=True, slots=True)
 class UserRecord:
@@ -41,8 +43,46 @@ class RevokedSessionRecord:
 
 
 class IdentityStore(Protocol):
-    async def workspace_member_names(self, workspace_id: UUID) -> list[tuple[UUID, str]]: ...
     """Identity 聚合在一个事务内需要的数据库操作。"""
+
+    async def workspace_member_names(self, workspace_id: UUID) -> list[tuple[UUID, str]]: ...
+
+    async def list_workspaces(self, user_id: UUID) -> list[WorkspaceRecord]: ...
+
+    async def list_members(self, workspace_id: UUID) -> list[WorkspaceMember]: ...
+
+    async def lock_workspace(self, workspace_id: UUID) -> bool: ...
+
+    async def lock_active_user(self, user_id: UUID) -> bool: ...
+
+    async def create_invite(
+        self,
+        invite_id: UUID,
+        workspace_id: UUID,
+        user_id: UUID,
+        now: datetime,
+        expires_at: datetime,
+    ) -> WorkspaceInvite: ...
+
+    async def list_invites(self, workspace_id: UUID) -> list[WorkspaceInvite]: ...
+
+    async def get_invite(self, invite_id: UUID, *, workspace_id: UUID | None = None) -> WorkspaceInvite | None: ...
+
+    async def consume_invite(self, invite_id: UUID, user_id: UUID, now: datetime) -> None: ...
+
+    async def revoke_invite(self, invite_id: UUID, now: datetime) -> None: ...
+
+    async def remove_member(self, workspace_id: UUID, user_id: UUID, now: datetime) -> bool: ...
+
+    async def join_workspace(self, workspace_id: UUID, user_id: UUID, now: datetime) -> None: ...
+
+    async def activate_workspace(
+        self,
+        token_hash: str,
+        user_id: UUID,
+        workspace_id: UUID,
+        now: datetime,
+    ) -> bool: ...
 
     async def get_user_by_email(self, email: str) -> UserRecord | None: ...
 
@@ -64,11 +104,22 @@ class IdentityStore(Protocol):
         occurred_at: datetime,
     ) -> None: ...
 
+    async def create_user(
+        self,
+        *,
+        user_id: UUID,
+        display_name: str,
+        email: str,
+        password_hash: str,
+        occurred_at: datetime,
+    ) -> None: ...
+
     async def create_session(
         self,
         *,
         session_id: UUID,
         user_id: UUID,
+        workspace_id: UUID,
         token_hash: str,
         csrf_token_hash: str,
         created_at: datetime,
