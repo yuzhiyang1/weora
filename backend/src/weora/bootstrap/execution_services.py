@@ -481,7 +481,7 @@ def configure_execution_services(app: FastAPI, settings: AppSettings, guard: Run
 
             gateway.register(FEISHU_AGENT_CLI, execute_feishu_cli)
             gateway.register(FEISHU_CLI_SKILL, read_feishu_cli_skill)
-    register_delivery_tools(gateway, delivery)
+    register_delivery_tools(gateway, delivery, native_tools=settings.sandbox_native_tools_enabled)
     if app.state.openbot is not None and settings.computer_browser_origins:
         register_computer_tools(
             gateway,

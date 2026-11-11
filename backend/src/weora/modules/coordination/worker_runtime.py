@@ -222,7 +222,7 @@ class CoordinatedRuntime:
                 declared = next((item for item in payload.tools if item.name == name), None)
                 if status_only and (not declared or declared.effect != "read"):
                     return {"ok": False, "code": "STATUS_ONLY_READ_ONLY"}
-                if name == "sandbox.command" and not status_only:
+                if name in {"sandbox.command", "sandbox.pi", "sandbox.omp"} and not status_only:
                     return await activities.start(
                         key(str(self.lease.run.id), call_id),
                         "command",

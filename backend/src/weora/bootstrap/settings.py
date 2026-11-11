@@ -123,6 +123,8 @@ class AppSettings(BaseSettings):
     project_sandbox_enabled: bool = False
     # 项目执行可选独立固定镜像（例如 Java）；不替换旧 W09 的 Node/浏览器环境。
     project_sandbox_image: str | None = None
+    # 对应的沙箱镜像必须预装固定版本的 Pi/OMP 工具执行器。
+    sandbox_native_tools_enabled: bool = False
     project_sandbox_resources: ProjectSandboxResources = Field(default_factory=ProjectSandboxResources)
     # 受信任的部署级 argv，不能由任务或模型提供；Windows 可桥接本地 WSL Docker。
     sandbox_cli_executable: str = "docker"
@@ -211,6 +213,8 @@ class AppSettings(BaseSettings):
             raise ValueError("服务端仓库同步需要持久缓存目录，提交有效期必须长于同步间隔")
         if self.project_sandbox_enabled and (not self.sandbox_image or not self.repository_cache_path):
             raise ValueError("项目隔离执行必须配置固定镜像和只读仓库缓存")
+        if self.sandbox_native_tools_enabled and not self.sandbox_image:
+            raise ValueError("原生编码工具必须配置受管沙箱镜像")
         if self.project_sandbox_resources != ProjectSandboxResources() and not self.project_sandbox_image:
             raise ValueError("项目资源预算必须绑定独立固定镜像，不能覆盖默认沙箱")
         if self.sandbox_image and (

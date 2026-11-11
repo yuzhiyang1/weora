@@ -2,6 +2,7 @@
 
 from typing import cast
 
+from weora.modules.delivery.application.native_tools import NATIVE_RUNTIME_IDS, NATIVE_TOOL_ENTRY, NATIVE_TOOLS
 from weora.modules.delivery.application.service import DeliveryService
 from weora.modules.delivery.domain.models import PLAN_ACTIONS, ArtifactRecord, DeliveryError, PlanScope
 from weora.modules.tools.application.gateway import ToolGateway, ToolScope, ToolSpec
@@ -28,7 +29,7 @@ def _artifact_result(artifact: ArtifactRecord, screenshot: ArtifactRecord | None
     return result
 
 
-def register_delivery_tools(gateway: ToolGateway, service: DeliveryService) -> None:
+def register_delivery_tools(gateway: ToolGateway, service: DeliveryService, *, native_tools: bool = False) -> None:
     """角色与当前审批都由可信 Worker 决定，模型参数不能切换角色。"""
     text: dict[str, object] = {"type": "string", "minLength": 1, "maxLength": 12000}
     scope_schema = _object(
@@ -128,6 +129,27 @@ def register_delivery_tools(gateway: ToolGateway, service: DeliveryService) -> N
             timeout_seconds=60,
         ),
     ]
+    if native_tools:
+        definitions.extend(
+            ToolSpec(
+                f"sandbox.{vendor}",
+                f"调用已批准沙箱里的 {vendor} 原生工具。"
+                "在 plan.propose 的 commands 中原样登记 "
+                f"['{NATIVE_TOOL_ENTRY}', '{vendor}', tool, arguments_json]，"
+                "并申请 command.run。原生参数使用 JSON 对象，例如 read 用 {\"path\":\"README.md\"}。",
+                _object(
+                    {
+                        "tool": {"enum": sorted(names)},
+                        "arguments_json": {"type": "string", "minLength": 2, "maxLength": 2048},
+                    },
+                    ["tool", "arguments_json"],
+                ),
+                effect="write",
+                timeout_seconds=610,
+                runtime_id=NATIVE_RUNTIME_IDS[vendor],
+            )
+            for vendor, names in NATIVE_TOOLS.items()
+        )
 
     async def execute(scope: ToolScope, name: str, arguments: dict[str, object]) -> dict[str, object]:
         try:
@@ -192,7 +214,16 @@ def register_delivery_tools(gateway: ToolGateway, service: DeliveryService) -> N
             screenshot = None
             if name == "sandbox.command":
                 artifact = await service.command(
-                    scope.actor, scope.run_id, tuple(cast(list[str], arguments["argv"])), scope.fencing_token
+                    scope.actor, scope.run_id, tuple(cast(list[str], arguments["argv"])), scope.fencing_token,
+                    runtime_id=scope.runtime_id,
+                )
+            elif name in {"sandbox.pi", "sandbox.omp"}:
+                arguments_json = cast(str, arguments["arguments_json"])
+                # 保留原始字符串，逐字匹配批准的命令参数，复用现有隔离与审计。
+                vendor = name.removeprefix("sandbox.")
+                argv = (NATIVE_TOOL_ENTRY, vendor, str(arguments["tool"]), arguments_json)
+                artifact = await service.command(
+                    scope.actor, scope.run_id, argv, scope.fencing_token, runtime_id=scope.runtime_id,
                 )
             elif name == "sandbox.file.write":
                 artifact = await service.write(

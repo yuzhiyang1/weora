@@ -25,6 +25,7 @@ class ToolScope:
     lease_owner: str
     fencing_token: int
     role: str = "console"
+    runtime_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,6 +35,7 @@ class ToolSpec:
     input_schema: dict[str, object]
     effect: str = "read"
     timeout_seconds: float = 10
+    runtime_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,6 +97,10 @@ class ToolGateway:
     def specifications(self) -> tuple[ToolSpec, ...]:
         return tuple(item[0] for item in self._tools.values())
 
+    def specifications_for_runtime(self, runtime_id: str | None) -> tuple[ToolSpec, ...]:
+        """通用工具共享，原生工具只提供给绑定的运行时。"""
+        return tuple(spec for spec in self.specifications() if spec.runtime_id in {None, runtime_id})
+
     async def invoke(
         self, scope: ToolScope, call_id: str, name: str, arguments: dict[str, object]
     ) -> dict[str, object]:
@@ -103,6 +109,8 @@ class ToolGateway:
         if definition is None:
             return failure("TOOL_NOT_ALLOWED")
         spec, handler = definition
+        if spec.runtime_id is not None and spec.runtime_id != scope.runtime_id:
+            return failure("TOOL_NOT_ALLOWED")
         if scope.role == "recovery" and spec.effect != "read":
             return failure("RECOVERY_READ_ONLY")
         if not re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", call_id):
