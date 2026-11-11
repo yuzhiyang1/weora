@@ -77,7 +77,10 @@ class ChangeExporter(Protocol):
 
 
 class GitRunner(Protocol):
-    async def run(self, cwd: Path, env: Mapping[str, str], *args: str, stdin: bytes | None = None) -> bytes: ...
+    async def run(
+        self, cwd: Path, env: Mapping[str, str], *args: str,
+        stdin: bytes | None = None, success_codes: tuple[int, ...] = (0,),
+    ) -> bytes: ...
 
 
 class IsolatedGitRunner:
@@ -86,7 +89,10 @@ class IsolatedGitRunner:
     def __init__(self, executable: str = "git", timeout: float = 60) -> None:
         self.executable, self.timeout = executable, timeout
 
-    async def run(self, cwd: Path, env: Mapping[str, str], *args: str, stdin: bytes | None = None) -> bytes:
+    async def run(
+        self, cwd: Path, env: Mapping[str, str], *args: str,
+        stdin: bytes | None = None, success_codes: tuple[int, ...] = (0,),
+    ) -> bytes:
         options: dict[str, object] = (
             {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {"start_new_session": True}
         )
@@ -137,7 +143,7 @@ class IsolatedGitRunner:
                         task.cancel()
                 await asyncio.gather(*tasks, return_exceptions=True)
             await process.wait()
-            if process.returncode != 0:
+            if process.returncode not in success_codes:
                 raise DeliveryError("GIT_OPERATION_FAILED", "受控 Git 操作失败，请核对登记仓库和授权")
             return output
 

@@ -25,6 +25,28 @@ READ_FILE = ToolSpec(
 )
 
 
+def discovery_spec(name: str, description: str, term: str | None = None) -> ToolSpec:
+    """只接受已选仓库的 ID、相对目录和检索词，目录省略时从根开始。"""
+    properties = {
+        "repository_id": {"type": "string", "pattern": "^[0-9a-fA-F-]{36}$"},
+        "path": {"type": "string", "maxLength": 400},
+    }
+    required = ["repository_id"]
+    if term:
+        properties[term] = {"type": "string", "minLength": 1, "maxLength": 160}
+        required.append(term)
+    return ToolSpec(
+        name, description,
+        {"type": "object", "properties": properties, "required": required, "additionalProperties": False},
+        timeout_seconds=160,
+    )
+
+
+LIST_DIRECTORY = discovery_spec("repo.directory.list", "列出固定提交下指定目录的直接子项。")
+FIND_FILES = discovery_spec("repo.file.find", "在固定提交中按 glob 查找文件，例如 *Exam*.java。", "pattern")
+SEARCH_TEXT = discovery_spec("repo.text.search", "在固定提交中按字面关键词搜索文本，返回路径、行号和匹配行。", "query")
+
+
 class ReadOnlyRepository:
     def __init__(self, root: Path | None) -> None:
         self._root = root.resolve() if root is not None else None

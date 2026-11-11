@@ -379,7 +379,10 @@ class _ProjectTransport(IsolatedGitRunner):
         self.reader, self.source = reader, source
         self.identity = identity if isinstance(identity, dict) else {}
 
-    async def run(self, cwd: Path, env: Mapping[str, str], *args: str, stdin: bytes | None = None) -> bytes:
+    async def run(
+        self, cwd: Path, env: Mapping[str, str], *args: str,
+        stdin: bytes | None = None, success_codes: tuple[int, ...] = (0,),
+    ) -> bytes:
         if args[0] in {"fetch", "push", "ls-remote"}:
             # 复用已验收的 DNS 固定、精确认证作用域、私网/端口和 TLS 规则。
             checked = await self.reader._environment(cwd, self.source)
@@ -400,4 +403,4 @@ class _ProjectTransport(IsolatedGitRunner):
                 if any(character in co_author for character in "\r\n\x00"):
                     raise DeliveryError("GIT_IDENTITY_INVALID", "协作署名无效")
                 stdin = (stdin or b"").rstrip() + ("\n\nCo-authored-by: " + co_author + "\n").encode()
-        return await super().run(cwd, env, *args, stdin=stdin)
+        return await super().run(cwd, env, *args, stdin=stdin, success_codes=success_codes)

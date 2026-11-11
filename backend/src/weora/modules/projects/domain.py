@@ -52,6 +52,20 @@ class RepositoryDirectoryReader(Protocol):
     async def directory(self, cache_id: UUID, revision: str, path: str) -> dict[str, object]: ...
 
 
+@runtime_checkable
+class RepositorySearchReader(Protocol):
+    async def find(self, cache_id: UUID, revision: str, path: str, pattern: str) -> dict[str, object]: ...
+    async def search(self, cache_id: UUID, revision: str, path: str, query: str) -> dict[str, object]: ...
+
+
+def validate_repository_directory_path(path: str) -> None:
+    """空字符串表示仓库根，其余路径与读文件使用同一拒绝规则。"""
+    if path:
+        validate_repository_file_path(path)
+        if any(part in {"", "."} for part in path.split("/")):
+            raise ProjectError("REPOSITORY_PATH_DENIED", "目录路径不可读取")
+
+
 @dataclass(frozen=True)
 class RepositoryArchive:
     """只在后台传递的固定提交归档，不进入模型或普通 API。"""

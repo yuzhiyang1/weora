@@ -1,6 +1,7 @@
 """第一版执行能力装配；外部系统未配置时安全禁用，不选择机器上的其他凭据。"""
 
 from datetime import datetime
+from functools import partial
 from pathlib import Path
 from typing import Literal, cast
 from uuid import UUID
@@ -53,7 +54,13 @@ from weora.modules.runs.infrastructure.module_access import (
     RunContentGuard,
 )
 from weora.modules.tools.application.gateway import ToolGateway, ToolScope, ToolSpec, failure
-from weora.modules.tools.infrastructure.repository import READ_FILE, ReadOnlyRepository
+from weora.modules.tools.infrastructure.repository import (
+    FIND_FILES,
+    LIST_DIRECTORY,
+    READ_FILE,
+    SEARCH_TEXT,
+    ReadOnlyRepository,
+)
 from weora.modules.tools.infrastructure.store import SqlAlchemyToolStore
 from weora.shared.infrastructure.database import SessionFactory
 
@@ -408,7 +415,9 @@ def configure_execution_services(app: FastAPI, settings: AppSettings, guard: Run
         Path(settings.readonly_repository_path) if settings.readonly_repository_path else None
     )
 
-    async def read_repository(scope: ToolScope, arguments: Json) -> Json:
+    async def read_repository(
+        scope: ToolScope, arguments: Json, *, operation: Literal["read", "list", "find", "search"] = "read"
+    ) -> Json:
         detail = await app.state.run_service.access_metadata(scope.actor, scope.run_id)
         if detail and detail.task.project_context:
             if detail.task.project_context.get("read_protocol") != "git-objects-v1":
@@ -423,16 +432,23 @@ def configure_execution_services(app: FastAPI, settings: AppSettings, guard: Run
                     detail.task.project_context,
                     UUID(raw_id),
                     str(arguments.get("path", "")),
+                    operation=operation,
+                    term=str(arguments.get("query", arguments.get("pattern", ""))),
                 )
             except ValueError:
                 return failure("TOOL_ARGUMENTS_INVALID")
             except ProjectError as error:
                 return failure(error.code)
-        if scope.actor.workspace_id != settings.readonly_repository_workspace_id:
+        if operation != "read" or scope.actor.workspace_id != settings.readonly_repository_workspace_id:
             return failure("REPOSITORY_NOT_CONFIGURED")
         return await repository.read(scope, arguments)
 
     gateway.register(READ_FILE, read_repository)
+    discovery_tools: tuple[tuple[ToolSpec, Literal["list", "find", "search"]], ...] = (
+        (LIST_DIRECTORY, "list"), (FIND_FILES, "find"), (SEARCH_TEXT, "search")
+    )
+    for spec, operation in discovery_tools:
+        gateway.register(spec, partial(read_repository, operation=operation))
     if context is not None:
         context_tools = ContextTools(context)
         for tool in context_tools.specs:

@@ -35,7 +35,10 @@ class LocalFixtureGit(IsolatedGitRunner):
         self.fetch_started = asyncio.Event()
         self.release_fetch: asyncio.Event | None = None
 
-    async def run(self, cwd: Path, env: Mapping[str, str], *args: str, stdin: bytes | None = None) -> bytes:
+    async def run(
+        self, cwd: Path, env: Mapping[str, str], *args: str,
+        stdin: bytes | None = None, success_codes: tuple[int, ...] = (0,),
+    ) -> bytes:
         if FIXTURE_URL in args:
             self.network_calls.append(args[0])
             if args[0] == "fetch" and self.fail_fetch:
@@ -50,8 +53,8 @@ class LocalFixtureGit(IsolatedGitRunner):
             git_env["GIT_CONFIG_COUNT"] = str(index + 1)
             git_env["GIT_ALLOW_PROTOCOL"] = "file"
             args = tuple(self.upstream.as_uri() if value == FIXTURE_URL else value for value in args)
-            return await super().run(cwd, git_env, *args, stdin=stdin)
-        return await super().run(cwd, env, *args, stdin=stdin)
+            return await super().run(cwd, git_env, *args, stdin=stdin, success_codes=success_codes)
+        return await super().run(cwd, env, *args, stdin=stdin, success_codes=success_codes)
 
 
 @pytest.mark.anyio

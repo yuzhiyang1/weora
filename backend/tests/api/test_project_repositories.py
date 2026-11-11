@@ -49,6 +49,15 @@ class Reader:
     async def read(self, cache_id: UUID, revision: str, path: str) -> dict[str, object]:
         return {"ok": True, "revision": revision, "path": path, "content": "夹具 README"}
 
+    async def directory(self, cache_id: UUID, revision: str, path: str) -> dict[str, object]:
+        return {"entries": [{"name": "README.md", "kind": "blob"}]}
+
+    async def find(self, cache_id: UUID, revision: str, path: str, pattern: str) -> dict[str, object]:
+        return {"paths": ["README.md"]}
+
+    async def search(self, cache_id: UUID, revision: str, path: str, query: str) -> dict[str, object]:
+        return {"matches": [{"path": "README.md", "line": 1, "text": query}]}
+
     async def discard(self, cache_id: UUID) -> None:
         self.discarded.append(cache_id)
 
@@ -134,6 +143,15 @@ async def test_only_selected_cloned_fixed_across_replay_and_tool_scope(runs: Run
     assert {item[0] for item in reader.cloned} == set(reader.checked)
     checks, clones = len(reader.checked), len(reader.cloned)
     reader.revision = "b" * 40
+    for name, args in (
+        ("repo.directory.list", {}),
+        ("repo.file.find", {"pattern": "*.md"}),
+        ("repo.text.search", {"query": "夹具"}),
+    ):
+        result = await gateway.invoke(scope, name, name, {"repository_id": a["id"], **args})
+        assert result["ok"] and result["revision"] == "a" * 40
+        denied = await gateway.invoke(scope, name + "-denied", name, {"repository_id": excluded["id"], **args})
+        assert denied == {"ok": False, "error": {"code": "REPOSITORY_NOT_SELECTED"}}
     replay = await gateway.invoke(scope, "follow-up", "repo.file.read", {"repository_id": a["id"], "path": "README.md"})
     assert replay["revision"] == "a" * 40
     assert len(reader.checked) == checks and len(reader.cloned) == clones
@@ -179,6 +197,7 @@ async def test_run_isolates_repository_preparation_failures(
         agents=runs.app.state.agent_registry_service,
         uow_factory=lambda: SqlAlchemyRunsUnitOfWork(runs.sessions),
         projects=runs.app.state.context_access.projects,
+        gateway=runs.app.state.tool_gateway,
     )
 
     class RepositoryRuntime(ScriptedRuntime):
@@ -188,6 +207,9 @@ async def test_run_isolates_repository_preparation_failures(
             scope = ToolScope(run_id, actor, self.lease.owner, self.lease.fencing_token)
             gateway = runs.app.state.tool_gateway
             assert reader.checked == reader.cloned == []
+            assert {"repo.directory.list", "repo.file.find", "repo.text.search", "repo.file.read"} <= {
+                tool.name for tool in payload.tools
+            }
             if read_repositories:
                 failed = await gateway.invoke(
                     scope, "android", "repo.file.read", {"repository_id": str(android_id), "path": "README.md"}
