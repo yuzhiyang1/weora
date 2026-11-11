@@ -3,6 +3,7 @@ import { type Api, type Model } from '@earendil-works/pi-ai';
 import { configuredModels, configuredModel, isSupportedProvider, type SupportedProvider } from './providers.js';
 import { createHash } from 'node:crypto';
 import { ModelResponseLimitError, withModelRetry, type ModelRetryStatus } from './model-retry.js';
+import { PiCompaction, type Summarize } from './compaction.js';
 
 export const PROTOCOL = 'weora.runtime.v1';
 export const MAX_OUTPUT_CHARS = 65536;
@@ -135,10 +136,11 @@ export class ModelDeadline {
 
 export async function runText(
   input: Pick<RuntimeRequest, 'system_prompt' | 'instruction'>,
-  options: { model: Model<Api>; streamFn: StreamFn; signal?: AbortSignal; tools?: RuntimeTool[]; callTool?: ToolCaller; modelTimeoutMs?: number; session?: SessionControl },
+  options: { model: Model<Api>; streamFn: StreamFn; signal?: AbortSignal; tools?: RuntimeTool[]; callTool?: ToolCaller; modelTimeoutMs?: number; session?: SessionControl; summarize?: Summarize },
 ): Promise<string> {
-  // 仅使用 Agent Core：不加载 Coding CLI 的文件、Shell、会话目录或扩展发现。
+  // Pi 提供执行循环和摘要，Weora 持久化原始会话并管理授权与工具。
   const declarations = options.tools ?? [];
+  const compaction = options.session && options.summarize ? new PiCompaction(options.session.messages) : undefined;
   let calls = 0;
   let modelDeadline: ModelDeadline | undefined;
   let modelTimedOut = false;
@@ -156,23 +158,34 @@ export async function runText(
     },
   }));
   const agent: Agent = new Agent({
-    initialState: { systemPrompt: input.system_prompt, model: options.model, tools, thinkingLevel: 'off', messages: options.session?.messages },
+    initialState: { systemPrompt: input.system_prompt, model: options.model, tools, thinkingLevel: 'off', messages: compaction?.history ?? options.session?.messages },
     sessionId: options.session?.id,
     streamFn: options.streamFn,
     toolExecution: 'sequential',
-    prepareRequest: async request => {
-      for (const message of request.context.messages) {
+    prepareRequest: async (request, signal) => {
+      for (const message of agent.state.messages) {
         const tagged = message as AgentMessage & { weoraInputId?: string; weoraInputIds?: string[] };
         if (tagged.weoraInputId) read.add(tagged.weoraInputId);
         for (const id of tagged.weoraInputIds ?? []) read.add(id);
       }
-      await options.session?.checkpoint(agent.state.messages, [...read]);
+      // Pi 把系统提示和工具声明放进 system 消息；检查点只给业务消息编号。
+      const system = request.context.messages.filter(message => message.role === 'system');
+      const projected = compaction && options.summarize
+        ? await compaction.project(agent.state.messages.filter(message => message.role !== 'system'), request.model.contextWindow,
+          system, options.summarize, signal)
+        : undefined;
+      await checkpoint();
+      if (projected) return { context: { ...request.context, messages: [...system, ...projected] } };
     },
     beforeToolCall: async () => tools.length ? undefined : ({ block: true, reason: 'Tool not authorized', terminate: true }),
     finishTurn: async turn => (turn.toolResults.length || agent.hasQueuedMessages()) && calls < 64 ? undefined : ({ action: 'end' }),
   });
   const received = new Map<string, string>();
   const read = new Set<string>();
+  const checkpoint = () => options.session?.checkpoint(
+    compaction?.checkpoint(agent.state.messages.filter(message => message.role !== 'system')) ?? agent.state.messages,
+    [...read],
+  );
   options.session?.bind((id, text) => {
     if (received.has(id)) {
       if (received.get(id) !== text) throw new SafeRuntimeError('PROTOCOL_ERROR');
@@ -193,7 +206,7 @@ export async function runText(
     }
     // 仅在工具结果完整结算后持久化，避免恢复半条 toolCall 后猜测重放写操作。
     if (event.type === 'turn_end' || event.type === 'agent_end') {
-      await options.session?.checkpoint(agent.state.messages, [...read]);
+      await checkpoint();
     }
     if (event.type === 'message_end' && event.message.role === 'assistant' &&
         event.message.content.some(block => block.type === 'toolCall' && !declarations.some(tool => tool.name === block.name))) {
@@ -259,6 +272,16 @@ export async function runConfiguredModel(input: RuntimeRequest, signal?: AbortSi
   return runText(input, {
     model, signal, tools: providerTools, modelTimeoutMs: input.timeout_seconds * 1000,
     session: session ? { ...session, messages: modelToolHistory(session.messages, input.tools ?? []) } : undefined,
+    summarize: async (messages, previous, abort) => {
+      const { DEFAULT_COMPACTION_SETTINGS, generateSummary } = await import('@earendil-works/pi-coding-agent');
+      return generateSummary(
+        messages, model, DEFAULT_COMPACTION_SETTINGS.reserveTokens, input.api_key, undefined, abort,
+        '保留任务目标、工具证据和仓库/提交/文件/行号、已执行的副作用，以及仍待验证的问题。不要补造结论。',
+        previous, 'off', (selected, context, options) => models.streamSimple(selected, context, {
+          ...options, apiKey: input.api_key, maxRetries: 0,
+        }),
+      );
+    },
     callTool: async (id, name, args) => {
       const canonical = names.get(name);
       if (!canonical || !callTool) throw new SafeRuntimeError('PROTOCOL_ERROR');

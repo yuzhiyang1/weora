@@ -15,10 +15,15 @@ export async function serve(runModel: typeof runConfiguredModel) {
   process.stdout.on('error', () => { abort.abort(); lines.close(); process.stdin.destroy(); });
   const iterator = lines[Symbol.asyncIterator]();
   let frameBytes = 0;
+  let firstFrame = true;
   process.stdin.on('data', (chunk: Buffer) => {
     for (const byte of chunk) {
-      frameBytes = byte === 10 ? 0 : frameBytes + 1;
-      if (frameBytes > 524288) { abort.abort(); lines.close(); process.stdin.destroy(); break; }
+      if (byte === 10) {
+        firstFrame = false;
+        frameBytes = 0;
+      } else if (!firstFrame && ++frameBytes > 524288) {
+        abort.abort(); lines.close(); process.stdin.destroy(); break;
+      }
     }
   });
   let protocol: string = PROTOCOL;
@@ -26,7 +31,7 @@ export async function serve(runModel: typeof runConfiguredModel) {
   let wallTimedOut = false;
   try {
     const first = await iterator.next();
-    if (first.done || Buffer.byteLength(first.value) > 262144) throw new SafeRuntimeError('PROTOCOL_INPUT_LIMIT');
+    if (first.done) throw new SafeRuntimeError('PROTOCOL_ERROR');
     const raw = JSON.parse(first.value) as Record<string, unknown>;
     const sessionRaw = raw.protocol === 'weora.runtime.v2' ? raw.session : undefined;
     if (sessionRaw !== undefined) { protocol = 'weora.runtime.v2'; delete raw.session; raw.protocol = PROTOCOL; }
@@ -62,7 +67,6 @@ export async function serve(runModel: typeof runConfiguredModel) {
         retry: async status => { reply({ type: 'model_retry', status }); },
         checkpoint: async (messages, read) => {
           const kept = messages.filter(message => message.role !== 'system');
-          if (Buffer.byteLength(JSON.stringify(kept)) > 240000) throw new SafeRuntimeError('PROTOCOL_INPUT_LIMIT');
           reply({ type: 'checkpoint', messages: kept, read });
         },
       } : undefined);
