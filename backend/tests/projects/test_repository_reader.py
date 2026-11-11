@@ -2,6 +2,7 @@
 
 import asyncio
 import base64
+import subprocess
 from collections.abc import Mapping
 from pathlib import Path
 from uuid import uuid4
@@ -12,6 +13,42 @@ from weora.modules.projects.domain import ProjectError, RepositorySource, git_ad
 from weora.modules.projects.git_reader import GitRepositoryReader
 
 REVISION = "a" * 40
+
+
+@pytest.mark.anyio
+async def test_repository_discovery_uses_fixed_git_objects(tmp_path: Path) -> None:
+    """真实 Git 校验搜索协议，并验证新提交和被拒绝路径不会进入结果。"""
+    cache_id = uuid4()
+    root = tmp_path / str(cache_id)
+    root.mkdir()
+
+    def git(*args: str) -> str:
+        return subprocess.check_output(("git", *args), cwd=root, stderr=subprocess.PIPE, text=True).strip()
+
+    git("init", "--quiet")
+    (root / "edu").mkdir()
+    (root / "edu" / "ExamService.java").write_text("class ExamService {}\n// AssemblePaper\n", encoding="utf-8")
+    (root / "edu" / ".env").write_text("AssemblePaper private fixture\n", encoding="utf-8")
+    (root / "other").mkdir()
+    (root / "other" / "OtherExam.java").write_text("// AssemblePaper\n", encoding="utf-8")
+    git("add", "-f", "edu", "other")
+    git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-qm", "initial")
+    revision = git("rev-parse", "HEAD")
+    (root / "edu" / "LaterExam.java").write_text("// AssemblePaper\n", encoding="utf-8")
+    git("add", "edu/LaterExam.java")
+    git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-qm", "later")
+
+    reader = GitRepositoryReader(tmp_path)
+    assert (await reader.directory(cache_id, revision, "edu"))["entries"] == [
+        {"name": "ExamService.java", "kind": "blob"}
+    ]
+    assert (await reader.find(cache_id, revision, "edu", "*Exam*.java"))["paths"] == ["edu/ExamService.java"]
+    assert (await reader.search(cache_id, revision, "edu", "assemblepaper"))["matches"] == [
+        {"path": "edu/ExamService.java", "line": 2, "text": "// AssemblePaper"}
+    ]
+    assert (await reader.search(cache_id, revision, "", "-nonexistent"))["matches"] == []
+    with pytest.raises(ProjectError, match="文件路径不可读取"):
+        await reader.search(cache_id, revision, "../other", "AssemblePaper")
 
 
 @pytest.mark.parametrize("suffix", ["", "/", ".git", ".git/"])

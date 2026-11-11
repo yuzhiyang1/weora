@@ -4,7 +4,7 @@ import asyncio
 import hashlib
 import json
 from datetime import UTC, datetime
-from typing import cast
+from typing import Literal, cast
 from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
@@ -21,8 +21,10 @@ from weora.modules.projects.domain import (
     RepositoryArchiveExporter,
     RepositoryDirectoryReader,
     RepositoryReader,
+    RepositorySearchReader,
     RepositorySource,
     git_address,
+    validate_repository_directory_path,
     validate_repository_file_path,
 )
 from weora.modules.projects.persistence import CodeSourceModel, ProjectModel, ProjectRepositoryModel, RunRepositoryModel
@@ -762,8 +764,10 @@ class ProjectService:
                 await self.reader.discard(cache)
 
     async def read_file(
-        self, actor: ProjectActor, run_id: UUID, snapshot: dict[str, object], repository_id: UUID, path: str
+        self, actor: ProjectActor, run_id: UUID, snapshot: dict[str, object], repository_id: UUID, path: str,
+        *, operation: Literal["read", "list", "find", "search"] = "read", term: str = "",
     ) -> dict[str, object]:
+        """仓库浏览和读取使用同一份运行快照及实时授权。"""
         if snapshot.get("read_protocol") != "git-objects-v1":
             raise ProjectError("PROJECT_REPOSITORY_NOT_PREPARED", "本次任务未授权读取仓库快照")
         if not await self.authorize_snapshot(actor, snapshot):
@@ -773,7 +777,10 @@ class ProjectService:
         repo = next((repo for repo in selected if repo["id"] == str(repository_id)), None)
         if repo is None:
             raise ProjectError("REPOSITORY_NOT_SELECTED", "仓库不在本次任务范围内")
-        validate_repository_file_path(path)
+        if operation == "read":
+            validate_repository_file_path(path)
+        else:
+            validate_repository_directory_path(path)
         await self._prepare_repository(actor, run_id, snapshot, repository_id, repo)
         if not await self.authorize_snapshot(actor, snapshot):
             raise ProjectError("PROJECT_ACCESS_REVOKED", "准备期间授权已变化")
@@ -790,10 +797,21 @@ class ProjectService:
                 or self.reader is None
             ):
                 raise ProjectError("PROJECT_REPOSITORY_NOT_PREPARED", "本次仓库固定提交尚未准备完成")
-            result = await self.reader.read(row.cache_id, row.revision, path)
+            cache_id, revision = row.cache_id, row.revision
+        reader = self.reader
+        if operation == "read":
+            result = await reader.read(cache_id, revision, path)
+        elif operation == "list" and isinstance(reader, RepositoryDirectoryReader):
+            result = await reader.directory(cache_id, revision, path)
+        elif operation == "find" and isinstance(reader, RepositorySearchReader):
+            result = await reader.find(cache_id, revision, path, term)
+        elif operation == "search" and isinstance(reader, RepositorySearchReader):
+            result = await reader.search(cache_id, revision, path, term)
+        else:
+            raise ProjectError("REPOSITORY_DISCOVERY_UNAVAILABLE", "当前仓库适配器不支持此检索")
         if not await self.authorize_snapshot(actor, snapshot):
             raise ProjectError("PROJECT_ACCESS_REVOKED", "读取期间授权已变化")
-        return result | {"repository_id": str(repository_id)}
+        return result | {"ok": True, "repository_id": str(repository_id), "revision": revision}
 
     async def validate_revision(
         self, actor: ProjectActor, run_id: UUID, snapshot: dict[str, object], repository_id: UUID, revision: str

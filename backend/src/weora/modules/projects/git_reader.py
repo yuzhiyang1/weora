@@ -13,6 +13,7 @@ import stat
 from collections.abc import Callable, Mapping
 from contextlib import suppress
 from dataclasses import replace
+from fnmatch import fnmatchcase
 from pathlib import Path
 from urllib.parse import urlsplit
 from uuid import UUID, uuid4
@@ -24,6 +25,7 @@ from weora.modules.projects.domain import (
     RepositoryArchive,
     RepositorySource,
     git_address,
+    validate_repository_directory_path,
     validate_repository_file_path,
 )
 
@@ -355,14 +357,7 @@ class GitRepositoryReader:
     async def directory(self, cache_id: UUID, revision: str, path: str) -> dict[str, object]:
         """只列固定 Git 对象中的直接子项；不访问工作树、符号链接或凭据文件正文。"""
         revision_id(revision.encode())
-        if path and (
-            path.startswith(("/", "\\"))
-            or any(part in {"", ".", "..", ".git"} for part in path.split("/"))
-            or "\\" in path
-            or ":" in path
-            or any(ord(char) < 32 for char in path)
-        ):
-            raise ProjectError("REPOSITORY_PATH_DENIED", "目录路径不可读取")
+        validate_repository_directory_path(path)
         root = self._path(cache_id)
         env = await self._environment(root)
         raw = await self._run(root, env, "ls-tree", "-z", revision if not path else f"{revision}:{path}")
@@ -373,8 +368,80 @@ class GitRepositoryReader:
             mode, kind, _ = meta.split(b" ")
             if mode not in {b"040000", b"100644", b"100755"}:
                 continue
-            entries.append({"name": name.decode("utf-8", errors="replace"), "kind": kind.decode()})
+            visible = self._visible_path(name)
+            if visible is not None:
+                entries.append({"name": visible, "kind": kind.decode()})
         return {"path": path, "entries": entries, "truncated": len(records) > 200}
+
+    @staticmethod
+    def _visible_path(raw: bytes) -> str | None:
+        """目录和搜索结果也遵守读取限制，避免暴露被拒绝的路径或匹配内容。"""
+        try:
+            path = raw.decode("utf-8")
+            validate_repository_file_path(path)
+        except (UnicodeError, ProjectError):
+            return None
+        return path
+
+    async def find(self, cache_id: UUID, revision: str, path: str, pattern: str) -> dict[str, object]:
+        revision_id(revision.encode())
+        validate_repository_directory_path(path)
+        root = self._path(cache_id)
+        env = await self._environment(root)
+        args = ("--", path + "/") if path else ()
+        raw = await self._run(root, env, "--literal-pathspecs", "ls-tree", "-rz", "--full-tree", revision, *args)
+        paths: list[str] = []
+        for record in filter(None, raw.split(b"\0")):
+            meta, name = record.split(b"\t", 1)
+            if not meta.startswith((b"100644 blob ", b"100755 blob ")):
+                continue
+            visible = self._visible_path(name)
+            if visible and fnmatchcase(visible if "/" in pattern else visible.rsplit("/", 1)[-1], pattern):
+                paths.append(visible)
+                if len(paths) == 101:
+                    break
+        return {"paths": paths[:100], "truncated": len(paths) > 100}
+
+    async def search(self, cache_id: UUID, revision: str, path: str, query: str) -> dict[str, object]:
+        revision_id(revision.encode())
+        validate_repository_directory_path(path)
+        if not query.strip() or any(ord(char) < 32 for char in query):
+            raise ProjectError("REPOSITORY_SEARCH_INVALID", "请输入单行搜索关键词")
+        root = self._path(cache_id)
+        env = await self._environment(root)
+        args = ("--", path + "/") if path else ()
+        # 按字面搜索，不运行文本转换器。每个文件保留少量命中，结果交给调用者继续精读。
+        try:
+            raw = await self.runner.run(
+                root, env, "--literal-pathspecs", "grep", "--no-textconv", "--no-color", "-I", "-F", "-i",
+                "-n", "-z", "-m", "5", "-e", query, revision, *args, success_codes=(0, 1),
+            )
+        except TimeoutError:
+            raise ProjectError("REPOSITORY_TIMEOUT", "仓库搜索超时，请缩小目录范围") from None
+        except DeliveryError as error:
+            if error.code == "GIT_OUTPUT_LIMIT":
+                raise ProjectError("REPOSITORY_SEARCH_LIMIT", "命中太多，请缩小目录范围") from None
+            raise ProjectError("REPOSITORY_GIT_FAILED", "固定提交搜索失败") from None
+        hits: list[dict[str, object]] = []
+        prefix = revision.encode() + b":"
+        offset = 0
+        while offset < len(raw):
+            # Git 用 NUL 分隔路径和行号。先处理路径，防止文件名里的换行伪造新记录。
+            path_end = raw.find(b"\0", offset)
+            number_end = raw.find(b"\0", path_end + 1)
+            line_end = raw.find(b"\n", number_end + 1)
+            if min(path_end, number_end, line_end) < 0:
+                raise ProjectError("REPOSITORY_PROTOCOL_ERROR", "Git 返回了不完整的搜索记录")
+            name = raw[offset:path_end]
+            number = raw[path_end + 1:number_end]
+            content = raw[number_end + 1:line_end]
+            offset = line_end + 1
+            visible = self._visible_path(name[len(prefix):]) if name.startswith(prefix) else None
+            if visible and number.isdigit():
+                hits.append({"path": visible, "line": int(number), "text": content[:400].decode("utf-8", "replace")})
+                if len(hits) == 51:
+                    break
+        return {"matches": hits[:50], "truncated": len(hits) > 50}
 
     async def read(self, cache_id: UUID, revision: str, path: str) -> dict[str, object]:
         revision_id(revision.encode())
