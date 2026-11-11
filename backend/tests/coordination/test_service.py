@@ -512,6 +512,24 @@ async def test_failed_native_run_requests_explicit_retry_in_original_channel(con
     assert "MODEL_FAILED" in replies[0].text
     notice = next(item for item in current.effects if item.data.get("reply_id") == replies[0].id)
     assert await coordinator.deliver(workspace, scope_id, notice)
+    await receive(h, coordinator, identity="om_retry", root="om_trigger", addressed=True, instruction="请明确重试")
+    await coordinator.launch(workspace, scope_id, next(item for item in current.effects if item.kind == "worker"))
+    before_retry = (await coordinator.store.snapshot(workspace, scope_id)).tickets[0]
+    assert [item.run_id for item in before_retry.assignments] == [str(run_id)]
+    await coordinator.store.transact(workspace, scope_id, lambda engine, _: engine.retry(ticket.id, "om_retry"))
+    retry = await coordinator.store.snapshot(workspace, scope_id)
+    await coordinator.launch(workspace, scope_id, next(item for item in retry.effects if item.kind == "worker"))
+    retry = await coordinator.store.snapshot(workspace, scope_id)
+    assert len(retry.tickets[0].assignments) == 2
+    retry_id = UUID(str(retry.tickets[0].assignments[-1].run_id))
+    assert retry_id != run_id
+    lease = await execution.claim(workspace_id=workspace, run_id=retry_id, owner="failure-retry-test", lease_seconds=30)
+    assert lease and await execution.finish(lease, status="FAILED", failure_code="MODEL_FAILED")
+    await coordinator.reconcile(workspace, scope_id)
+    retry = await coordinator.store.snapshot(workspace, scope_id)
+    notices = [item for item in retry.replies if item.purpose == "attention"]
+    assert len(notices) == 2 and notices[0].state == "sent" and notices[-1].state == "pending"
+    assert notices[0].text == notices[-1].text and notices[-1].trigger_id == "om_trigger"
 
 
 @pytest.mark.anyio

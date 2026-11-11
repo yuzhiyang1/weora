@@ -267,6 +267,9 @@ class Engine:
         assignment = ticket.assignments[-1]
         if assignment.ended_at:
             return
+        if self.config.source_kind == "feishu" and assignment.report and assignment.report.state == "failed":
+            # 跟进交给主会话识别是否明确重试；不能同时唤醒失败安排和新安排。
+            return
         if ticket.attention and not human:
             return
         if self.waits_for_person(ticket) and not human:

@@ -418,8 +418,12 @@ def test_feishu_notifies_once_per_failed_run_even_when_retry_has_same_error() ->
     notifications = [reply for reply in state.replies if reply.purpose == "attention"]
     assert len(notifications) == 1
     notifications[0].state, notifications[0].remote_message_id = "sent", "om_failure_1"
+    effect = next(effect for effect in state.effects if effect.kind == "worker")
+    generation = effect.generation
     engine.receive(message("retry", addressed=True))
+    assert effect.generation == generation
     engine.retry(identity, "retry")
+    assert effect.generation == generation + 1
     second = ticket.assignments[-1]
     second.run_id = "second-run"
     engine.report(identity, second.id, report)

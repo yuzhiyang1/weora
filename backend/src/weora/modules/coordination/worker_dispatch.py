@@ -48,6 +48,8 @@ class WorkerDispatcher:
         assignment = ticket.assignments[-1]
         if assignment.id != effect.data["assignment_id"]:
             return
+        if state.config.source_kind == "feishu" and assignment.report and assignment.report.state == "failed":
+            return
         if Engine.waits_for_person(ticket):
             return
         origin = records(state).triggers.get(ticket.origin_id)
@@ -78,6 +80,9 @@ class WorkerDispatcher:
                 "WAITING_CONTEXT",
                 "RECOVERY_REQUIRED",
             }:
+                return
+            if state.config.source_kind == "feishu" and detail and detail.run.status in {"FAILED", "CANCELLED"}:
+                # 原生 Run 可能先结束、协调报告稍后才到；这一窗口也只允许明确重试产生的新安排。
                 return
             # 持久会话的下一轮仍走同一 Task，新 Run 不继承旧批准。
             if not pending and not assignment.status_only:
