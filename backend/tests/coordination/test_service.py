@@ -33,6 +33,7 @@ from weora.modules.coordination.polling import compensate
 from weora.modules.coordination.service import CoordinationService
 from weora.modules.coordination.store import CoordinationScope, SqlCoordinationStore
 from weora.modules.delivery.application.service import DeliveryService
+from weora.modules.runs.application.ports import ExecutionProfile
 from weora.modules.runs.application.service import RunService
 from weora.modules.runs.infrastructure.execution_store import SqlAlchemyExecutionStore
 from weora.modules.runs.infrastructure.module_access import ContextModuleAccess, GatewayModuleAccess
@@ -485,11 +486,17 @@ async def test_unmentioned_inbox_decision_worker_run_report_reply_and_task_conti
 
 
 @pytest.mark.anyio
-async def test_failed_native_run_requests_explicit_retry_in_original_channel(contextual: ContextRuns) -> None:
+async def test_failed_native_run_requests_explicit_retry_in_original_channel(
+    contextual: ContextRuns, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """执行器错误必须成为可发送的问题，不能只留在运行页或假装业务复现完成。"""
     h = contextual
     coordinator, scope_id = await configure(h)
     workspace = h.actor.workspace_id
+    old_profile = ExecutionProfile("pi-agent-core@1.3.0", "deepseek", "old-model", None, 30)
+    new_profile = replace(old_profile, model_id="current-model", configuration_id="current-version")
+    monkeypatch.setattr(coordinator.runs, "_execution_profile", old_profile)
+    monkeypatch.setattr(coordinator.runs, "_profile_provider", None)
     await receive(h, coordinator)
     await decide(h, coordinator, scope_id)
     state = await coordinator.store.snapshot(workspace, scope_id)
@@ -516,13 +523,28 @@ async def test_failed_native_run_requests_explicit_retry_in_original_channel(con
     await coordinator.launch(workspace, scope_id, next(item for item in current.effects if item.kind == "worker"))
     before_retry = (await coordinator.store.snapshot(workspace, scope_id)).tickets[0]
     assert [item.run_id for item in before_retry.assignments] == [str(run_id)]
+    resolve = AsyncMock(return_value=new_profile)
+    monkeypatch.setattr(coordinator.runs, "_profile_provider", resolve)
     await coordinator.store.transact(workspace, scope_id, lambda engine, _: engine.retry(ticket.id, "om_retry"))
     retry = await coordinator.store.snapshot(workspace, scope_id)
-    await coordinator.launch(workspace, scope_id, next(item for item in retry.effects if item.kind == "worker"))
+    worker = next(item for item in retry.effects if item.kind == "worker")
+    # 模拟输入已提交、派发前中断；恢复进程仍使用提交时保存的模型。
+    with monkeypatch.context() as interrupted:
+        interrupted.setattr(coordinator.runs, "dispatch_task_input", AsyncMock(return_value=None))
+        with pytest.raises(DeferredEffect, match="TASK_INPUT_WAIT"):
+            await coordinator.launch(workspace, scope_id, worker)
+    resolve.return_value = replace(new_profile, model_id="later-model")
+    assert await coordinator.runs.dispatch_task_inputs() == 1
+    await coordinator.launch(workspace, scope_id, worker)
+    resolve.assert_awaited_once()
     retry = await coordinator.store.snapshot(workspace, scope_id)
     assert len(retry.tickets[0].assignments) == 2
     retry_id = UUID(str(retry.tickets[0].assignments[-1].run_id))
     assert retry_id != run_id
+    old = await coordinator.runs.get(actor=h.actor, workspace_id=workspace, run_id=run_id)
+    new = await coordinator.runs.get(actor=h.actor, workspace_id=workspace, run_id=retry_id)
+    assert old.task.id == new.task.id and old.run.agent_version_id == new.run.agent_version_id
+    assert old.run.execution_profile == old_profile and new.run.execution_profile == new_profile
     lease = await execution.claim(workspace_id=workspace, run_id=retry_id, owner="failure-retry-test", lease_seconds=30)
     assert lease and await execution.finish(lease, status="FAILED", failure_code="MODEL_FAILED")
     await coordinator.reconcile(workspace, scope_id)

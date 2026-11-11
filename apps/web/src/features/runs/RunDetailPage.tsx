@@ -26,6 +26,7 @@ import {
   isTerminal,
   recoverRun,
   runKey,
+  runTaskTitle,
   type RunEvent,
 } from "./api";
 import { RunStatusTag } from "./RunStatusTag";
@@ -234,7 +235,7 @@ function RunDetailContent({ runId }: { runId: string }) {
       {backToList}
       <header className="page-header">
         <div className="run-detail-heading">
-          <Typography.Title heading={1}>{run.task_title || "未命名任务"}</Typography.Title>
+          <Typography.Title heading={1}>{runTaskTitle(run)}</Typography.Title>
           <p>
             {run.agent_name} · 固定版本 {run.agent_version} ·{" "}
             {run.audience === "private" ? "仅发起人可见" : "原会话受众"}
@@ -376,8 +377,6 @@ function RunDetailContent({ runId }: { runId: string }) {
                   </dd>
                   <dt>创建</dt>
                   <dd>{formatDate(run.created_at)}</dd>
-                  <dt>记录序号</dt>
-                  <dd>{run.last_sequence}</dd>
                 </dl>
               </section>
             </div>
@@ -432,7 +431,7 @@ function RunDetailContent({ runId }: { runId: string }) {
             <section className="detail-card">
               <div className="run-section-heading">
                 <Typography.Title heading={3}>运行事实记录</Typography.Title>
-                <small>按运行变更更新</small>
+                <small>最新记录序号：{run.last_sequence}</small>
               </div>
               {eventError ? (
                 <Banner

@@ -4,9 +4,11 @@ import hashlib
 import json
 import re
 from collections.abc import Awaitable, Callable
-from dataclasses import replace
+from dataclasses import asdict, replace
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
+
+from pydantic import TypeAdapter
 
 from weora.modules.collaboration.application.tasks import TaskInput, TaskRecord, summarize_task_title
 from weora.modules.runs.application.execution import RunLease, RuntimeFailure, RuntimeSession
@@ -34,6 +36,8 @@ from weora.modules.runs.domain.errors import (
     RunSteeringUnavailableError,
     RunSubmissionRaceError,
 )
+
+_RETRY_PROFILE = "_feishu_retry_execution_profile"
 
 
 class RunService:
@@ -185,6 +189,8 @@ class RunService:
         origin_metadata: dict[str, object] | None = None,
         thread_keys: tuple[str, ...] = (),
         steer: bool = False,
+        refresh_model: bool = False,
+        retry_model_id: str | None = None,
     ) -> TaskInput:
         """向已有私有 Task 可靠追加输入，提交后尝试按队列顺序创建下一轮 Run。
 
@@ -204,30 +210,58 @@ class RunService:
             raise RunNotFoundError
         if steer and (origin_metadata is not None or detail.task.audience != "private"):
             raise RunNotFoundError
-        if origin_metadata:
-            previous = detail.task.origin_metadata or {}
-            if any(
+        previous = detail.task.origin_metadata or {}
+        if origin_metadata and _RETRY_PROFILE in origin_metadata:
+            raise RunNotFoundError
+        if refresh_model and (
+            not origin_metadata or detail.task.origin != "feishu"
+            or not previous.get("coordination_ticket_id")
+            or any(
                 origin_metadata.get(key) != previous.get(key)
-                for key in (
-                    "source_kind",
-                    "source_id",
-                    "connection_id",
-                    "chat_id",
-                    "open_id",
-                    "route_key",
-                    "project_grant_id",
-                )
-            ):
-                raise RunNotFoundError
+                for key in ("coordination_scope_id", "coordination_ticket_id")
+            )
+        ):
+            raise RunNotFoundError
+        if origin_metadata and any(
+            origin_metadata.get(key) != previous.get(key)
+            for key in (
+                "source_kind", "source_id", "connection_id", "chat_id", "open_id", "route_key", "project_grant_id",
+            )
+        ):
+            raise RunNotFoundError
 
         # 请求摘要固定本轮指令与来源，重复键只允许取回同一份输入。
         digest = hashlib.sha256(
             json.dumps(
-                [str(detail.task.id), instruction, origin_metadata] + (["steer", str(run_id)] if steer else []),
+                [str(detail.task.id), instruction, origin_metadata]
+                + (["steer", str(run_id)] if steer else [])
+                + (["refresh_model", retry_model_id] if refresh_model else []),
                 ensure_ascii=False,
                 sort_keys=True,
             ).encode()
         ).hexdigest()
+
+        if refresh_model:
+            # 已接收的重试复用第一次提交的模型快照，配置再次变化也不会改写它。
+            async with self._uow_factory() as uow:
+                replay = await uow.tasks.input_by_key(actor.workspace_id, actor.user_id, idempotency_key)
+            if replay is not None:
+                if replay.request_sha256 != digest:
+                    raise RunIdempotencyConflictError
+                await self.dispatch_task_input(replay)
+                return await self.task_input(actor, replay.id)
+            profile = await self._profile_provider(actor) if self._profile_provider else self._execution_profile
+            if profile is None:
+                raise RuntimeFailure("RUNTIME_NOT_CONFIGURED")
+            if detail.run.execution_profile is not None:
+                # 原会话只能由其内核读取；切换模型不会迁移会话检查点格式。
+                profile = replace(profile, runtime_id=detail.run.execution_profile.runtime_id)
+            if retry_model_id is not None:
+                if not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", retry_model_id):
+                    raise RunModelSelectionError
+                profile = replace(profile, model_id=retry_model_id)
+            # 输入与快照同事务持久化，Beat 补偿时无需回读可能已经变化的配置；快照不含密钥。
+            origin_metadata = {**(origin_metadata or {}), _RETRY_PROFILE: asdict(profile)}
 
         for attempt in range(3):
             try:
@@ -428,7 +462,7 @@ class RunService:
         """锁定 Task 并派发最早待处理输入，在同一事务保存新 Run、调度记录与输入关联。
 
         已有活跃 Run 时延后检查；取消前排队或已失权的输入被拒绝，不能自动唤醒已停止工作。
-        新 Run 固定原 Agent 版本及执行配置，返回其 ID；没有可派发输入时返回 None。
+        新 Run 固定原 Agent 版本；执行配置取本轮显式快照，否则沿用锚点。
         """
         actor = RunActor(item.created_by, item.workspace_id)
         async with self._uow_factory() as uow:
@@ -467,6 +501,10 @@ class RunService:
                 await uow.tasks.reject_input(selected)
                 await uow.commit()
                 return None
+            snapshot = (selected.origin_metadata or {}).get(_RETRY_PROFILE)
+            profile = (
+                TypeAdapter(ExecutionProfile).validate_python(snapshot) if snapshot else anchor.run.execution_profile
+            )
             now = datetime.now(UTC)
             run = RunRecord(
                 id=uuid4(),
@@ -480,7 +518,7 @@ class RunService:
                 last_sequence=1,
                 created_at=now,
                 updated_at=now,
-                execution_profile=anchor.run.execution_profile,
+                execution_profile=profile,
             )
             await uow.store.add(
                 RunSubmission(

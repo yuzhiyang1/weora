@@ -202,6 +202,8 @@ class Assignment:
     status_only: bool = False
     # 报告时已接收的输入数；后来的有效人类输入解除自动消息挂起，不依赖外部时间戳。
     report_input_count: int | None = None
+    # 明确重试的第一轮读取当前模型；普通续接继续沿用运行快照。
+    refresh_model: bool = False
 
 
 @dataclass

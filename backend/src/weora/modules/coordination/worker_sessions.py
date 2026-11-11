@@ -64,7 +64,7 @@ class WorkerSession:
         return session
 
     async def open(self, model_id: str, runtime_id: str = PI_RUNTIME) -> RuntimeSession:
-        """原子接管持久日志；只改领取代次，保留已确认历史和冻结的模型选择。"""
+        """原子接管持久日志；保留历史，记录本次 Run 已冻结的模型。"""
 
         def acquire(_: Engine, state: State) -> Session:
             self.check(state)
@@ -76,7 +76,7 @@ class WorkerSession:
                 raise RuntimeFailure("HARNESS_SESSION_MISMATCH")
             session.runtime_id = runtime_id
             session.owner, session.generation = self.binding.owner, session.generation + 1
-            session.model_id = session.model_id or model_id
+            session.model_id = model_id
             records(state).sessions.save(session)
             return session
 

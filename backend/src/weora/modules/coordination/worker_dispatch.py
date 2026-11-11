@@ -209,6 +209,9 @@ class WorkerDispatcher:
 
         def freeze_launch(engine: Engine, current: State) -> Json:
             require_launch(engine, current)
+            if assignment.refresh_model and assignment.run_id is None:
+                # 即使协调 Worker 崩溃重放，也要保持本轮选中的路由模型覆盖项。
+                draft["retry_model_id"] = current.config.worker_model_id
             # Native Run 已创建而回写前崩溃时，后来的消息不能改变重试指纹或生成第二个 Task。
             return cast(Json, current.checkpoints.setdefault(launch_key, draft))
 
@@ -220,6 +223,8 @@ class WorkerDispatcher:
             # 兼容此前冻结但因长度限制尚未写入 PostgreSQL 的 launch；每次恢复得到同一个键。
             request_key = f"coord:{key(request_key)}"
         pending = [item for item in ticket.inputs if item.id in cast(list[str], launch["input_ids"])]
+        refresh_model = "retry_model_id" in launch
+        retry_model_id = cast(str | None, launch.get("retry_model_id"))
 
         # 原生 Task/Run 只能通过 Runs 应用接口写入；这里不接触其 ORM 或重放业务工具。
         if anchor_id:
@@ -230,6 +235,8 @@ class WorkerDispatcher:
                 idempotency_key=request_key,
                 request_id=request_key,
                 origin_metadata=launch_origin,
+                refresh_model=refresh_model,
+                retry_model_id=retry_model_id,
             )
             if not item.run_id:
                 raise DeferredEffect("TASK_INPUT_WAIT")
@@ -246,7 +253,7 @@ class WorkerDispatcher:
                 origin_metadata=launch_origin,
                 project_id=UUID(state.config.project_id) if state.config.project_id else None,
                 repository_ids=tuple(UUID(item) for item in state.config.repository_ids),
-                model_id=ticket.mandate.worker_model_id,
+                model_id=retry_model_id if refresh_model else ticket.mandate.worker_model_id,
                 task_title=str(launch.get("title", ticket.title)),
             )
             run_id, task_id = str(detail.run.id), str(detail.task.id)

@@ -906,7 +906,11 @@ class Engine:
             ):
                 raise CoordinationError("FEISHU_ACK_NOT_RETRYABLE")
         previous.ended_at, previous.end_reason = self.now(), "retried"
-        ticket.assignments.append(Assignment(key("assignment", ticket.id, trigger.id), self.now()))
+        ticket.assignments.append(
+            Assignment(
+                key("assignment", ticket.id, trigger.id), self.now(), refresh_model=self.config.source_kind == "feishu",
+            )
+        )
         ticket.ended_at = ticket.ended_by = ticket.outcome = None
         ticket.delivery_error = None
         # 只重投未读输入，未知写入由 Runs 的恢复/审批机制处理，不能在这里复制写命令。
