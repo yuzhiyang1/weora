@@ -122,8 +122,8 @@ async def decide(h: ContextRuns, coordinator: CoordinationService, scope_id: str
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("acknowledgement", [None, "已接单，会核对订单导出。"])
-async def test_feishu_acceptance_reply_contains_the_real_task_number(
+@pytest.mark.parametrize("acknowledgement", [None, "好，我先复现一下订单导出的问题。", "多" * 241])
+async def test_feishu_acceptance_reply_sends_once_before_worker_launch(
     contextual: ContextRuns, monkeypatch: pytest.MonkeyPatch, acknowledgement: str | None,
 ) -> None:
     h = contextual
@@ -141,26 +141,24 @@ async def test_feishu_acceptance_reply_contains_the_real_task_number(
     assert cast(list[Json], response["results"])[0]["ok"] is True
     state = await coordinator.store.snapshot(workspace_id, scope_id)
     assert state.tickets[0].task_id is None
-    if acknowledgement:
-        pending_ack = next(item for item in state.effects if item.kind == "reply")
-        with pytest.raises(DeferredEffect, match="TASK_NUMBER_PENDING"):
-            await coordinator.deliver(workspace_id, scope_id, pending_ack)
-        assert h.reader.replies == 0
-
-    await coordinator.launch(workspace_id, scope_id, next(item for item in state.effects if item.kind == "worker"))
-    state = await coordinator.store.snapshot(workspace_id, scope_id)
-    task_id = state.tickets[0].task_id
-    assert task_id
-    assert len(state.replies) == 1
     reply_effect = next(item for item in state.effects if item.kind == "reply")
+    worker_effect = next(item for item in state.effects if item.kind == "worker")
+    assert reply_effect.priority > worker_effect.priority
     send = AsyncMock(return_value="om_reply")
     monkeypatch.setattr(h.reader, "reply", send)
     assert await coordinator.deliver(workspace_id, scope_id, reply_effect)
+    expected = (
+        acknowledgement if acknowledgement and len(acknowledgement) <= 240
+        else "好，我来处理这件事。有结果我会在这里告诉你。"
+    )
+    assert send.call_args.args[1:3] == ("om_trigger", expected)
+
+    await coordinator.launch(workspace_id, scope_id, worker_effect)
+    state = await coordinator.store.snapshot(workspace_id, scope_id)
+    assert state.tickets[0].task_id
+    assert len(state.replies) == 1
     assert not await coordinator.deliver(workspace_id, scope_id, reply_effect)
     send.assert_awaited_once()
-    assert send.call_args.args[1:3] == (
-        "om_trigger", f"任务 #{task_id[:8].upper()}｜{acknowledgement or '已接单。'}",
-    )
 
 
 @pytest.mark.anyio

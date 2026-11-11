@@ -11,6 +11,7 @@ from datetime import datetime, timedelta
 from typing import Literal
 from uuid import UUID
 
+from weora.modules.context.replies import TASK_ACCEPTANCE_REPLY
 from weora.modules.coordination.domain import (
     Assignment,
     Clock,
@@ -588,6 +589,10 @@ class Engine:
                     self.r.triggers.save(item)
             self.r.tickets.save(ticket)
             acknowledgement = result.get("acknowledgement")
+            if self.config.source_kind == "feishu":
+                acknowledgement = acknowledgement.strip() if isinstance(acknowledgement, str) else ""
+                if not acknowledgement or len(acknowledgement) > 240:
+                    acknowledgement = TASK_ACCEPTANCE_REPLY if trigger.addressed and trigger.human else ""
             if isinstance(acknowledgement, str) and acknowledgement.strip():
                 self.reply(trigger.id, "ack", acknowledgement, ticket_id=ticket.id)
             self.record_notice("ticket.accepted", ticket_id, {"ticket_id": ticket_id})
@@ -1133,5 +1138,12 @@ class Engine:
         if purpose == "ack" and ticket and ticket.id not in trigger.acknowledged:
             trigger.acknowledged.append(ticket.id)
             self.r.triggers.save(trigger)
-        self.r.effects.enqueue("reply", identity, {"reply_id": identity})
+        # 首回优先派发，执行仍由自己的队列推进，不依赖飞书发送成功。
+        first_reply = (
+            self.config.source_kind == "feishu"
+            and purpose == "ack"
+            and ticket is not None
+            and ticket.origin_id == trigger_id
+        )
+        self.r.effects.enqueue("reply", identity, {"reply_id": identity}, priority=2 if first_reply else 0)
         return reply

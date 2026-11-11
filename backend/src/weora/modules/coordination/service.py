@@ -1247,13 +1247,14 @@ class CoordinationService:
                 current.config.source_kind == "feishu" and saved.purpose == "ack"
                 and ticket and ticket.origin_id == saved.trigger_id
             ):
-                if not ticket.task_id:
-                    if ticket.ended_at:
-                        return None
-                    raise DeferredEffect("TASK_NUMBER_PENDING")
-                # 回执与看板展示同一编号；在发送事务里写入正文，保留实际投递内容供对账。
-                number = f"任务 #{ticket.task_id[:8].upper()}｜"
-                saved.text = f"{number}{saved.text[:240 - len(number)]}"
+                if ticket.ended_at:
+                    saved.state = "withdrawn"
+                    records(current).replies.save(saved)
+                    return None
+                # 原生任务号就绪时附在末尾。接单决定已落库，可先回复并让 Worker 独立启动。
+                if ticket.task_id:
+                    number = f"\n\n任务 #{ticket.task_id[:8].upper()}"
+                    saved.text = f"{saved.text[:240 - len(number)]}{number}"
             saved.state = "unknown"
             saved.sending_owner = effect.owner
             return saved.text

@@ -293,6 +293,15 @@ class ModulesExecutionAccess:
             tools = tuple(tool for tool in tools if tool.effect == "read")
             prompt += "\n本次为人工选择的只读恢复，禁止修改、执行命令、提交计划或远端交付；未知写结果只解释证据。"
         sheet_read = None
+        if scope.audience == "group" and scope.source_kind == "feishu" and not (
+            task.origin_metadata or {}
+        ).get("coordination_scope_id"):
+            # 普通飞书入口直接回传 Run 输出，把用户最需要的结论放在渠道摘要的开头。
+            prompt += (
+                "\n最终回复会发回飞书原话题。用用户的语言，像同事一样直接回答他关心的问题，"
+                "先说查到了什么，再补必要的证据和下一步。遇到阻塞，说明缺什么、需要用户做什么。"
+                "只根据实际观察和工具结果描述完成情况，详细过程可以放在结论之后。"
+            )
         if (
             scope.audience == "group"
             and scope.source_kind == "feishu"

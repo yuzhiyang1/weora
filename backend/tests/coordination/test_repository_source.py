@@ -297,6 +297,7 @@ async def test_revoke_after_native_commit_keeps_retention_link_for_unbound_run(
         repository_ids: tuple[UUID, ...] = (),
         thread_keys: tuple[str, ...] = (),
         model_id: str | None = None,
+        task_title: str | None = None,
     ) -> tuple[RunDetail, bool]:
         detail, replay = await original(
             actor=actor,
@@ -311,6 +312,7 @@ async def test_revoke_after_native_commit_keeps_retention_link_for_unbound_run(
             repository_ids=repository_ids,
             thread_keys=thread_keys,
             model_id=model_id,
+            task_title=task_title,
         )
         created.append(detail.run.id)
 

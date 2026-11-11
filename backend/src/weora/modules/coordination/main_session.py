@@ -162,7 +162,8 @@ class MainSessionRunner:
                         "本轮请按当前工具契约处理，不沿用历史中的错误判断。"
                         "先读取 evaluation 和 trigger 证据。显式请求（strength=explicit）使用 orchestrator_route，"
                         '参数为 {"decisions":[{"trigger_id":"读取到的 trigger.id","decision":"accept",'
-                        '"title":"任务标题","scope":"操作范围和完整目标 URL","reason":"接单依据"}]}。'
+                        '"title":"任务标题","scope":"操作范围和完整目标 URL","reason":"接单依据",'
+                        '"acknowledgement":"用一句话回应用户的目标和准备先做的事"}]}。'
                         "只有 inferred 请求使用 eval_decide 判断实施意图和规则。observe 模式也应提交语义 accept，"
                         "由后端自动记录 would_accept，绝不会创建 Worker。"
                         "模式限制不是 unavailable 的理由。\n"

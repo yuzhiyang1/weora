@@ -10,6 +10,7 @@ from typing import cast
 from uuid import UUID
 
 from weora.modules.context.domain import ContextActor, Json
+from weora.modules.context.replies import TASK_ACCEPTANCE_REPLY
 from weora.modules.context.service import ContextService
 from weora.modules.coordination.domain import CoordinationError, DeferredEffect, Effect, State
 from weora.modules.coordination.engine import Engine, key, later
@@ -258,9 +259,9 @@ class WorkerDispatcher:
             current_records = records(current)
             current_records.tickets.save(active)
             if anchor_id is None and current.config.source_kind == "feishu" and not active.ended_at:
-                # 首次绑定真实 Task 后，给显式 @ 请求补齐接单回执；已有回执按原消息去重。
+                # 补偿旧的未建回执任务；接单时已有首回的任务按原消息去重。
                 current_origin = current_records.triggers.get(origin.id)
                 if current_origin and current_origin.authorized and current_origin.addressed:
-                    engine.reply(origin.id, "ack", "已接单。", ticket_id=active.id)
+                    engine.reply(origin.id, "ack", TASK_ACCEPTANCE_REPLY, ticket_id=active.id)
 
         await self.store.transact(workspace_id, scope_id, bind)

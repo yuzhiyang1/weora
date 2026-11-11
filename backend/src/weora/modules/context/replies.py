@@ -4,6 +4,8 @@ import re
 
 from weora.modules.context.domain import Json
 
+TASK_ACCEPTANCE_REPLY = "好，我来处理这件事。有结果我会在这里告诉你。"
+
 
 def brief_reply(text: str) -> str:
     """清理纯文本中的 Markdown 标记，并为遗留长回复提供展示上限。"""
