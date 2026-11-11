@@ -117,6 +117,14 @@ class WorkerSession:
             trigger = records(state).triggers.get(item.trigger_id) if item.trigger_id else None
             if trigger and not trigger.authorized:
                 continue
+            if trigger and trigger.console_mode:
+                run_id = str(self.binding.lease.run.id)
+                if trigger.console_mode == "steer" and (
+                    trigger.console_target != run_id or trigger.console_fence != self.binding.lease.fencing_token
+                ):
+                    continue
+                if trigger.console_mode == "continue" and trigger.console_target == run_id:
+                    continue
             needs_author = Engine.waits_for_person(ticket) or ticket.attention
             if needs_author and (not item.human or item.context_only or item.peer_evidence):
                 continue
@@ -146,7 +154,9 @@ class WorkerSession:
 
         def save(engine: Engine, state: State) -> None:
             self._stored(state)
-            engine.mark_input(self.binding.ticket_id, self.binding.assignment_id, identity)
+            engine.mark_input(
+                self.binding.ticket_id, self.binding.assignment_id, identity, run_id=str(self.binding.lease.run.id),
+            )
 
         await self.service.store.transact(
             self.workspace_id,
@@ -177,7 +187,10 @@ class WorkerSession:
                     continue
                 previous = next((item for item in ticket.inputs if item.id == identity), None)
                 if not previous or not previous.read_at:
-                    engine.mark_input(ticket.id, self.binding.assignment_id, identity, read=True)
+                    engine.mark_input(
+                        ticket.id, self.binding.assignment_id, identity,
+                        read=True, run_id=str(self.binding.lease.run.id),
+                    )
 
         await self.service.store.transact(self.workspace_id, self.binding.scope_id, save)
         if self.port:

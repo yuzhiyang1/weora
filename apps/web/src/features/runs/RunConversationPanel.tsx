@@ -29,19 +29,19 @@ const receipts = {
 } as const;
 
 function conversationEntries(conversation: RunConversation) {
-  const nextRuns = new Set(conversation.inputs.filter((input) => input.mode === "continue").map((input) => input.run_id));
+  const nextRuns = new Set(conversation.inputs.filter((input) => input.mode !== "steer").map((input) => input.run_id));
   const turns = conversation.runs.flatMap((turn) => [
-    ...(nextRuns.has(turn.id) ? [] : [{
-      id: `request:${turn.id}`, text: turn.instruction, date: turn.created_at, author: null, input: null,
+    ...(nextRuns.has(turn.id) || !turn.instruction ? [] : [{
+      id: `request:${turn.id}`, text: turn.instruction, date: turn.created_at, author: null, agent: false, input: null,
     }]),
     ...(turn.output ? [{
-      id: `answer:${turn.id}`, text: turn.output, date: turn.updated_at, author: turn.agent_name, input: null,
+      id: `answer:${turn.id}`, text: turn.output, date: turn.updated_at, author: turn.agent_name, agent: true, input: null,
     }] : []),
   ]);
   return [
     ...turns,
     ...conversation.inputs.map((input) => ({
-      id: input.id, text: input.instruction, date: input.created_at, author: null, input,
+      id: input.id, text: input.instruction, date: input.created_at, author: input.author ?? null, agent: false, input,
     })),
   ].sort((left, right) => Date.parse(left.date) - Date.parse(right.date));
 }
@@ -67,13 +67,13 @@ export function RunConversationPanel({ workspaceId, userId, run, onAccessRevoked
     refetchInterval: (query) => query.state.data && (
       !isTerminal(run.status) ||
       query.state.data.runs.some((item) => !isTerminal(item.status)) ||
-      query.state.data.inputs.some((item) => ["STEERING", "PENDING"].includes(item.status))
+      query.state.data.inputs.some((item) => item.status === "STEERING" || item.status === "PENDING")
     ) ? 3000 : false,
     retry: false,
   });
   const data = conversation.data;
   const hasConversation = Boolean(data);
-  const mode = selection ?? (data?.can_steer ? "steer" : "continue");
+  const mode = data?.can_retry ? "retry" : (selection ?? (data?.can_steer ? "steer" : "continue"));
   const submit = useMutation({
     mutationFn: ({ text, mode, id }: { text: string; mode: RunInputMode; id: string }) =>
       sendRunInput(workspaceId, run.id, text, mode, id),
@@ -107,7 +107,7 @@ export function RunConversationPanel({ workspaceId, userId, run, onAccessRevoked
 
   const turns = conversationEntries(data);
   const invalidMode = mode === "steer" && !data.can_steer;
-  const taskGoal = data.runs[0]?.instruction ?? run.instruction;
+  const taskGoal = data.task_goal ?? data.runs[0]?.instruction ?? run.instruction;
   return (
     <div className="run-conversation-grid">
       <Card className="run-conversation" title={
@@ -117,19 +117,19 @@ export function RunConversationPanel({ workspaceId, userId, run, onAccessRevoked
           {turns.map((turn) => (
             <li className="run-conversation-message" key={turn.id}>
               <span className="run-conversation-avatar" aria-hidden="true">
-                {turn.author ? <Bot size={16} /> : <User size={16} />}
+                {turn.agent ? <Bot size={16} /> : <User size={16} />}
               </span>
               <div className="run-conversation-entry">
                 <div className="run-conversation-meta">
                   <strong>{turn.author ?? "你"}</strong><time dateTime={turn.date}>{formatDate(turn.date)}</time>
                 </div>
                 <div className="run-conversation-bubble">
-                  {turn.author ? <MarkdownContent>{turn.text}</MarkdownContent> : <p>{turn.text}</p>}
+                  {turn.agent ? <MarkdownContent>{turn.text}</MarkdownContent> : <p>{turn.text}</p>}
                 </div>
-                {turn.input && (
+                {turn.input?.status && (
                   <div className="run-conversation-receipt">
                     <Tag color={receipts[turn.input.status].color}>{receipts[turn.input.status].text}</Tag>
-                    {turn.input.mode === "continue" && turn.input.run_id && turn.input.run_id !== run.id && (
+                    {turn.input.mode !== "steer" && turn.input.run_id && turn.input.run_id !== run.id && (
                       <Link to={`/runs/${turn.input.run_id}`}>查看后续运行</Link>
                     )}
                     {turn.input.status === "MISSED" && data.can_send && !draft && (
@@ -148,7 +148,7 @@ export function RunConversationPanel({ workspaceId, userId, run, onAccessRevoked
         {data.can_send && (
           <form className="run-conversation-composer" onSubmit={(event) => {
             event.preventDefault();
-            const text = draft.trim();
+            const text = draft.trim() || (mode === "retry" ? "请重试此任务。" : "");
             if (!text || invalidMode || submit.isPending) return;
             // 请求超时可用同一提交键重试，避免重复指令。
             if (pendingRequest.current?.text !== text || pendingRequest.current.mode !== mode) {
@@ -156,25 +156,35 @@ export function RunConversationPanel({ workspaceId, userId, run, onAccessRevoked
             }
             submit.mutate(pendingRequest.current);
           }}>
-            <label htmlFor={editorId}>补充指令</label>
+            <label htmlFor={editorId}>{mode === "retry" ? "重试说明（选填）" : "补充指令"}</label>
+            {data.channel === "feishu" && <p>执行结果将回到飞书原话题。</p>}
+            {data.channel === "feishu" && run.status === "WAITING_APPROVAL" && (
+              <p>补充内容将在本轮结束后处理。当前审批计划仍以「审批与交付」中显示的内容为准。</p>
+            )}
             <TextArea id={editorId} ref={editor} value={draft} placeholder="补充要求或追问…"
               rows={2} maxLength={16000} disabled={submit.isPending} onChange={(value) => {
-                if (!draft) setSelection(mode);
+                if (!draft && mode !== "retry") setSelection(mode);
                 setDraft(value);
               }} />
             <div className="run-conversation-composer-actions">
-              <Select aria-label="发送方式" value={mode} disabled={submit.isPending}
+              {!data.can_retry && <Select aria-label="发送方式" value={mode} disabled={submit.isPending}
                 optionList={[
                   { label: "加入当前运行", value: "steer", disabled: !data.can_steer },
                   { label: isTerminal(run.status) ? "开始后续运行" : "本轮结束后继续", value: "continue" },
                 ]}
-                onChange={(value) => { if (value === "steer" || value === "continue") setSelection(value); }} />
+                onChange={(value) => { if (value === "steer" || value === "continue") setSelection(value); }} />}
               <Button type="primary" theme="solid" htmlType="submit" icon={<ArrowUp size={16} />} loading={submit.isPending}
-                disabled={!draft.trim() || invalidMode}>发送</Button>
+                disabled={(mode !== "retry" && !draft.trim()) || invalidMode}>
+                {mode === "retry" ? "重试" : mode === "continue" && isTerminal(run.status) && data.channel === "feishu"
+                  ? "继续此任务" : "发送"}
+              </Button>
             </div>
             {invalidMode && <p role="status">本轮已无法接收消息，请选择后续运行。</p>}
             {submit.isError && <p role="alert">{errorMessage(submit.error)}</p>}
           </form>
+        )}
+        {!data.can_send && run.audience === "group" && (
+          <p>当前任务不能从这里发送指令。请确认任务状态，或回到飞书原话题。</p>
         )}
       </Card>
       <aside className="run-conversation-sidebar" aria-label="运行信息">

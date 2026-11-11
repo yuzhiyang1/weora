@@ -224,6 +224,7 @@ class CoordinationService:
             # 领域规则决定何时评估；运输层不需要了解游标、暂停或代次格式。
             engine.pass_due()
             engine.relay_retried_results(self.console_url)
+            engine.advance_console_inputs()
             checkpoints = {name: value for name, value in state.checkpoints.items() if name.startswith("poll:")}
             now = engine.now()
             compensation_due = not checkpoints or any(

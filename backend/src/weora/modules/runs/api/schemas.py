@@ -34,7 +34,7 @@ class ContinueTaskRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
     instruction: str = Field(min_length=1, max_length=16000)
-    mode: Literal["continue", "steer"] = "continue"
+    mode: Literal["continue", "steer", "retry"] = "continue"
 
     @field_validator("instruction")
     @classmethod

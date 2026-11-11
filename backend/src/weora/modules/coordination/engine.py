@@ -220,7 +220,7 @@ class Engine:
         return True
 
     def _queue(self, trigger: Trigger) -> None:
-        if trigger.peer_evidence:
+        if trigger.peer_evidence or trigger.console_mode:
             return
         thread = self._thread(trigger.threads[0])
         if trigger.id not in thread.pending:
@@ -247,12 +247,14 @@ class Engine:
         if context_only:
             trigger.context_only.append(ticket.id)
         ticket.updated_at = self.now()
-        if trigger.human and not context_only and ticket.ended_by == "executor" and (
+        if not trigger.console_mode and trigger.human and not context_only and ticket.ended_by == "executor" and (
             not item.peer_evidence or not (ticket.attention or self.waits_for_person(ticket))
         ):
             ticket.ended_at = ticket.ended_by = ticket.outcome = None
             ticket.assignments.append(Assignment(key("assignment", ticket.id, trigger.id), self.now()))
         self.r.tickets.save(ticket)
+        if trigger.console_mode:
+            return
         self._wake(
             ticket,
             human=trigger.human
@@ -261,7 +263,7 @@ class Engine:
             and (trigger.id not in ticket.origin_ids or ticket.mandate.strength == "explicit"),
         )
 
-    def _wake(self, ticket: Ticket, *, human: bool = False) -> None:
+    def _wake(self, ticket: Ticket, *, human: bool = False, continuation: str | None = None) -> None:
         if self.config.paused or ticket.ended_by == "human" or not ticket.assignments:
             return
         assignment = ticket.assignments[-1]
@@ -285,9 +287,46 @@ class Engine:
                 "assignment_id": assignment.id,
                 "input_count": len(ticket.inputs),
                 "status_request": ticket.status_requests,
+                **({"continuation": continuation} if continuation else {}),
             },
             priority=1 if human else 0,
         )
+
+    def attach_console_input(self, ticket: Ticket, trigger: Trigger) -> None:
+        """把已鉴权的控制台指令直接交给指定任务，跳过群消息自动接单。"""
+        if ticket.ended_by == "human" or not revalidate(self.config, ticket.mandate, authorized=True):
+            raise CoordinationError("MANDATE_REVOKED")
+        self.r.triggers.save(trigger)
+        self._input(ticket, trigger)
+        if trigger.console_mode == "retry":
+            self.retry(ticket.id, trigger.id)
+
+    def advance_console_inputs(self) -> None:
+        """待续接输入等本轮验收和结果入箱，再启动同一任务的下一轮。"""
+        if not self.config.enabled or self.config.paused:
+            return
+        for ticket in self.r.tickets.list():
+            if ticket.ended_by == "human" or not ticket.assignments:
+                continue
+            assignment = ticket.assignments[-1]
+            report = assignment.report
+            if not report or report.state not in {"waiting", "ready"} or not report.verified:
+                continue
+            pending = next((
+                trigger for item in ticket.inputs
+                if item.id in ticket.undelivered and item.run_id is None
+                and (trigger := self.r.triggers.get(item.trigger_id or "")) and trigger.authorized
+                and trigger.console_mode == "continue"
+            ), None)
+            if not pending:
+                continue
+            if ticket.outcome == "ready":
+                if not self.r.replies.exists(key("result", ticket.id, assignment.id)):
+                    continue
+                ticket.ended_at = ticket.ended_by = ticket.outcome = None
+                ticket.assignments.append(Assignment(key("assignment", ticket.id, pending.id), self.now()))
+                self.r.tickets.save(ticket)
+            self._wake(ticket, human=True, continuation=pending.id)
 
     @staticmethod
     def waits_for_person(ticket: Ticket) -> bool:
@@ -814,6 +853,8 @@ class Engine:
         ticket, trigger = self.ticket(ticket_id), self.r.triggers.get(trigger_id)
         if not trigger or not any(item.trigger_id == trigger_id for item in ticket.inputs):
             raise CoordinationError("INPUT_NOT_REACHED")
+        if trigger.console_mode:
+            raise CoordinationError("CONSOLE_INPUT_TASK_BOUND")
         if ticket_id in trigger.handbacks:
             raise CoordinationError("ALREADY_HANDED_BACK")
         if not reason.strip():
@@ -1029,6 +1070,12 @@ class Engine:
         waiting = set(ticket.undelivered)
         ticket.undelivered.clear()
         for item in ticket.inputs:
+            console = self.r.triggers.get(item.trigger_id or "")
+            if console and console.console_mode:
+                # 控制台消息始终属于本任务，不能退回群消息评估或生成另一任务。
+                if console.console_mode == "continue" and not item.run_id and ticket.ended_by != "human":
+                    ticket.undelivered.append(item.id)
+                continue
             if item.peer_evidence:
                 trigger = self.r.triggers.get(item.trigger_id) if item.trigger_id else None
                 if (
@@ -1061,7 +1108,9 @@ class Engine:
             ):
                 self._queue(trigger)
 
-    def mark_input(self, ticket_id: str, assignment_id: str, input_id: str, *, read: bool = False) -> None:
+    def mark_input(
+        self, ticket_id: str, assignment_id: str, input_id: str, *, read: bool = False, run_id: str | None = None,
+    ) -> None:
         """记录当前安排的投递或已读回执；禁止把旧安排的输入重新记账到新安排。"""
         ticket = self.ticket(ticket_id)
         if not ticket.assignments or ticket.assignments[-1].id != assignment_id or ticket.ended_by == "human":
@@ -1072,6 +1121,8 @@ class Engine:
         if item.delivered_to and item.delivered_to != assignment_id:
             raise CoordinationError("STALE_ASSIGNMENT")
         item.delivered_to, item.delivered_at = assignment_id, item.delivered_at or self.now()
+        if run_id and (trigger := self.r.triggers.get(item.trigger_id or "")) and trigger.console_mode:
+            item.run_id = run_id
         item.status = "read" if read else "delivered"
         if read:
             item.read_at = item.read_at or self.now()
@@ -1187,9 +1238,15 @@ class Engine:
             report = assignment.report
             origin = self.r.triggers.get(ticket.origin_id)
             if (
-                not assignment.refresh_model or not assignment.run_id or not report
+                not assignment.run_id or not report
                 or report.state != "ready" or not report.verified or not origin or not origin.authorized
                 or self.r.replies.exists(key("result", ticket.id, assignment.id))
+            ):
+                continue
+            if not assignment.refresh_model and not any(
+                (trigger := self.r.triggers.get(item.trigger_id or "")) and trigger.console_mode
+                and (item.run_id == assignment.run_id or item.id in ticket.undelivered)
+                for item in ticket.inputs
             ):
                 continue
             link = f"\n\n完整结果：{console_url.rstrip('/')}/runs/{assignment.run_id}" if console_url else ""

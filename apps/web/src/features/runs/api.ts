@@ -58,10 +58,13 @@ export type RunInput = {
   repository_ids?: string[];
 };
 export type RunPage = { items: RunSummary[]; next_before_id: string | null };
-export type RunInputMode = "steer" | "continue";
+export type RunInputMode = "steer" | "continue" | "retry";
 export type RunConversation = {
   can_send: boolean;
   can_steer: boolean;
+  can_retry?: boolean;
+  channel?: "feishu";
+  task_goal?: string;
   runs: Array<{
     id: string;
     instruction: string;
@@ -75,7 +78,8 @@ export type RunConversation = {
     id: string;
     instruction: string;
     mode: RunInputMode;
-    status: "PENDING" | "DISPATCHED" | "REJECTED" | "STEERING" | "READ" | "MISSED";
+    status: "PENDING" | "DISPATCHED" | "REJECTED" | "STEERING" | "READ" | "MISSED" | null;
+    author?: string | null;
     run_id: string | null;
     created_at: string;
   }>;

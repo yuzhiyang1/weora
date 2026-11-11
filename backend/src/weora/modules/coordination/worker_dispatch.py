@@ -68,6 +68,9 @@ class WorkerDispatcher:
             for item in ticket.inputs
             if not item.read_at
             and not item.context_only
+            and not (
+                (trigger := records(state).triggers.get(item.trigger_id or "")) and trigger.console_mode == "steer"
+            )
             and (not item.peer_evidence or not ticket.attention)
             and (item.id in ticket.undelivered or item.delivered_to == assignment.id)
         ][:8]
@@ -162,12 +165,18 @@ class WorkerDispatcher:
         # 一次冻结本轮输入与来源，包括优先级；提交后新消息不得改变原生请求摘要。
         instruction = "任务范围预览（完整范围用 orchestrator_read）：\n" + ticket.mandate.scope[:4000]
         refresh_retry = assignment.refresh_model and assignment.run_id is None
+        console_followup = any(
+            (trigger := records(state).triggers.get(item.trigger_id or "")) and trigger.console_mode
+            for item in pending
+        )
         if refresh_retry:
             instruction += (
                 "\n发起人已明确重试，上一轮失败记录只供参考。本轮执行原任务并交付实际结果，"
                 "不要只报告状态。完成后用 orchestrator_report 提交 ready 与可转发的结果；"
                 "若仍不能完成，报告实际原因。既有授权和验收规则仍适用。"
             )
+        elif console_followup:
+            instruction += "\n处理发起人在控制台补充的指令。完成后提交可回传的结果，沿用原任务的授权和审批规则。"
         if state.config.source_kind == "code_hosting" and origin.origin.get("root_text"):
             root = str(origin.origin["root_text"])
             instruction += (
@@ -194,13 +203,14 @@ class WorkerDispatcher:
                 ],
                 ensure_ascii=False,
             )
-        if assignment.status_only:
+        status_only = assignment.status_only and not console_followup
+        if status_only:
             instruction = "只报告当前任务状态，不实施新修改，不调用写工具。原任务：" + ticket.mandate.scope[:4000]
         frozen_origin = dict(origin.origin, coordination_ticket_id=ticket.id, coordination_assignment_id=assignment.id)
         # 正文只进入有统一清理路径的 Task 指令；来源元数据保留地址与授权引用。
         frozen_origin.pop("root_text", None)
         frozen_origin["coordination_priority"] = effect.priority
-        if assignment.status_only:
+        if status_only:
             frozen_origin["coordination_status_only"] = True
         batch_id = key(anchor_id or "initial", str(ticket.status_requests), *(item.id for item in pending))
         # Runs 的幂等键上限为 128；拼接多个摘要在 SQLite 可写、PostgreSQL 会拒绝。
@@ -298,6 +308,11 @@ class WorkerDispatcher:
             active.assignments[-1].status_only = False
             cast(Json, current.checkpoints.get("worker_slots", {})).pop(ticket.id, None)
             current.checkpoints[f"inputs:{run_id}"] = [item.id for item in pending]
+            pending_ids = {item.id for item in pending}
+            for item in active.inputs:
+                trigger = records(current).triggers.get(item.trigger_id or "")
+                if item.id in pending_ids and trigger and trigger.console_mode:
+                    item.run_id = run_id
             records(current).tickets.save(active)
 
         await self.store.transact(workspace_id, scope_id, bind)

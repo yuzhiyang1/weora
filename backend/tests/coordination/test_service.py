@@ -32,6 +32,7 @@ from weora.modules.coordination.engine import Engine
 from weora.modules.coordination.polling import compensate
 from weora.modules.coordination.service import CoordinationService
 from weora.modules.coordination.store import CoordinationScope, SqlCoordinationStore
+from weora.modules.coordination.worker_sessions import WorkerBinding, WorkerSession
 from weora.modules.delivery.application.service import DeliveryService
 from weora.modules.runs.application.ports import ExecutionProfile
 from weora.modules.runs.application.service import RunService
@@ -127,6 +128,100 @@ async def decide(h: ContextRuns, coordinator: CoordinationService, scope_id: str
         effect = next(item for item in state.effects if item.data.get("reply_id") == ack.id)
         assert await coordinator.deliver(workspace_id, scope_id, effect)
     return str(ticket_id)
+
+
+@pytest.mark.anyio
+async def test_feishu_console_inputs_stay_in_original_ticket_and_thread(
+    contextual: ContextRuns, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """用实际 HTTP 会话覆盖实时输入、下一轮隔离、重试和原话题投递。"""
+    h = contextual
+    coordinator, scope = await configure(h)
+    workspace = h.actor.workspace_id
+    profile = ExecutionProfile("pi-agent-core@1.3.0", "deepseek", "test-model", None, 30)
+    monkeypatch.setattr(coordinator.runs, "_execution_profile", profile)
+    await receive(h, coordinator, instruction="请检查原任务的登录异常")
+    ticket_id = await decide(h, coordinator, scope)
+
+    async def launch() -> UUID:
+        state = await coordinator.store.snapshot(workspace, scope)
+        await coordinator.launch(workspace, scope, next(item for item in state.effects if item.kind == "worker"))
+        state = await coordinator.store.snapshot(workspace, scope)
+        return UUID(str(state.tickets[0].assignments[-1].run_id))
+
+    async def send(run: UUID, mode: str, instruction: str, key: str) -> dict[str, object]:
+        response = await h.client.post(
+            f"{h.base}/runs/{run}/continue", json={"mode": mode, "instruction": instruction},
+            headers={**h.headers, "Idempotency-Key": key},
+        )
+        assert response.status_code == 202, response.text
+        return cast(dict[str, object], response.json())
+
+    async def conversation(run: UUID) -> Json:
+        response = await h.client.get(f"{h.base}/runs/{run}/conversation")
+        assert response.status_code == 200, response.text
+        return cast(Json, response.json())
+
+    first = await launch()
+    execution = SqlAlchemyExecutionStore(h.original.sessions)
+    lease = await execution.claim(workspace_id=workspace, run_id=first, owner="console-test", lease_seconds=90)
+    assert lease
+    state = await coordinator.store.snapshot(workspace, scope)
+    ticket = state.tickets[0]
+    journal = WorkerSession(
+        coordinator, WorkerBinding(lease, scope, ticket_id, ticket.assignments[-1].id, ticket.session_id, ()),
+        AsyncMock(return_value=True),
+    )
+    await journal.open(profile.model_id)
+    current = await conversation(first)
+    assert current["can_steer"] is True and current["channel"] == "feishu"
+    messages = cast(list[Json], current["inputs"])
+    assert messages[0]["instruction"] == "请检查原任务的登录异常"
+    assert cast(list[Json], current["runs"])[0]["instruction"] == ""
+    async with member(h.original, "其他工作空间成员") as (other, _):
+        forbidden = await other.post(
+            f"{h.base}/runs/{first}/continue", json={"mode": "steer", "instruction": "不能替发起人发送"},
+            headers={"X-CSRF-Token": other.cookies["weora_csrf"], "Idempotency-Key": "console-other-user"},
+        )
+        assert forbidden.status_code == 404
+    steer = await send(first, "steer", "本轮只看错误日志", "console-steer")
+    assert (await send(first, "steer", "本轮只看错误日志", "console-steer")) == steer
+    next_input = await send(first, "continue", "下一轮整理结论", "console-next")
+    missed = await send(first, "steer", "若未读取请留在本轮", "console-missed")
+    pending = dict(await journal.pull())
+    assert str(steer["input_id"]) in pending and str(next_input["input_id"]) not in pending
+    await journal.accepted(str(steer["input_id"]))
+    await journal.checkpoint([], [str(steer["input_id"])])
+    await coordinator.store.transact(
+        workspace, scope,
+        lambda _, state: state.checkpoints.update({
+            f"report:{first}": asdict(Report("ready", "本轮已检查日志", datetime.now(UTC).isoformat())),
+        }),
+    )
+    assert await execution.finish(lease, status="SUCCEEDED", output="本轮已检查日志")
+    await coordinator.reconcile(workspace, scope)
+    await coordinator.store.transact(
+        workspace, scope, lambda engine, _: engine.reply("om_trigger", "result", "本轮已检查日志", ticket_id=ticket_id),
+    )
+    await coordinator.pending_effects(workspace, scope)
+    second = await launch()
+    assert first != second
+    second_view = await conversation(first)
+    receipts = {item["id"]: item for item in cast(list[Json], second_view["inputs"])}
+    assert receipts[steer["input_id"]]["status"] == "READ"
+    assert receipts[missed["input_id"]]["status"] == "MISSED"
+    assert receipts[next_input["input_id"]]["run_id"] == str(second)
+    lease = await execution.claim(workspace_id=workspace, run_id=second, owner="console-failure", lease_seconds=30)
+    assert lease and await execution.finish(lease, status="FAILED", failure_code="MODEL_FAILED")
+    await coordinator.reconcile(workspace, scope)
+    assert (await conversation(second))["can_retry"] is True
+    retry = await send(second, "retry", "重试时只输出一段摘要", "console-retry")
+    third = await launch()
+    assert third not in {first, second}
+    state = await coordinator.store.snapshot(workspace, scope)
+    assert len(state.tickets) == 1 and state.tickets[0].origin_id == "om_trigger"
+    assert state.tickets[0].assignments[-1].refresh_model
+    assert retry["task_id"] == next_input["task_id"]
 
 
 @pytest.mark.anyio
