@@ -1,12 +1,15 @@
 """持久工具预算、去重、撤权与只读路径边界。"""
 
 import asyncio
+from dataclasses import replace
 from pathlib import Path
 from uuid import UUID
 
 import pytest
 
 from tests.api.test_runs import RunsHarness
+from weora.modules.delivery.application.tools import register_delivery_tools
+from weora.modules.runs.application.harness import OMP_RUNTIME, PI_RUNTIME
 from weora.modules.runs.application.ports import RunActor
 from weora.modules.tools.application.gateway import ToolGateway, ToolScope, ToolSpec
 from weora.modules.tools.infrastructure.repository import READ_FILE, ReadOnlyRepository
@@ -20,6 +23,29 @@ class Access:
 
     async def authorize(self, scope: ToolScope, *, effect: str) -> bool:
         return self.active
+
+
+@pytest.mark.anyio
+async def test_native_tools_are_bound_to_the_frozen_runtime(runs: RunsHarness) -> None:
+    created = await runs.client.post(runs.path, json=runs.payload(), headers=runs.headers())
+    scope = ToolScope(UUID(created.json()["id"]), RunActor(UUID(runs.user_id), UUID(runs.workspace_id)), "owner", 1)
+    gateway = ToolGateway(SqlAlchemyToolStore(runs.sessions), Access())
+    register_delivery_tools(gateway, runs.app.state.delivery_service, native_tools=True)
+    for runtime_id, native, other, other_tool in (
+        (PI_RUNTIME, "sandbox.pi", "sandbox.omp", "ast_grep"),
+        (OMP_RUNTIME, "sandbox.omp", "sandbox.pi", "ls"),
+    ):
+        tools = {item.name: item for item in gateway.specifications_for_runtime(runtime_id)}
+        assert native in tools and other not in tools and "sandbox.command" in tools
+        native_scope = replace(scope, runtime_id=runtime_id)
+        args = {"tool": "read", "arguments_json": '{"path":"README.md"}'}
+        assert await gateway.invoke(native_scope, "cross-runtime", other, args) == {
+            "ok": False, "error": {"code": "TOOL_NOT_ALLOWED"}
+        }
+        assert await gateway.invoke(native_scope, "wrong-tool", native, args | {"tool": other_tool}) == {
+            "ok": False, "error": {"code": "TOOL_ARGUMENTS_INVALID"}
+        }
+    assert "sandbox.pi" not in {item.name for item in gateway.specifications_for_runtime(None)}
 
 
 @pytest.mark.anyio

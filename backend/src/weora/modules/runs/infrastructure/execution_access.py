@@ -289,7 +289,8 @@ class ModulesExecutionAccess:
                 "仓库修改、构建和交付先提出 plan.propose，等待人类批准，不调用审批工具。"
                 "如已提供 browser 工具，可直接在登记范围内导航和取证，权限由平台校验。"
             )
-        tools = self._gateway.specifications() if self._gateway else ()
+        runtime_id = run.execution_profile.runtime_id if run.execution_profile else None
+        tools = self._gateway.specifications_for_runtime(runtime_id) if self._gateway else ()
         if run.recovery_read_only:
             tools = tuple(tool for tool in tools if tool.effect == "read")
             prompt += "\n本次为人工选择的只读恢复，禁止修改、执行命令、提交计划或远端交付；未知写结果只解释证据。"

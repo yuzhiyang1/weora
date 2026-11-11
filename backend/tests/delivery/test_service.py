@@ -8,10 +8,12 @@ from uuid import uuid4
 import pytest
 
 from tests.delivery.fakes import Access, Browser, MemoryStore, Remote, Sandbox
+from weora.modules.delivery.application.native_tools import NATIVE_TOOL_ENTRY
 from weora.modules.delivery.application.ports import BrowserResult, RemoteResult, SandboxResult
 from weora.modules.delivery.application.service import DeliveryService
 from weora.modules.delivery.application.tools import _artifact_result
 from weora.modules.delivery.domain.models import DeliveryError, PlanScope, safe_path
+from weora.modules.runs.application.harness import OMP_RUNTIME, PI_RUNTIME
 from weora.modules.runs.application.ports import RunActor
 
 
@@ -56,6 +58,31 @@ async def test_pending_cannot_execute_and_approve_is_idempotent() -> None:
     evidence = await service.command(actor, access.run_id, ("python", "-m", "pytest"), 7)
     assert evidence.status == "PASSED" and evidence.exit_code == 0
     assert sandbox.calls == 1 and len(store.evidence) == 1
+
+
+@pytest.mark.anyio
+async def test_native_tools_use_exact_approved_arguments_and_file_scope() -> None:
+    service, actor, access, _, sandbox, _ = harness()
+    read = (NATIVE_TOOL_ENTRY, "pi", "read", '{"path":"src/main.py"}')
+    write = (NATIVE_TOOL_ENTRY, "omp", "write", '{"path":"src/main.py","content":"fixture"}')
+    denied = (NATIVE_TOOL_ENTRY, "omp", "write", '{"path":"outside.py","content":"fixture"}')
+    plan = await service.propose(
+        actor, access.run_id, replace(scope(), commands=(read, write, denied)), "运行原生工具", "仅夹具"
+    )
+    await service.decide(actor, access.run_id, plan.id, "approve")
+
+    assert (await service.command(actor, access.run_id, read, 7, runtime_id=PI_RUNTIME)).kind == "native_tool"
+    assert (await service.command(actor, access.run_id, write, 7, runtime_id=OMP_RUNTIME)).kind == "file.write"
+    with pytest.raises(DeliveryError) as error:
+        await service.command(actor, access.run_id, write, 7, runtime_id=PI_RUNTIME)
+    assert error.value.code == "TOOL_NOT_ALLOWED"
+    with pytest.raises(DeliveryError) as error:
+        await service.command(actor, access.run_id, denied, 7, runtime_id=OMP_RUNTIME)
+    assert error.value.code == "PATH_DENIED"
+    with pytest.raises(DeliveryError) as error:
+        await service.command(actor, access.run_id, (*read[:3], '{"path":"src/other.py"}'), 7)
+    assert error.value.code == "COMMAND_DENIED"
+    assert sandbox.calls == 2
 
 
 @pytest.mark.anyio

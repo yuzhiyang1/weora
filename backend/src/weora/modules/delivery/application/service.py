@@ -12,6 +12,7 @@ from typing import cast
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 from weora.modules.delivery.application.code_hosting import ConnectionBindings
+from weora.modules.delivery.application.native_tools import command_kind, validate_native_command
 from weora.modules.delivery.application.ports import (
     BrowserEvidence,
     BrowserVerifier,
@@ -354,11 +355,14 @@ class DeliveryService:
             raise
 
     async def command(
-        self, actor: RunActor, run_id: UUID, argv: tuple[str, ...], fencing_token: int | None
+        self, actor: RunActor, run_id: UUID, argv: tuple[str, ...], fencing_token: int | None,
+        *, runtime_id: str | None = None,
     ) -> ArtifactRecord:
         plan = await self._approved(actor, run_id, "command.run", fencing_token)
         if argv not in plan.scope.commands:
             raise DeliveryError("COMMAND_DENIED", "只能执行计划逐项列出的 argv")
+        validate_native_command(argv, plan.scope, runtime_id)
+        evidence_kind = command_kind(argv)
         await self._prepare(actor, run_id, plan.scope, fencing_token)
         # 准备环境可能耗时；进入真实命令前再次检查批准和有效租约。
         await self._approved(actor, run_id, "command.run", fencing_token)
@@ -383,12 +387,19 @@ class DeliveryService:
             after_sha = self._repository_digest(after)
         except DeliveryError:
             # 命令已发生，仍保存真实输出/退出码，但状态不可核验时不能作为通过证据。
-            await self._evidence(actor, run_id, "command", result, argv, plan_id=plan.id)
+            observed = result if evidence_kind == "command" else replace(result, status="FAILED")
+            await self._evidence(actor, run_id, evidence_kind, observed, argv, plan_id=plan.id)
             raise
+        if evidence_kind != "command" and (
+            after_sha is None or (evidence_kind == "native_tool" and before_sha != after_sha)
+        ):
+            failed = replace(result, status="FAILED")
+            await self._evidence(actor, run_id, evidence_kind, failed, argv, plan_id=plan.id)
+            raise DeliveryError("FAILED_EVIDENCE", "原生工具执行后的工作区未通过范围校验")
         # 写脚本、格式化和生成命令可能退出 0，但不等于对最终代码完成了验证。
         state_sha = after_sha if before_sha == after_sha else None
         return await self._evidence(
-            actor, run_id, "command", result, argv, plan_id=plan.id, repository_sha256=state_sha
+            actor, run_id, evidence_kind, result, argv, plan_id=plan.id, repository_sha256=state_sha
         )
 
     async def write(
@@ -878,7 +889,8 @@ class DeliveryService:
                 raise DeliveryError("MISSING_EVIDENCE", "普通 MR 尚未确认创建成功")
             return  # 不重新执行已完成分支的测试，也不把普通 MR 称为草稿。
         coding = "file.write" in actions
-        if coding and (not {"command.run", "git.diff"} <= actions or not plan.scope.commands):
+        verification_commands = [command for command in plan.scope.commands if command_kind(command) == "command"]
+        if coding and (not {"command.run", "git.diff"} <= actions or not verification_commands):
             raise DeliveryError("MISSING_EVIDENCE", "改码计划必须先明确批准测试命令与 Diff 验证")
         final_state: str | None = None
         if "git.diff" in actions:
@@ -899,6 +911,15 @@ class DeliveryService:
             raise DeliveryError("MISSING_EVIDENCE", "没有实际文件修改证据")
         last_write = max((item.sequence for item in writes), default=0)
         for command in plan.scope.commands:
+            kind = command_kind(command)
+            if kind == "command":
+                continue
+            observed = next(
+                (item for item in reversed(evidence) if item.kind == kind and item.command == command), None
+            )
+            if observed is None or observed.status != "PASSED" or observed.exit_code != 0:
+                raise DeliveryError("MISSING_EVIDENCE", "尚未完成已批准的原生工具调用")
+        for command in verification_commands:
             matching = [
                 item
                 for item in evidence

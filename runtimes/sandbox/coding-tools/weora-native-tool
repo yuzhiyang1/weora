@@ -1,0 +1,8 @@
+#!/bin/sh
+# SDKs run in the approved task container. Keep the executable and package paths fixed.
+set -eu
+case "${1-}" in
+  pi) exec node /opt/weora-coding-tools/dispatch.mjs "$@" ;;
+  omp) exec /usr/local/bin/weora-bun /opt/weora-coding-tools/dispatch.mjs "$@" ;;
+  *) echo "Unknown native tool runtime" >&2; exit 2 ;;
+esac

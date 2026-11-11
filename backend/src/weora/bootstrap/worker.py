@@ -168,11 +168,16 @@ async def _execute(workspace_id: UUID, run_id: UUID) -> bool:
                     if plan and plan.status == "APPROVED"
                     else "console"
                 )
-                scope = ToolScope(lease.run.id, actor, lease.owner, lease.fencing_token, role)
+                scope = ToolScope(
+                    lease.run.id, actor, lease.owner, lease.fencing_token, role,
+                    lease.run.execution_profile.runtime_id if lease.run.execution_profile else None,
+                )
                 if name == "plan.propose":
                     # 新计划会结束旧批准和租约；先保存上一段已获准修改，供审批后继续。
                     await delivery.checkpoint_workspace(actor, lease.run.id)
-                declared = next((item for item in gateway.specifications() if item.name == name), None)
+                declared = next(
+                    (item for item in gateway.specifications_for_runtime(scope.runtime_id) if item.name == name), None
+                )
                 executions = cast(SqlAlchemyExecutionStore, app.state.execution_store)
                 try:
                     result = await gateway.invoke(scope, call_id, name, arguments)
@@ -190,7 +195,9 @@ async def _execute(workspace_id: UUID, run_id: UUID) -> bool:
                 }
                 if unknown and declared and declared.effect != "read":
                     await executions.transition(actor, lease.run.id, "RECOVERY_REQUIRED", expected_lease=lease)
-                if result.get("ok") is True and name in {"sandbox.file.write", "sandbox.command"}:
+                if result.get("ok") is True and name in {
+                    "sandbox.file.write", "sandbox.command", "sandbox.pi", "sandbox.omp"
+                }:
                     # 保存已完成的修改；以后长命令取消/超时时仍能恢复最后已知状态。
                     await delivery.checkpoint_workspace(actor, lease.run.id)
                 # plan.propose 会让旧租约失效，立即停止模型，避免审批前继续消耗或执行。
