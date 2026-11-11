@@ -406,6 +406,29 @@ def test_ack_once_and_reply_cannot_change_channel_or_fabricate_answer() -> None:
         engine.reply("m1", "answer", "未经 Worker 确认", ticket_id=identity)
 
 
+def test_feishu_notifies_once_per_failed_run_even_when_retry_has_same_error() -> None:
+    engine, state = setup()
+    identity = accept(engine, state)
+    ticket = engine.ticket(identity)
+    first = ticket.assignments[-1]
+    first.run_id = "first-run"
+    report = Report("failed", "模型调用失败", NOW, human_action="模型调用失败，请重试。")
+    engine.report(identity, first.id, report)
+    engine.report(identity, first.id, report)
+    notifications = [reply for reply in state.replies if reply.purpose == "attention"]
+    assert len(notifications) == 1
+    notifications[0].state, notifications[0].remote_message_id = "sent", "om_failure_1"
+    engine.receive(message("retry", addressed=True))
+    engine.retry(identity, "retry")
+    second = ticket.assignments[-1]
+    second.run_id = "second-run"
+    engine.report(identity, second.id, report)
+    notifications = [reply for reply in state.replies if reply.purpose == "attention"]
+    assert len(notifications) == 2
+    assert all(reply.trigger_id == "m1" and reply.text == report.human_action for reply in notifications)
+    assert notifications[-1].state == "pending"
+
+
 @pytest.mark.parametrize("mode", ["off", "observe", "auto"])
 def test_listed_mention_explicit_works_in_all_modes(mode: str) -> None:
     engine, state = setup(mode)

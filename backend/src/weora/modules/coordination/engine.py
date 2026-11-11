@@ -952,12 +952,19 @@ class Engine:
         previous_attention_id = ticket.attention_id
         ask_author = question_from_peer or self.peer_evidence_only(ticket)
         attention_target = ticket.origin_id if ask_author else report.question_trigger_id or ticket.origin_id
+        notify_feishu_failure = self.config.source_kind == "feishu" and report.state == "failed"
+        # 同一次失败对账只通知一次；重试后的新 Run 即使报同一个错，也要再告诉用户。
+        failure_attention_id = (
+            key("feishu-failure", assignment.id, assignment.run_id or "dispatch")
+            if notify_feishu_failure else None
+        )
         if report.human_action and (
             report.human_action != ticket.attention or (ask_author and attention_target != ticket.attention_trigger_id)
+            or (failure_attention_id is not None and failure_attention_id != ticket.attention_id)
         ):
             ticket.attention, ticket.attention_id = (
                 report.human_action,
-                key(assignment.id, report.at, report.human_action),
+                failure_attention_id or key(assignment.id, report.at, report.human_action),
             )
             ticket.attention_trigger_id = attention_target
         elif report.state == "ready" or (report.human_action_supplied and report.human_action is None):
@@ -986,7 +993,7 @@ class Engine:
             ticket.ended_at, ticket.ended_by, ticket.outcome = self.now(), "executor", result
             self._release_untaken(ticket)
         self.r.tickets.save(ticket)
-        if report.human_action and (ask_author or (self.config.source_kind == "feishu" and report.state == "failed")):
+        if report.human_action and (ask_author or notify_feishu_failure):
             origin = self.r.triggers.get(ticket.origin_id)
             if origin and origin.authorized and ticket.attention_trigger_id == origin.id:
                 # 向原发起人的消息请求确认，不能把补充人当作批准人。
