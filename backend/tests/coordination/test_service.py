@@ -119,13 +119,13 @@ async def decide(h: ContextRuns, coordinator: CoordinationService, scope_id: str
     value = dict(result(), eval_id=evaluation.id)
     decision = await coordinator.tool(workspace_id, scope_id, "decide", "orchestrator_eval_decide", value)
     assert decision["ok"] is True, decision
-    ticket_id = str(cast(Json, decision["decision"]).get("ticket_id"))
-    if confirm:
+    ticket_id = cast(Json, decision["decision"]).get("ticket_id")
+    if confirm and isinstance(ticket_id, str):
         state = await coordinator.store.snapshot(workspace_id, scope_id)
         ack = next(item for item in state.replies if item.ticket_id == ticket_id and item.purpose == "ack")
         effect = next(item for item in state.effects if item.data.get("reply_id") == ack.id)
         assert await coordinator.deliver(workspace_id, scope_id, effect)
-    return ticket_id
+    return str(ticket_id)
 
 
 @pytest.mark.anyio
@@ -232,8 +232,9 @@ async def test_ack_credentials_failure_stays_unstarted_and_is_visible_in_console
     overview = cast(Json, (await coordinator.list_scopes(h.context_actor))[0]["status"])
     item = cast(list[Json], overview["tickets"])[0]
     report = cast(Json, cast(Json, item["assignment"])["report"])
-    assert report["state"] == "failed" and "飞书接口暂时不可用" in report["summary"]
-    assert "敏感供应商原文" not in report["summary"]
+    summary = str(report["summary"])
+    assert report["state"] == "failed" and "飞书接口暂时不可用" in summary
+    assert "敏感供应商原文" not in summary
 
     # 修好飞书连接后，新的人类重试先重发原首回，再开放新的 Worker 安排。
     await receive(h, coordinator, identity="om_retry", root="om_trigger", addressed=True, instruction="请重试")
