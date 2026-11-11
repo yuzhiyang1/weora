@@ -17,10 +17,10 @@ for await (const line of lines) {
       reply({ type: 'tool_call', id: 'call-1', name: 'context.read', arguments: {} });
       continue;
     }
-    if (request.instruction === 'window-history') {
-      if (request.session.messages[0]?.content !== '最新轮次') process.exit(7);
+    if (request.instruction === 'full-history') {
+      if (!request.session.messages[0]?.content.startsWith('旧事实')) process.exit(7);
       reply({ type: 'checkpoint', messages: [...request.session.messages, { role: 'assistant', content: '新检查点' }], read: [] });
-      reply({ type: 'completed', text: '模型窗口与完整审计通过' });
+      reply({ type: 'completed', text: '完整会话传输通过' });
       break;
     }
     if (['many-checkpoints', 'too-many-checkpoints'].includes(request.instruction)) {

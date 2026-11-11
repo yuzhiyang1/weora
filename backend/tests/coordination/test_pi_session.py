@@ -54,8 +54,8 @@ async def test_long_tool_flow_crosses_real_parent_child_transport(steps: int) ->
 
 
 @pytest.mark.anyio
-async def test_model_history_window_preserves_the_full_durable_journal() -> None:
-    """真实子进程收到短窗口，平台仍保存完整旧日志与新增检查点。"""
+async def test_pi_receives_full_history_for_model_compaction() -> None:
+    """传输层将完整旧日志交给 Pi，供它按模型窗口生成摘要。"""
     node = shutil.which("node")
     if not node:
         pytest.skip("需要 Node")
@@ -79,7 +79,7 @@ async def test_model_history_window_preserves_the_full_durable_journal() -> None
     profile = ExecutionProfile(
         runtime_id="pi-agent-core@1.3.0", provider="deepseek", model_id="test-model", max_tokens=100, timeout_seconds=10
     )
-    assert await runtime.run(RuntimeInput("系统", "window-history"), profile) == "模型窗口与完整审计通过"
+    assert await runtime.run(RuntimeInput("系统", "full-history"), profile) == "完整会话传输通过"
     assert saved == [history + [{"role": "assistant", "content": "新检查点"}]]
 
 

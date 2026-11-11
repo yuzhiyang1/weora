@@ -12,6 +12,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from weora.modules.runs.application.execution import RuntimeFailure, RuntimeInput, RuntimeSession
+from weora.modules.runs.application.harness import PI_RUNTIME
 from weora.modules.runs.application.ports import ExecutionProfile
 from weora.modules.runs.application.session_delivery import session_history_window
 from weora.shared.runtime_limits import MAX_CHECKPOINT_FRAMES, MAX_TOOL_CALLS
@@ -67,7 +68,11 @@ class ProcessRuntime:
         self._history_prefix: list[dict[str, object]] = []
         model_messages: list[dict[str, object]] = []
         if self._session:
-            self._history_prefix, model_messages = session_history_window(self._session.messages)
+            if self._runtime_id == PI_RUNTIME:
+                # Pi 按模型窗口压缩；恢复前按字节裁剪会丢掉可用于摘要的证据。
+                model_messages = self._session.messages
+            else:
+                self._history_prefix, model_messages = session_history_window(self._session.messages)
         if profile.runtime_id != self._runtime_id or profile.provider not in self._providers:
             raise RuntimeFailure("MODEL_CONFIGURATION_MISMATCH")
         if not self._entry.is_file() or not self._api_key:
@@ -112,8 +117,6 @@ class ProcessRuntime:
             },
             ensure_ascii=False,
         ).encode()
-        if len(request) > 262144:
-            raise RuntimeFailure("PROTOCOL_INPUT_LIMIT")
         # NODE_OPTIONS、个人模型凭据、代理和云凭据均不继承；SDK 只使用显式提供方密钥。
         environment = {
             key: value
@@ -239,14 +242,16 @@ class ProcessRuntime:
             try:
                 # 只累积等待 Runtime/模型输出的时间；Gateway 自行限制 Tool 等待时间。
                 async with asyncio.timeout(max(0, remaining)):
-                    line = await process.stdout.readline()
+                    line = (
+                        await self._read_session_frame(process.stdout)
+                        if self._session
+                        else await process.stdout.readline()
+                    )
                 remaining -= asyncio.get_running_loop().time() - started
             except TimeoutError:
                 raise RuntimeFailure("MODEL_TIMEOUT") from None
             except ValueError as exc:
                 raise RuntimeFailure("RUNTIME_PROTOCOL_OUTPUT_LIMIT") from exc
-            if len(line) > 300000:
-                raise RuntimeFailure("RUNTIME_PROTOCOL_OUTPUT_LIMIT")
             if not line:
                 await process.wait()
                 if process.returncode != 0:
@@ -262,9 +267,11 @@ class ProcessRuntime:
                 raise RuntimeFailure("RUNTIME_PROTOCOL_INVALID") from exc
             if not isinstance(frame, dict) or frame.get("protocol") != self._protocol:
                 raise RuntimeFailure("RUNTIME_PROTOCOL_INVALID")
+            if len(line) > 300000 and not (self._session and frame.get("type") == "checkpoint"):
+                raise RuntimeFailure("RUNTIME_PROTOCOL_OUTPUT_LIMIT")
             if self._session and frame.get("type") == "checkpoint":
                 # 连续会话每轮重发完整日志，重复字节不能算作模型新增输出。
-                # 单帧仍限 300 KB，帧数按共用工具预算派生，避免长流程被另一层旧上限截断。
+                # 帧数按共用工具预算约束，检查点本身不受普通响应的单帧字节限制。
                 checkpoint_count += 1
                 if checkpoint_count > MAX_CHECKPOINT_FRAMES:
                     raise RuntimeFailure("RUNTIME_PROTOCOL_OUTPUT_LIMIT")
@@ -364,6 +371,21 @@ class ProcessRuntime:
         if self._api_key in text:
             raise RuntimeFailure("MODEL_RESPONSE_REDACTED")
         return text
+
+    @staticmethod
+    async def _read_session_frame(reader: asyncio.StreamReader) -> bytes:
+        """分段取出管道中的长检查点，避免 readline 的固定缓存上限截断会话。"""
+        chunks: list[bytes] = []
+        while True:
+            try:
+                chunks.append(await reader.readuntil(b"\n"))
+                break
+            except asyncio.LimitOverrunError as error:
+                chunks.append(await reader.readexactly(error.consumed))
+            except asyncio.IncompleteReadError as error:
+                chunks.append(error.partial)
+                break
+        return b"".join(chunks)
 
     @staticmethod
     async def _read_bounded(reader: asyncio.StreamReader, limit: int) -> bytes:

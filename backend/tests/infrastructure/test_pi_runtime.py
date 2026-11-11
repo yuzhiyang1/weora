@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 
-from weora.modules.runs.application.execution import RuntimeFailure, RuntimeInput
+from weora.modules.runs.application.execution import RuntimeFailure, RuntimeInput, RuntimeSession
 from weora.modules.runs.application.ports import ExecutionProfile
 from weora.modules.runs.infrastructure.pi_runtime import PiTextRuntime
 from weora.modules.tools.infrastructure.repository import READ_FILE
@@ -95,6 +95,27 @@ async def test_cancellation_waits_for_owned_process_exit(
 async def test_process_deadline_is_not_success(runtime: PiTextRuntime) -> None:
     with pytest.raises(RuntimeFailure, match="MODEL_TIMEOUT"):
         await runtime.run(RuntimeInput("系统提示", "hold"), replace(PROFILE, timeout_seconds=1))
+
+
+@pytest.mark.anyio
+async def test_pi_transports_large_history_and_checkpoint_without_byte_cutoff() -> None:
+    """使用真实 JSONL 入口，恢复超过旧上限的历史，再完整回写检查点。"""
+    node = shutil.which("node")
+    dist = Path(__file__).parents[3] / "runtimes" / "pi" / "dist" / "protocol.js"
+    if node is None or not dist.is_file():
+        pytest.skip("Pi 尚未构建，未验证实际 SDK 子进程协议")
+    messages = [{"role": "user", "content": "既有证据" * 50000, "timestamp": 1}]
+    captured = []
+
+    async def checkpoint(history: list[dict[str, object]], read: list[str]) -> None:
+        captured.extend(history)
+
+    session = RuntimeSession("large-history", messages=messages, checkpoint=checkpoint)
+    runtime = PiTextRuntime(
+        node_executable=node, entry=ENTRY.parent / "pi_large_session.mjs", api_key=TEST_KEY, session=session
+    )
+    assert await runtime.run(RuntimeInput("系统提示", "继续"), replace(PROFILE, timeout_seconds=20)) == "历史已保留"
+    assert captured == messages
 
 
 @pytest.mark.anyio

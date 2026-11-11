@@ -28,6 +28,56 @@ test('后端预设与真实 Pi SDK 注册一致，旧别名保持原 ID', () => 
   assert.equal(isSupportedProvider('https://example.com'), false);
 });
 
+test('Pi 官方摘要压缩模型请求，检查点和下次恢复仍保留原始证据', async () => {
+  const { generateSummary } = await import('@earendil-works/pi-coding-agent');
+  const { faux, options } = runtime();
+  const old: AgentMessage[] = [
+    { role: 'user', content: '旧证据唯一标记\n' + '旧任务上下文。'.repeat(16000), timestamp: 1 },
+    { role: 'user', content: '最近用户更正', timestamp: 2 },
+  ];
+  const model = { ...options.model, contextWindow: 32000 };
+  faux.setResponses([
+    context => {
+      assert.match(JSON.stringify(context.messages), /旧证据唯一标记/);
+      return fauxAssistantMessage([fauxText('旧任务证据摘要')]);
+    },
+    context => {
+      assert.match(JSON.stringify(context.messages), /旧任务证据摘要.*最近用户更正/);
+      assert.doesNotMatch(JSON.stringify(context.messages), /旧证据唯一标记/);
+      return fauxAssistantMessage([fauxText('继续完成')]);
+    },
+    context => {
+      assert.match(JSON.stringify(context.messages), /旧任务证据摘要.*再次恢复/);
+      assert.doesNotMatch(JSON.stringify(context.messages), /旧证据唯一标记/);
+      return fauxAssistantMessage([fauxText('恢复完成')]);
+    },
+  ]);
+  let history: AgentMessage[] = [];
+  let receipts: string[] = [];
+  const session = {
+    id: 'compaction-test', messages: old, initialInputIds: ['new-input'],
+    bind: () => undefined,
+    checkpoint: async (messages: AgentMessage[], read: string[]) => {
+      history = structuredClone(messages);
+      receipts = [...read];
+    },
+  };
+  const summarize = (messages: AgentMessage[], previous?: string, signal?: AbortSignal) =>
+    generateSummary(messages, model, 4096, undefined, undefined, signal, undefined,
+      previous, 'off', options.streamFn);
+  assert.equal(await runText({ system_prompt: '权限不变', instruction: '继续' }, {
+    ...options, model, session, summarize,
+  }), '继续完成');
+  assert.ok(receipts.includes('new-input'));
+  assert.deepEqual(history.slice(0, old.length), old);
+  assert.match(JSON.stringify(history.at(-1)), /weoraCompactedThrough/);
+  assert.equal(await runText({ system_prompt: '权限不变', instruction: '再次恢复' }, {
+    ...options, model, session: { ...session, messages: history, initialInputIds: ['restored-input'] }, summarize,
+  }), '恢复完成');
+  assert.ok(receipts.includes('restored-input'));
+  assert.deepEqual(history.slice(0, old.length), old);
+});
+
 test('重试包装保留单次与跨回合输出预算，不重试超限响应', async () => {
   const { faux, options } = runtime();
   faux.setResponses([fauxAssistantMessage([fauxText('x'.repeat(70000))])]);
