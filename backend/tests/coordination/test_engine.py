@@ -198,8 +198,9 @@ def test_numbered_followup_cannot_borrow_another_initiators_task() -> None:
     assert engine.receive(request)
     assert engine.pass_due() == []
     assert len(ticket.inputs) == 1
-    assert state.replies[0].ticket_id is None
-    assert "找不到可续接的任务 #ABCDEF01" in state.replies[0].text
+    reply = state.replies[-1]
+    assert reply.ticket_id is None
+    assert "找不到可续接的任务 #ABCDEF01" in reply.text
     with pytest.raises(CoordinationError, match="TASK_REFERENCE_ALREADY_HANDLED"):
         engine.route(request.id, result())
 
@@ -395,8 +396,8 @@ def test_ready_requires_platform_validation_and_stale_assignment_is_rejected() -
 def test_ack_once_and_reply_cannot_change_channel_or_fabricate_answer() -> None:
     engine, state = setup()
     identity = accept(engine, state)
-    original = engine.reply("m1", "ack", "收到", ticket_id=identity)
-    assert engine.reply("m1", "ack", "不覆盖原文", ticket_id=identity).text == "收到"
+    original = state.replies[0]
+    assert engine.reply("m1", "ack", "不覆盖原文", ticket_id=identity).text == original.text
     assert len(state.replies) == 1
     assert state.replies[0].id == original.id
     with pytest.raises(CoordinationError, match="RESULT_NOT_READY"):

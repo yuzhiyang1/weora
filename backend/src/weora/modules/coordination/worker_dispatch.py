@@ -32,6 +32,7 @@ class WorkerDispatcher:
         state: State,
         effect: Effect,
         *,
+        runtime_available: bool = True,
         external_link: Callable[[ContextActor, Json, UUID], Awaitable[None]] | None = None,
     ) -> None:
         """派发一轮已授权执行，并以固定请求补偿跨模块提交窗口。
@@ -104,8 +105,25 @@ class WorkerDispatcher:
             if not source or not revalidate(current.config, active.mandate, authorized=source.authorized):
                 raise CoordinationError("MANDATE_REVOKED")
 
-        def reserve(engine: Engine, current: State) -> None:
+        def reserve(engine: Engine, current: State) -> bool | None:
             require_launch(engine, current)
+            if anchor_id is None and current.config.source_kind == "feishu" and origin.human:
+                active = engine.ticket(ticket.id)
+                ack = records(current).replies.get(key("ack", active.origin_id))
+                if ack is None:
+                    # 升级前已经接单、但尚未派发的任务也必须补齐首回。
+                    engine.reply(active.origin_id, "ack", TASK_ACCEPTANCE_REPLY, ticket_id=active.id)
+                    return False
+                if ack.state != "sent" or not ack.remote_message_id:
+                    if any(
+                        item.id == key("reply", ack.id) and item.state in {"blocked", "unknown", "cancelled"}
+                        for item in current.effects
+                    ):
+                        # 已终止的回复不会自动恢复。明确重试会重新安排 Worker，无须持续轮询。
+                        return None
+                    return False
+            if not runtime_available:
+                raise CoordinationError("RUNTIME_NOT_CONFIGURED")
             reservations = cast(Json, current.checkpoints.setdefault("worker_slots", {}))
             now = engine.now()
             leased_effects = {item.id for item in current.effects if item.is_owned_by(item.owner, now)}
@@ -128,8 +146,13 @@ class WorkerDispatcher:
             if len(active_tickets | reserved) >= limit:
                 raise DeferredEffect("WORKER_CAPACITY_WAIT")
             reservations[ticket.id] = {"owner": effect.id, "until": later(now, 30)}
+            return True
 
-        await self.store.transact(workspace_id, scope_id, reserve)
+        reserved = await self.store.transact(workspace_id, scope_id, reserve)
+        if reserved is None:
+            return
+        if not reserved:
+            raise DeferredEffect("WAITING_FOR_FEISHU_ACK")
 
         # 一次冻结本轮输入与来源，包括优先级；提交后新消息不得改变原生请求摘要。
         instruction = "任务范围预览（完整范围用 orchestrator_read）：\n" + ticket.mandate.scope[:4000]
@@ -256,12 +279,6 @@ class WorkerDispatcher:
             active.assignments[-1].status_only = False
             cast(Json, current.checkpoints.get("worker_slots", {})).pop(ticket.id, None)
             current.checkpoints[f"inputs:{run_id}"] = [item.id for item in pending]
-            current_records = records(current)
-            current_records.tickets.save(active)
-            if anchor_id is None and current.config.source_kind == "feishu" and not active.ended_at:
-                # 补偿旧的未建回执任务；接单时已有首回的任务按原消息去重。
-                current_origin = current_records.triggers.get(origin.id)
-                if current_origin and current_origin.authorized and current_origin.addressed:
-                    engine.reply(origin.id, "ack", TASK_ACCEPTANCE_REPLY, ticket_id=active.id)
+            records(current).tickets.save(active)
 
         await self.store.transact(workspace_id, scope_id, bind)

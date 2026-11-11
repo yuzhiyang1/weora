@@ -1,5 +1,6 @@
 """真实 SQL、HTTP、Inbox 和 Runs 集成；飞书和模型均使用明确的夹具。"""
 
+import asyncio
 import json
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict, replace
@@ -25,7 +26,7 @@ from weora.modules.computers.openbot import ComputerError, OpenBot
 from weora.modules.computers.policy import ComputerMode
 from weora.modules.computers.tools import register_computer_tools
 from weora.modules.context.channels import FeishuChannels
-from weora.modules.context.domain import ContextError, Json, Message, MessagePage
+from weora.modules.context.domain import ContextError, Json, Message, MessagePage, ReplyNotSent
 from weora.modules.coordination.domain import CoordinationError, DeferredEffect, Report, State
 from weora.modules.coordination.engine import Engine
 from weora.modules.coordination.polling import compensate
@@ -109,7 +110,7 @@ async def receive(
     await _pump_context(h.app)
 
 
-async def decide(h: ContextRuns, coordinator: CoordinationService, scope_id: str) -> str:
+async def decide(h: ContextRuns, coordinator: CoordinationService, scope_id: str, *, confirm: bool = True) -> str:
     workspace_id = h.context_actor.workspace_id
     evaluations = await coordinator.store.transact(workspace_id, scope_id, lambda engine, _: engine.pass_due())
     evaluation = evaluations[0]
@@ -118,7 +119,13 @@ async def decide(h: ContextRuns, coordinator: CoordinationService, scope_id: str
     value = dict(result(), eval_id=evaluation.id)
     decision = await coordinator.tool(workspace_id, scope_id, "decide", "orchestrator_eval_decide", value)
     assert decision["ok"] is True, decision
-    return str(cast(Json, decision["decision"]).get("ticket_id"))
+    ticket_id = str(cast(Json, decision["decision"]).get("ticket_id"))
+    if confirm:
+        state = await coordinator.store.snapshot(workspace_id, scope_id)
+        ack = next(item for item in state.replies if item.ticket_id == ticket_id and item.purpose == "ack")
+        effect = next(item for item in state.effects if item.data.get("reply_id") == ack.id)
+        assert await coordinator.deliver(workspace_id, scope_id, effect)
+    return ticket_id
 
 
 @pytest.mark.anyio
@@ -144,9 +151,25 @@ async def test_feishu_acceptance_reply_sends_once_before_worker_launch(
     reply_effect = next(item for item in state.effects if item.kind == "reply")
     worker_effect = next(item for item in state.effects if item.kind == "worker")
     assert reply_effect.priority > worker_effect.priority
-    send = AsyncMock(return_value="om_reply")
+    sending, released = asyncio.Event(), asyncio.Event()
+
+    async def feishu_reply(*args: object, **kwargs: object) -> str:
+        sending.set()
+        await released.wait()
+        return "om_reply"
+
+    send = AsyncMock(side_effect=feishu_reply)
     monkeypatch.setattr(h.reader, "reply", send)
-    assert await coordinator.deliver(workspace_id, scope_id, reply_effect)
+    with pytest.raises(DeferredEffect, match="WAITING_FOR_FEISHU_ACK"):
+        await coordinator.launch(workspace_id, scope_id, worker_effect)
+    async with asyncio.TaskGroup() as group:
+        dispatch_reply = group.create_task(coordinator.deliver(workspace_id, scope_id, reply_effect))
+        await asyncio.wait_for(sending.wait(), 5)
+        with pytest.raises(DeferredEffect, match="WAITING_FOR_FEISHU_ACK"):
+            await coordinator.launch(workspace_id, scope_id, worker_effect)
+        assert (await coordinator.store.snapshot(workspace_id, scope_id)).tickets[0].task_id is None
+        released.set()
+    assert dispatch_reply.result()
     expected = (
         acknowledgement if acknowledgement and len(acknowledgement) <= 240
         else "好，我来处理这件事。有结果我会在这里告诉你。"
@@ -177,6 +200,56 @@ async def test_unknown_feishu_task_number_replies_without_starting_a_task(contex
     assert "找不到可续接的任务 #DEADBEEF" in state.replies[0].text
     assert await coordinator.deliver(workspace_id, scope_id, reply_effects[0])
     assert h.reader.replies == 1
+
+
+@pytest.mark.anyio
+async def test_ack_credentials_failure_stays_unstarted_and_is_visible_in_console(
+    contextual: ContextRuns, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    h = contextual
+    coordinator, scope = await configure(h)
+    workspace = h.actor.workspace_id
+    await receive(h, coordinator)
+    await decide(h, coordinator, scope, confirm=False)
+    state = await coordinator.store.snapshot(workspace, scope)
+    reply = next(item for item in state.effects if item.kind == "reply")
+    worker = next(item for item in state.effects if item.kind == "worker")
+    attempt = await coordinator.store.claim(workspace, scope, reply.id, "feishu-ack-test")
+    assert attempt
+    send = h.reader.reply
+    monkeypatch.setattr(
+        h.reader, "reply", AsyncMock(side_effect=ReplyNotSent("PROVIDER_UNAVAILABLE", "敏感供应商原文")),
+    )
+    with pytest.raises(ReplyNotSent):
+        await coordinator.deliver(workspace, scope, attempt)
+    assert (await coordinator.store.snapshot(workspace, scope)).replies[0].state == "pending"
+    await coordinator.effect_failed(workspace, scope, attempt, code="PROVIDER_UNAVAILABLE")
+    await coordinator.store.settle(workspace, scope, attempt, error="PROVIDER_UNAVAILABLE")
+    await coordinator.launch(workspace, scope, worker)
+    current = await coordinator.store.snapshot(workspace, scope)
+    assert current.tickets[0].task_id is None and not current.tickets[0].assignments[-1].run_id
+    assert len(current.replies) == 1
+    overview = cast(Json, (await coordinator.list_scopes(h.context_actor))[0]["status"])
+    item = cast(list[Json], overview["tickets"])[0]
+    report = cast(Json, cast(Json, item["assignment"])["report"])
+    assert report["state"] == "failed" and "飞书接口暂时不可用" in report["summary"]
+    assert "敏感供应商原文" not in report["summary"]
+
+    # 修好飞书连接后，新的人类重试先重发原首回，再开放新的 Worker 安排。
+    await receive(h, coordinator, identity="om_retry", root="om_trigger", addressed=True, instruction="请重试")
+    await coordinator.store.transact(
+        workspace, scope, lambda engine, _: engine.retry(current.tickets[0].id, "om_retry"),
+    )
+    restored = await coordinator.store.snapshot(workspace, scope)
+    retry = next(item for item in restored.effects if item.id == reply.id)
+    assert retry.state == "pending" and retry.attempts == 0
+    worker = next(item for item in restored.effects if item.kind == "worker")
+    with pytest.raises(DeferredEffect, match="WAITING_FOR_FEISHU_ACK"):
+        await coordinator.launch(workspace, scope, worker)
+    monkeypatch.setattr(h.reader, "reply", send)
+    assert await coordinator.deliver(workspace, scope, retry)
+    await coordinator.launch(workspace, scope, worker)
+    assert (await coordinator.store.snapshot(workspace, scope)).tickets[0].assignments[-1].run_id
 
 
 @pytest.mark.anyio
@@ -327,9 +400,9 @@ async def test_unmentioned_inbox_decision_worker_run_report_reply_and_task_conti
         },
     )
     assert answer["ok"] is True
-    reply_effect = next(
-        item for item in (await coordinator.store.snapshot(workspace_id, scope_id)).effects if item.kind == "reply"
-    )
+    state = await coordinator.store.snapshot(workspace_id, scope_id)
+    result_reply = next(item for item in state.replies if item.purpose == "result")
+    reply_effect = next(item for item in state.effects if item.data.get("reply_id") == result_reply.id)
     # 图片准备失败尚未发送消息，允许安全重试；成功后重复消费也不得重复上传、发消息。
     original_upload = h.reader.upload_image
     monkeypatch.setattr(
@@ -337,14 +410,15 @@ async def test_unmentioned_inbox_decision_worker_run_report_reply_and_task_conti
     )
     with pytest.raises(ContextError):
         await coordinator.deliver(workspace_id, scope_id, reply_effect)
-    await coordinator.effect_failed(workspace_id, scope_id, reply_effect)
+    await coordinator.effect_failed(workspace_id, scope_id, reply_effect, code="PROVIDER_UNAVAILABLE")
     pending = await coordinator.store.snapshot(workspace_id, scope_id)
-    assert pending.replies[0].state == "pending" and h.reader.replies == 0
+    assert next(item for item in pending.replies if item.id == result_reply.id).state == "pending"
+    assert h.reader.replies == 1
     assert pending.tickets[0].delivery_error == "DELIVERY_PREPARATION_FAILED"
     monkeypatch.setattr(h.reader, "upload_image", original_upload)
     assert await coordinator.deliver(workspace_id, scope_id, reply_effect)
     assert not await coordinator.deliver(workspace_id, scope_id, reply_effect)
-    assert h.reader.replies == 1
+    assert h.reader.replies == 2
     assert len(h.reader.uploads) == 1 and h.reader.sent_images == ("img_test_1",)
     assert (await coordinator.store.snapshot(workspace_id, scope_id)).tickets[0].delivery_error is None
     status = await h.client.get(h.base + f"/context/runs/{first_id}/channel-status", headers=h.headers)
@@ -430,6 +504,13 @@ async def test_failed_native_run_requests_explicit_retry_in_original_channel(con
     ticket = current.tickets[0]
     assert ticket.attention and "MODEL_FAILED" in ticket.attention and "重试" in ticket.attention
     assert ticket.outcome is None and ticket.ended_at is None
+    await coordinator.reconcile(workspace, scope_id)
+    current = await coordinator.store.snapshot(workspace, scope_id)
+    replies = [item for item in current.replies if item.purpose == "attention"]
+    assert len(replies) == 1 and replies[0].trigger_id == "om_trigger"
+    assert "MODEL_FAILED" in replies[0].text
+    notice = next(item for item in current.effects if item.data.get("reply_id") == replies[0].id)
+    assert await coordinator.deliver(workspace, scope_id, notice)
 
 
 @pytest.mark.anyio
@@ -690,7 +771,7 @@ async def test_unknown_outbox_requires_reconciliation_and_never_sends_again(cont
     coordinator, scope_id = await configure(h)
     workspace_id = h.context_actor.workspace_id
     await receive(h, coordinator)
-    ticket_id = await decide(h, coordinator, scope_id)
+    ticket_id = await decide(h, coordinator, scope_id, confirm=False)
     reply = await coordinator.tool(
         workspace_id,
         scope_id,
@@ -708,7 +789,7 @@ async def test_unknown_outbox_requires_reconciliation_and_never_sends_again(cont
     effect = next(item for item in state.effects if item.kind == "reply")
     with pytest.raises(CoordinationError, match="CHANNEL_RECONCILIATION_REQUIRED"):
         await coordinator.deliver(workspace_id, scope_id, effect)
-    await coordinator.effect_failed(workspace_id, scope_id, effect)
+    await coordinator.effect_failed(workspace_id, scope_id, effect, code="CHANNEL_RECONCILIATION_REQUIRED")
     state = await coordinator.store.snapshot(workspace_id, scope_id)
     assert state.tickets[0].delivery_error == "DELIVERY_RESULT_UNKNOWN"
     assert any(item.kind == "ticket.delivery_failed" for item in state.notices)
@@ -720,7 +801,7 @@ async def test_revoke_clears_session_and_denies_old_decision_and_outbound(contex
     h = contextual
     coordinator, scope_id = await configure(h)
     await receive(h, coordinator)
-    ticket_id = await decide(h, coordinator, scope_id)
+    ticket_id = await decide(h, coordinator, scope_id, confirm=False)
     ack = await coordinator.tool(
         h.context_actor.workspace_id,
         scope_id,

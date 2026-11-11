@@ -11,7 +11,7 @@ from urllib.parse import quote
 import aiohttp
 from cryptography.fernet import Fernet, InvalidToken
 
-from weora.modules.context.domain import ContextError, Json, Message, MessagePage, SecretCipher
+from weora.modules.context.domain import ContextError, Json, Message, MessagePage, ReplyNotSent, SecretCipher
 from weora.modules.context.message_content import parse_content
 from weora.modules.context.replies import reply_content
 
@@ -265,10 +265,15 @@ class FeishuHttpReader:
         # uuid 在飞书支持的幂等窗口内避免重复；超时仍由 Outbox 标为未知，禁止盲重试。
         if len(image_keys) > 2 or any(not re.fullmatch(r"img_[A-Za-z0-9_.-]{1,500}", key) for key in image_keys):
             raise ContextError("INVALID_IMAGE", "回复最多附两张平台截图")
-        token = await self._token(connection)
+        try:
+            message_id = self._id(message_id)
+            token = await self._token(connection)
+        except ContextError as error:
+            # 此时尚未调用回复接口；获取凭证失败不应被误记为发送结果未知。
+            raise ReplyNotSent(error.code, error.message) from error
         raw = await self._json(
             "POST",
-            f"/im/v1/messages/{self._id(message_id)}/reply",
+            f"/im/v1/messages/{message_id}/reply",
             token=token,
             body={
                 "msg_type": "post",

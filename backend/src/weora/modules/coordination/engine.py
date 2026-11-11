@@ -589,10 +589,10 @@ class Engine:
                     self.r.triggers.save(item)
             self.r.tickets.save(ticket)
             acknowledgement = result.get("acknowledgement")
-            if self.config.source_kind == "feishu":
+            if self.config.source_kind == "feishu" and trigger.human:
                 acknowledgement = acknowledgement.strip() if isinstance(acknowledgement, str) else ""
                 if not acknowledgement or len(acknowledgement) > 240:
-                    acknowledgement = TASK_ACCEPTANCE_REPLY if trigger.addressed and trigger.human else ""
+                    acknowledgement = TASK_ACCEPTANCE_REPLY
             if isinstance(acknowledgement, str) and acknowledgement.strip():
                 self.reply(trigger.id, "ack", acknowledgement, ticket_id=ticket.id)
             self.record_notice("ticket.accepted", ticket_id, {"ticket_id": ticket_id})
@@ -896,6 +896,12 @@ class Engine:
             raise CoordinationError("NEW_HUMAN_RETRY_REQUIRED")
         if not ticket.delivery_error and (not previous.report or previous.report.state not in {"blocked", "failed"}):
             raise CoordinationError("NOT_RETRYABLE")
+        if self.config.source_kind == "feishu" and not any(item.run_id for item in ticket.assignments):
+            ack = self.r.replies.get(key("ack", ticket.origin_id))
+            if ack and ack.state != "sent" and (
+                ack.state != "pending" or not self.r.effects.retry_blocked_reply(ack.id, self.now())
+            ):
+                raise CoordinationError("FEISHU_ACK_NOT_RETRYABLE")
         previous.ended_at, previous.end_reason = self.now(), "retried"
         ticket.assignments.append(Assignment(key("assignment", ticket.id, trigger.id), self.now()))
         ticket.ended_at = ticket.ended_by = ticket.outcome = None
@@ -980,7 +986,7 @@ class Engine:
             ticket.ended_at, ticket.ended_by, ticket.outcome = self.now(), "executor", result
             self._release_untaken(ticket)
         self.r.tickets.save(ticket)
-        if report.human_action and ask_author:
+        if report.human_action and (ask_author or (self.config.source_kind == "feishu" and report.state == "failed")):
             origin = self.r.triggers.get(ticket.origin_id)
             if origin and origin.authorized and ticket.attention_trigger_id == origin.id:
                 # 向原发起人的消息请求确认，不能把补充人当作批准人。
@@ -1138,7 +1144,7 @@ class Engine:
         if purpose == "ack" and ticket and ticket.id not in trigger.acknowledged:
             trigger.acknowledged.append(ticket.id)
             self.r.triggers.save(trigger)
-        # 首回优先派发，执行仍由自己的队列推进，不依赖飞书发送成功。
+        # 首回优先派发；Worker 还须在派发事务中核对飞书回执，队列优先级本身不保证顺序。
         first_reply = (
             self.config.source_kind == "feishu"
             and purpose == "ack"
