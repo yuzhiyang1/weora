@@ -75,10 +75,12 @@ class CoordinationService:
         projects: ProjectService | None = None,
         delivery: DeliveryService | None = None,
         code_events: CodeEventReader | None = None,
+        console_url: str | None = None,
     ) -> None:
         self.store, self.context, self.runs, self.agents = store, context, runs, agents
         self.projects = projects
         self.delivery, self.code_events = delivery, code_events
+        self.console_url = console_url
         self.repository_intake: RepositoryIntake | None = None
         self.worker_dispatch = WorkerDispatcher(store, context, runs)
 
@@ -221,6 +223,7 @@ class CoordinationService:
         def prepare(engine: Engine, state: State) -> None:
             # 领域规则决定何时评估；运输层不需要了解游标、暂停或代次格式。
             engine.pass_due()
+            engine.relay_retried_results(self.console_url)
             checkpoints = {name: value for name, value in state.checkpoints.items() if name.startswith("poll:")}
             now = engine.now()
             compensation_due = not checkpoints or any(

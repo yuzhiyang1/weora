@@ -330,6 +330,7 @@ def create_app(
             app.state.project_service,
             app.state.delivery_service,
             app.state.code_event_reader,
+            console_url=resolved_settings.console_public_url,
         )
         if context
         else None

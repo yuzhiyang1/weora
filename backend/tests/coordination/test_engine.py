@@ -433,6 +433,32 @@ def test_feishu_notifies_once_per_failed_run_even_when_retry_has_same_error() ->
     assert notifications[-1].state == "pending"
 
 
+def test_verified_retry_result_is_relayed_if_main_does_not_reply() -> None:
+    engine, state = setup()
+    identity = accept(engine, state)
+    ticket = engine.ticket(identity)
+    old = ticket.assignments[-1]
+    old.run_id = "failed-run"
+    engine.mark_input(identity, old.id, ticket.inputs[0].id, read=True)
+    engine.report(identity, old.id, Report("failed", "调用失败", NOW, human_action="请重试。"))
+    engine.receive(message("retry", addressed=True))
+    engine.retry(identity, "retry")
+    assignment = ticket.assignments[-1]
+    assignment.run_id = "retry-run"
+    engine.mark_input(identity, assignment.id, ticket.inputs[-1].id, read=True)
+    engine.report(identity, assignment.id, Report("ready", "三条自查项已整理。", NOW, verified=True))
+
+    engine.relay_retried_results("https://console.example")
+    assert not any(reply.purpose == "result" for reply in state.replies)
+    engine.now = lambda: later(NOW, 21)
+    engine.relay_retried_results("https://console.example")
+    engine.relay_retried_results("https://console.example")
+    results = [reply for reply in state.replies if reply.purpose == "result"]
+    assert len(results) == 1 and results[0].trigger_id == "m1"
+    assert "三条自查项已整理。" in results[0].text
+    assert "https://console.example/runs/retry-run" in results[0].text
+
+
 @pytest.mark.parametrize("mode", ["off", "observe", "auto"])
 def test_listed_mention_explicit_works_in_all_modes(mode: str) -> None:
     engine, state = setup(mode)

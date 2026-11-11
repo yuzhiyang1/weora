@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 from typing import Literal
 from uuid import UUID
 
-from weora.modules.context.replies import TASK_ACCEPTANCE_REPLY
+from weora.modules.context.replies import TASK_ACCEPTANCE_REPLY, brief_reply
 from weora.modules.coordination.domain import (
     Assignment,
     Clock,
@@ -906,6 +906,13 @@ class Engine:
             ):
                 raise CoordinationError("FEISHU_ACK_NOT_RETRYABLE")
         previous.ended_at, previous.end_reason = self.now(), "retried"
+        if self.config.source_kind == "feishu" and previous.report and previous.report.state == "failed":
+            # 重试接管后，旧失败通知仍可追溯，但不应继续阻塞新 Worker。
+            notice = self.r.replies.get(key("attention", ticket.attention_id)) if ticket.attention_id else None
+            if notice and notice.state == "pending":
+                notice.state = "withdrawn"
+                self.r.effects.cancel("reply", notice.id)
+            ticket.attention = ticket.attention_id = ticket.attention_trigger_id = None
         ticket.assignments.append(
             Assignment(
                 key("assignment", ticket.id, trigger.id), self.now(), refresh_model=self.config.source_kind == "feishu",
@@ -1167,3 +1174,29 @@ class Engine:
         )
         self.r.effects.enqueue("reply", identity, {"reply_id": identity}, priority=2 if first_reply else 0)
         return reply
+
+    def relay_retried_results(self, console_url: str | None) -> None:
+        """主会话漏发时，兜底回传已经验收的飞书重试结果，不重复投递。"""
+        if self.config.source_kind != "feishu" or self.config.paused or not self.config.enabled:
+            return
+        now = self.now()
+        for ticket in self.r.tickets.list():
+            if ticket.outcome != "ready" or not ticket.ended_at or later(ticket.ended_at, 20) > now:
+                continue
+            assignment = ticket.assignments[-1]
+            report = assignment.report
+            origin = self.r.triggers.get(ticket.origin_id)
+            if (
+                not assignment.refresh_model or not assignment.run_id or not report
+                or report.state != "ready" or not report.verified or not origin or not origin.authorized
+                or self.r.replies.exists(key("result", ticket.id, assignment.id))
+            ):
+                continue
+            link = f"\n\n完整结果：{console_url.rstrip('/')}/runs/{assignment.run_id}" if console_url else ""
+            if len(link) >= 150:
+                link = ""
+            suffix = link or "\n\n完整结果见 Weora 运行详情。"
+            summary = brief_reply(report.summary).split("\n\n详细过程见 Weora 运行记录。", 1)[0]
+            limit = 240 - len(suffix)
+            text = summary if len(summary) <= limit else summary[:limit - 1].rstrip() + "…"
+            self.reply(origin.id, "result", text + suffix, ticket_id=ticket.id)

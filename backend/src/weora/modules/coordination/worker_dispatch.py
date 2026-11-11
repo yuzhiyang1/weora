@@ -161,6 +161,13 @@ class WorkerDispatcher:
 
         # 一次冻结本轮输入与来源，包括优先级；提交后新消息不得改变原生请求摘要。
         instruction = "任务范围预览（完整范围用 orchestrator_read）：\n" + ticket.mandate.scope[:4000]
+        refresh_retry = assignment.refresh_model and assignment.run_id is None
+        if refresh_retry:
+            instruction += (
+                "\n发起人已明确重试，上一轮失败记录只供参考。本轮执行原任务并交付实际结果，"
+                "不要只报告状态。完成后用 orchestrator_report 提交 ready 与可转发的结果；"
+                "若仍不能完成，报告实际原因。既有授权和验收规则仍适用。"
+            )
         if state.config.source_kind == "code_hosting" and origin.origin.get("root_text"):
             root = str(origin.origin["root_text"])
             instruction += (
@@ -209,7 +216,7 @@ class WorkerDispatcher:
 
         def freeze_launch(engine: Engine, current: State) -> Json:
             require_launch(engine, current)
-            if assignment.refresh_model and assignment.run_id is None:
+            if refresh_retry:
                 # 即使协调 Worker 崩溃重放，也要保持本轮选中的路由模型覆盖项。
                 draft["retry_model_id"] = current.config.worker_model_id
             # Native Run 已创建而回写前崩溃时，后来的消息不能改变重试指纹或生成第二个 Task。

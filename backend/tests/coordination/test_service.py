@@ -527,6 +527,7 @@ async def test_failed_native_run_requests_explicit_retry_in_original_channel(
     monkeypatch.setattr(coordinator.runs, "_profile_provider", resolve)
     await coordinator.store.transact(workspace, scope_id, lambda engine, _: engine.retry(ticket.id, "om_retry"))
     retry = await coordinator.store.snapshot(workspace, scope_id)
+    assert retry.tickets[0].attention is None and retry.tickets[0].attention_id is None
     worker = next(item for item in retry.effects if item.kind == "worker")
     # 模拟输入已提交、派发前中断；恢复进程仍使用提交时保存的模型。
     with monkeypatch.context() as interrupted:
