@@ -53,6 +53,28 @@ export type RunInput = {
   repository_ids?: string[];
 };
 export type RunPage = { items: RunSummary[]; next_before_id: string | null };
+export type RunInputMode = "steer" | "continue";
+export type RunConversation = {
+  can_send: boolean;
+  can_steer: boolean;
+  runs: Array<{
+    id: string;
+    instruction: string;
+    output: string | null;
+    status: RunStatus;
+    created_at: string;
+    updated_at: string;
+    agent_name: string;
+  }>;
+  inputs: Array<{
+    id: string;
+    instruction: string;
+    mode: RunInputMode;
+    status: "PENDING" | "DISPATCHED" | "REJECTED" | "STEERING" | "READ" | "MISSED";
+    run_id: string | null;
+    created_at: string;
+  }>;
+};
 export type EventPage = {
   items: RunEvent[];
   next_after: number;
@@ -139,6 +161,16 @@ export function listRuns(
 }
 export function getRun(workspaceId: string, runId: string, signal?: AbortSignal): Promise<RunDetail> {
   return consoleRequest(workspaceId, `/runs/${encodeURIComponent(runId)}`, { signal: signal ?? null });
+}
+export function getRunConversation(workspaceId: string, runId: string, signal: AbortSignal): Promise<RunConversation> {
+  return consoleRequest(workspaceId, `/runs/${encodeURIComponent(runId)}/conversation`, { signal });
+}
+export function sendRunInput(
+  workspaceId: string, runId: string, instruction: string, mode: RunInputMode, key: string,
+): Promise<{ input_id: string }> {
+  return consoleWrite(workspaceId, `/runs/${encodeURIComponent(runId)}/continue`, { instruction, mode }, "POST", {
+    "Idempotency-Key": key,
+  });
 }
 export function createRun(
   workspaceId: string,

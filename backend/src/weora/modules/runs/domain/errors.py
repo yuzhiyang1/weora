@@ -52,6 +52,11 @@ class RunContinuationLimitError(RunError):
     message = "该任务的待处理消息已达到上限，请等待现有消息处理"
 
 
+class RunSteeringUnavailableError(RunError):
+    code = "RUN_STEERING_UNAVAILABLE"
+    message = "这次运行已结束或暂时无法接收指令，可选择在后续运行处理"
+
+
 class RunModelSelectionError(RunError):
     """内部协调配置只能选择已启用提供方的模型标识，不能注入新提供方或凭据。"""
 

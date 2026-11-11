@@ -20,6 +20,7 @@ from weora.modules.agents.application.service import AgentRegistryService
 from weora.modules.collaboration.application.tasks import TaskRecord
 from weora.modules.context.channels import FeishuChannels
 from weora.modules.context.domain import ContextActor, ContextError, Json
+from weora.modules.context.replies import TASK_ACCEPTANCE_REPLY
 from weora.modules.context.service import ContextService
 from weora.modules.context.store import SqlContextStore
 from weora.modules.coordination.domain import CoordinationError
@@ -28,8 +29,15 @@ from weora.modules.delivery.application.service import DeliveryService
 from weora.modules.delivery.domain.models import DeliveryError
 from weora.modules.delivery.infrastructure.docker import DockerSandbox
 from weora.modules.identity.application.service import IdentityService
-from weora.modules.runs.application.execution import RunExecutor, RunLease, RuntimeFailure, RuntimeInput, TextRuntime
-from weora.modules.runs.application.harness import PI_RUNTIME
+from weora.modules.runs.application.execution import (
+    RunExecutor,
+    RunLease,
+    RuntimeFailure,
+    RuntimeInput,
+    RuntimeSession,
+    TextRuntime,
+)
+from weora.modules.runs.application.harness import PI_RUNTIME, ToolCaller
 from weora.modules.runs.application.ports import ExecutionProfile, RunActor
 from weora.modules.runs.application.service import RunService
 from weora.modules.runs.application.task_titles import TITLE_TIMEOUT_SECONDS, generate_next_title
@@ -121,7 +129,7 @@ async def _generate_title() -> bool:
                 profile, runtime_id=PI_RUNTIME, max_tokens=min(profile.max_tokens or 128, 128),
                 timeout_seconds=budget, execution_timeout_seconds=budget,
             )
-            # 标题用轻量文本执行器，沿用冻结的模型和凭据，不启动任务选用的 Agent 执行器。
+            # 标题沿用冻结模型和凭据，由轻量文本内核概括原始请求。
             return await harness_factory(settings, profile, api_key)(None, None).run(payload, profile)
 
         return await generate_next_title(lambda: SqlAlchemyRunsUnitOfWork(sessions), generate)
@@ -143,14 +151,22 @@ async def _execute(workspace_id: UUID, run_id: UUID) -> bool:
         claimed_actor: RunActor | None = None
         resolved_key = ""
 
+        console_input = False
+
         async def resolve_profile(lease: RunLease) -> ExecutionProfile:
-            nonlocal resolved_key
+            nonlocal resolved_key, console_input
             resolved, resolved_key = await resolve_run_profile(
                 app.state.console_settings_service,
                 lease.run.workspace_id,
                 lease.run.execution_profile,
                 profile,
                 settings.deepseek_api_key.get_secret_value() if settings.deepseek_api_key else "",
+            )
+            actor = RunActor(lease.run.created_by, lease.run.workspace_id)
+            detail = await runs.access_metadata(actor, lease.run.id)
+            console_input = bool(
+                detail and detail.task.audience == "private"
+                and lease.run.collaboration_context is None and not lease.run.recovery_read_only
             )
             return resolved
 
@@ -200,7 +216,11 @@ async def _execute(workspace_id: UUID, run_id: UUID) -> bool:
                 return result
 
             assert lease.run.execution_profile is not None
-            create_runtime = harness_factory(settings, lease.run.execution_profile, resolved_key)
+            factory = harness_factory(settings, lease.run.execution_profile, resolved_key)
+            console_session = runs.console_session(lease) if console_input else None
+
+            def create_runtime(session: RuntimeSession | None, call: ToolCaller | None) -> TextRuntime:
+                return factory(session or console_session, call)
 
             def with_cli_read_check(runtime: TextRuntime) -> TextRuntime:
                 # 纠正读取只核对本轮租约里的工具证据，旧 Run 的回答和调用不参与。
@@ -522,6 +542,22 @@ async def _pump_context(app: FastAPI) -> None:
                     and detail.task.audience == "group"
                     and not (detail.task.origin_metadata or {}).get("coordination_scope_id")
                 ):
+                    ack_key = f"run-ack:{detail.run.id}"
+                    if (
+                        item.get("send_acceptance_reply")
+                        and detail.run.status != "CANCELLED"
+                        and not await context.store.get(workspace_id, "delivery", ack_key)
+                    ):
+                        try:
+                            scope = await app.state.context_scope_factory(
+                                ContextActor(actor.user_id, workspace_id), detail.run.id
+                            )
+                            await channels.enqueue_delivery(
+                                scope, str(item["id"]), TASK_ACCEPTANCE_REPLY, ack_key
+                            )
+                        except ContextError:
+                            # 首回失败不影响执行或已有的结果回报。
+                            pass
                     text: str | None = None
                     business_key = f"run-result:{detail.run.id}"
                     if detail.run.status == "SUCCEEDED" and detail.run.output_text:
@@ -543,7 +579,9 @@ async def _pump_context(app: FastAPI) -> None:
                             await channels.enqueue_delivery(scope, str(item["id"]), text, business_key)
                         except ContextError:
                             continue
-        for item in await context.store.list(workspace_id, "delivery"):
+        deliveries = await context.store.list(workspace_id, "delivery")
+        # 同一次扫描先尝试首回，短任务的结果可能已经同时入队。
+        for item in sorted(deliveries, key=lambda row: not str(row["business_key"]).startswith("run-ack:")):
             if item.get("status") == "PENDING":
                 try:
                     scope = await app.state.context_scope_factory(

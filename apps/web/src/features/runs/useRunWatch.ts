@@ -63,6 +63,7 @@ export function useRunWatch(
         const target = latest;
         await Promise.all([
           client.invalidateQueries({ queryKey: key, exact: true }),
+          client.invalidateQueries({ queryKey: ["run-conversation", workspaceId, userId, runId] }),
           client.invalidateQueries({ queryKey: ["run-tools", workspaceId, userId, runId] }),
           client.invalidateQueries({ queryKey: ["run-delivery", workspaceId, userId, runId] }),
         ]);

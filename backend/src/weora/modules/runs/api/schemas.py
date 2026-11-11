@@ -1,6 +1,7 @@
 """运行 HTTP 契约，受众和发起人由平台注入而非模型或调用方指定。"""
 
 from datetime import datetime
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -33,6 +34,7 @@ class ContinueTaskRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
     instruction: str = Field(min_length=1, max_length=16000)
+    mode: Literal["continue", "steer"] = "continue"
 
     @field_validator("instruction")
     @classmethod

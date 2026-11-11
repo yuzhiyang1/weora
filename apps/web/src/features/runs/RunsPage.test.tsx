@@ -88,6 +88,17 @@ function mockRunRequests(
       if (path.endsWith("/runs?limit=20"))
         return response({ items: [run], next_before_id: null });
       if (path.endsWith("/runs/run-1")) return response(run);
+      if (path.endsWith("/runs/run-1/conversation")) {
+        const detailResponse = await overrides?.(path.replace(/\/conversation$/, ""), init);
+        if (detailResponse && !detailResponse.ok) return detailResponse;
+        const detail = detailResponse ? await detailResponse.json() as typeof run : run;
+        return response({
+          can_send: true,
+          can_steer: detail.status === "RUNNING",
+          runs: [{ ...detail, output: detail.output_text }],
+          inputs: [],
+        });
+      }
       if (path.includes("/events?"))
         return response({
           items: [
@@ -335,7 +346,7 @@ describe("Console 运行", () => {
     let current = run;
     const mock = mockRunRequests((path) => path.endsWith("/runs/run-1") ? response(current) : undefined);
     render(<App />);
-    expect(await screen.findByText(run.instruction)).toBeInTheDocument();
+    expect(await within(await screen.findByRole("list", { name: "对话消息" })).findByText(run.instruction)).toBeInTheDocument();
     await waitFor(() => expect(TestEventSource.instances).toHaveLength(1));
     const stream = TestEventSource.instances[0]!;
     expect(stream.url).toContain("/runs/run-1/watch");
@@ -347,7 +358,7 @@ describe("Console 运行", () => {
         data: JSON.stringify({ status: current.status, last_sequence: current.last_sequence, title: null }),
       }));
     });
-    expect(await screen.findByText("执行成功")).toBeInTheDocument();
+    expect(await within(screen.getByRole("complementary", { name: "运行信息" })).findByText("执行成功")).toBeInTheDocument();
     await userEvent.click(screen.getByRole("tab", { name: "事实记录" }));
     expect(await screen.findByText("run.created")).toBeInTheDocument();
     act(() => {
@@ -387,7 +398,10 @@ describe("Console 运行", () => {
         await act(() => vi.advanceTimersByTimeAsync(5000));
       }
       const reads = mock.mock.calls.filter(([input]) => String(input).includes("/runs/run-1"));
-      expect(reads.map(([input]) => String(input))).toEqual(["/api/v1/workspaces/workspace-1/runs/run-1"]);
+      expect(reads.map(([input]) => String(input))).toEqual([
+        "/api/v1/workspaces/workspace-1/runs/run-1",
+        "/api/v1/workspaces/workspace-1/runs/run-1/conversation",
+      ]);
     } finally {
       vi.useRealTimers();
     }
@@ -406,6 +420,7 @@ describe("Console 运行", () => {
       ),
     ).toBeUndefined();
     for (const prefix of [
+      "run-conversation",
       "run-context",
       "run-tools",
       "run-delivery",
@@ -433,7 +448,7 @@ describe("Console 运行", () => {
     window.history.replaceState({}, "", "/runs/run-1");
     const mock = mockRunRequests();
     render(<App />);
-    expect(await screen.findByText(run.instruction)).toBeInTheDocument();
+    expect(await within(await screen.findByRole("list", { name: "对话消息" })).findByText(run.instruction)).toBeInTheDocument();
     await waitFor(() => expect(TestEventSource.instances).toHaveLength(1));
     vi.useFakeTimers();
     vi.spyOn(Math, "random").mockReturnValue(0);
@@ -450,7 +465,7 @@ describe("Console 运行", () => {
       expect(TestEventSource.instances).toHaveLength(6);
       expect(screen.getByRole("button", { name: "重试连接" })).toBeInTheDocument();
       expect(screen.queryByText(run.instruction)).not.toBeInTheDocument();
-      expect(mock.mock.calls.filter(([input]) => String(input).includes("/runs/run-1"))).toHaveLength(1);
+      expect(mock.mock.calls.filter(([input]) => String(input).endsWith("/runs/run-1"))).toHaveLength(1);
     } finally {
       vi.useRealTimers();
     }

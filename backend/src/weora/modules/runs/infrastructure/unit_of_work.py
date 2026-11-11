@@ -65,6 +65,8 @@ def _record(model: RunModel) -> RunRecord:
         failure_code=model.failure_code,
         recovery_read_only=model.recovery_read_only,
         collaboration_context=model.collaboration_context,
+        fencing_token=model.fencing_token,
+        lease_expires_at=_utc(model.lease_expires_at) if model.lease_expires_at is not None else None,
     )
 
 
@@ -121,8 +123,8 @@ class SqlAlchemyRunStore:
             ]
         )
 
-    async def get_private(self, *, actor: RunActor, run_id: UUID) -> RunRecord | None:
-        model = await self._session.scalar(
+    async def get_private(self, *, actor: RunActor, run_id: UUID, lock: bool = False) -> RunRecord | None:
+        query = (
             select(RunModel)
             .where(
                 RunModel.id == run_id,
@@ -131,6 +133,7 @@ class SqlAlchemyRunStore:
             )
             .execution_options(populate_existing=True)
         )
+        model = await self._session.scalar(query.with_for_update() if lock else query)
         return None if model is None else _record(model)
 
     async def task_runs(self, *, actor: RunActor, task_id: UUID, limit: int = 8) -> list[RunRecord]:

@@ -29,6 +29,7 @@ import {
   type RunEvent,
 } from "./api";
 import { RunStatusTag } from "./RunStatusTag";
+import { RunConversationPanel } from "./RunConversationPanel";
 import { DeliveryPanel } from "./DeliveryPanel";
 import { ComputerPanel } from "./ComputerPanel";
 import { RunReport } from "./RunReport";
@@ -59,7 +60,7 @@ function RunDetailContent({ runId }: { runId: string }) {
   const [accessRevoked, setAccessRevoked] = useState(false);
   const revoked = useRef(false);
   const [searchParams] = useSearchParams();
-  const [activeTab, setActiveTab] = useState(() => searchParams.get("tab") === "delivery" ? "delivery" : "overview");
+  const [activeTab, setActiveTab] = useState(() => searchParams.get("tab") === "delivery" ? "delivery" : "conversation");
   const [cancelOpen, setCancelOpen] = useState(false);
   const detailNavigation = useRef<HTMLElement>(null);
   const [events, setEvents] = useState<RunEvent[]>([]);
@@ -70,6 +71,7 @@ function RunDetailContent({ runId }: { runId: string }) {
     const privatePrefixes = new Set([
       "runs",
       "run-context",
+      "run-conversation",
       "run-tools",
       "run-delivery",
       "run-repositories",
@@ -249,6 +251,7 @@ function RunDetailContent({ runId }: { runId: string }) {
           <Button onClick={() => {
             void query.refetch();
             setEventAttempt((value) => value + 1);
+            void queryClient.invalidateQueries({ queryKey: ["run-conversation", workspace.id, user.id, runId] });
             void queryClient.invalidateQueries({ queryKey: ["run-tools", workspace.id, user.id, runId] });
             void queryClient.invalidateQueries({ queryKey: ["run-delivery", workspace.id, user.id, runId] });
           }}>刷新状态</Button>
@@ -263,7 +266,6 @@ function RunDetailContent({ runId }: { runId: string }) {
           ) : null}
           {canCancel ? (
             <Button
-              type="danger"
               disabled={recover.isPending}
               onClick={() => {
                 cancel.reset();
@@ -346,6 +348,17 @@ function RunDetailContent({ runId }: { runId: string }) {
           onChange={setActiveTab}
           className="run-detail-tabs"
         >
+          <TabPane itemKey="conversation" tab="Agent 对话">
+            {activeTab === "conversation" && (
+              <RunConversationPanel
+                workspaceId={workspace.id}
+                userId={user.id}
+                run={run}
+                onAccessRevoked={forgetPrivateRun}
+                onShowTools={() => setActiveTab("tools")}
+              />
+            )}
+          </TabPane>
           <TabPane itemKey="overview" tab="任务概览">
             <div className="detail-columns">
               <section className="detail-card">
