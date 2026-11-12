@@ -12,6 +12,7 @@ import pytest
 from weora.modules.runs.application.execution import RuntimeFailure, RuntimeInput, RuntimeSession
 from weora.modules.runs.application.ports import ExecutionProfile
 from weora.modules.runs.infrastructure.pi_runtime import PiTextRuntime
+from weora.modules.runs.infrastructure.process_runtime import ProcessRuntime
 from weora.modules.tools.infrastructure.repository import READ_FILE
 
 PROFILE = ExecutionProfile("pi-agent-core@1.3.0", "deepseek", "explicit-test-model", 128, 3)
@@ -98,6 +99,28 @@ async def test_process_deadline_is_not_success(runtime: PiTextRuntime) -> None:
 
 
 @pytest.mark.anyio
+async def test_ready_separates_startup_from_model_budget() -> None:
+    """慢启动计入整体时限，模型等待仍受原预算限制。"""
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node 未安装，未执行真实子进程协议验证")
+    process = ProcessRuntime(
+        executable=node,
+        runtime_id=PROFILE.runtime_id,
+        providers=frozenset({"deepseek"}),
+        entry=ENTRY,
+        api_key=TEST_KEY,
+        report_ready=True,
+    )
+    profile = replace(PROFILE, timeout_seconds=1, execution_timeout_seconds=5)
+    assert await process.run(RuntimeInput("系统提示", "slow-start"), profile) == "协议测试回答。"
+    with pytest.raises(RuntimeFailure, match="MODEL_TIMEOUT"):
+        await process.run(RuntimeInput("系统提示", "slow-model"), profile)
+    with pytest.raises(RuntimeFailure, match="RUN_TIMEOUT"):
+        await process.run(RuntimeInput("系统提示", "slow-start"), replace(profile, execution_timeout_seconds=1))
+
+
+@pytest.mark.anyio
 async def test_pi_transports_large_history_and_checkpoint_without_byte_cutoff() -> None:
     """使用真实 JSONL 入口，恢复超过旧上限的历史，再完整回写检查点。"""
     node = shutil.which("node")
@@ -108,14 +131,20 @@ async def test_pi_transports_large_history_and_checkpoint_without_byte_cutoff() 
     captured = []
 
     async def checkpoint(history: list[dict[str, object]], read: list[str]) -> None:
-        captured.extend(history)
+        captured.append((history, read))
 
     session = RuntimeSession("large-history", messages=messages, checkpoint=checkpoint)
     runtime = PiTextRuntime(
         node_executable=node, entry=ENTRY.parent / "pi_large_session.mjs", api_key=TEST_KEY, session=session
     )
     assert await runtime.run(RuntimeInput("系统提示", "继续"), replace(PROFILE, timeout_seconds=20)) == "历史已保留"
-    assert captured == messages
+    appended = messages + [{"role": "assistant", "content": "追加的事实"}]
+    results = [{"role": "toolResult", "content": value * 420000} for value in "abc"]
+    assert captured == [
+        (appended, []),
+        (appended + [{"role": "user", "content": "第一份摘要"}], []),
+        (appended + results + [{"role": "user", "content": "新摘要"}], ["followup"]),
+    ]
 
 
 @pytest.mark.anyio

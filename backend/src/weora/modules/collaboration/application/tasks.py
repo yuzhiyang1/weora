@@ -96,6 +96,8 @@ class TaskInput:
     run_id: UUID | None = None
     status: str = "PENDING"
     origin_metadata: dict[str, object] | None = None
+    # 运行中消息绑定指定 Run 的这次领取，恢复时不会重放。
+    steer_fence: int | None = None
 
 
 class TaskStore(Protocol):
@@ -116,7 +118,13 @@ class TaskStore(Protocol):
     async def input_by_key(self, workspace_id: UUID, user_id: UUID, key: str) -> TaskInput | None: ...
     async def input_by_id(self, workspace_id: UUID, user_id: UUID, input_id: UUID) -> TaskInput | None: ...
     async def input_for_run(self, workspace_id: UUID, run_id: UUID) -> TaskInput | None: ...
-    async def inputs(self, workspace_id: UUID, task_id: UUID, user_id: UUID) -> list[TaskInput]: ...
+    async def inputs(
+        self, workspace_id: UUID, task_id: UUID, user_id: UUID, *, recent: bool = False,
+    ) -> list[TaskInput]: ...
+    async def steering_inputs(
+        self, workspace_id: UUID, run_id: UUID, user_id: UUID, fence: int,
+    ) -> list[TaskInput]: ...
+    async def mark_input_read(self, item: TaskInput) -> None: ...
     async def assign_input(self, item: TaskInput, run_id: UUID) -> None: ...
     async def reject_input(self, item: TaskInput) -> None: ...
     async def defer_input(self, item: TaskInput) -> None: ...
@@ -244,8 +252,18 @@ class TaskService:
     async def input_by_id(self, workspace_id: UUID, user_id: UUID, input_id: UUID) -> TaskInput | None:
         return await self._store.input_by_id(workspace_id, user_id, input_id)
 
-    async def inputs(self, workspace_id: UUID, task_id: UUID, user_id: UUID) -> list[TaskInput]:
-        return await self._store.inputs(workspace_id, task_id, user_id)
+    async def inputs(
+        self, workspace_id: UUID, task_id: UUID, user_id: UUID, *, recent: bool = False,
+    ) -> list[TaskInput]:
+        return await self._store.inputs(workspace_id, task_id, user_id, recent=recent)
+
+    async def steering_inputs(
+        self, workspace_id: UUID, run_id: UUID, user_id: UUID, fence: int,
+    ) -> list[TaskInput]:
+        return await self._store.steering_inputs(workspace_id, run_id, user_id, fence)
+
+    async def mark_input_read(self, item: TaskInput) -> None:
+        await self._store.mark_input_read(item)
 
     async def assign_input(self, item: TaskInput, run_id: UUID) -> None:
         await self._store.assign_input(item, run_id)

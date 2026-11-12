@@ -50,26 +50,21 @@ async def test_agent_cli_proxy_only_injects_bound_bot_token_for_signed_feishu_re
     proxy = _BotProxy("cli-call-key", token)
     path = "/open-apis/sheets/v2/spreadsheets/test/values/sheet%21A1%3AA1"
     timestamp = str(int(time.time()))
-    canonical = "\n".join(
-        (
-            "v1",
-            "GET",
-            "open.feishu.cn",
-            path,
-            hashlib.sha256(b"").hexdigest(),
-            timestamp,
-            "bot",
-            "Authorization",
+
+    def signed(method: str, body: bytes = b"") -> dict[str, str]:
+        canonical = "\n".join(
+            ("v1", method, "open.feishu.cn", path, hashlib.sha256(body).hexdigest(), timestamp, "bot", "Authorization")
         )
-    )
-    headers = {
-        "X-Lark-Proxy-Target": "https://open.feishu.cn",
-        "X-Lark-Proxy-Identity": "bot",
-        "X-Lark-Proxy-Version": "v1",
-        "X-Lark-Proxy-Auth-Header": "Authorization",
-        "X-Lark-Proxy-Timestamp": timestamp,
-        "X-Lark-Proxy-Signature": hmac.new(b"cli-call-key", canonical.encode(), "sha256").hexdigest(),
-    }
+        return {
+            "X-Lark-Proxy-Target": "https://open.feishu.cn",
+            "X-Lark-Proxy-Identity": "bot",
+            "X-Lark-Proxy-Version": "v1",
+            "X-Lark-Proxy-Auth-Header": "Authorization",
+            "X-Lark-Proxy-Timestamp": timestamp,
+            "X-Lark-Proxy-Signature": hmac.new(b"cli-call-key", canonical.encode(), "sha256").hexdigest(),
+        }
+
+    headers = signed("GET")
     async with TestServer(upstream_app) as upstream, aiohttp.ClientSession() as session:
 
         class LocalTransport:
@@ -86,7 +81,7 @@ async def test_agent_cli_proxy_only_injects_bound_bot_token_for_signed_feishu_re
         async def forward(request: web.Request) -> web.StreamResponse:
             return await proxy.forward(request, LocalTransport())
 
-        proxy_app.router.add_get("/{path:.*}", forward)
+        proxy_app.router.add_route("*", "/{path:.*}", forward)
         async with TestServer(proxy_app) as server:
             from yarl import URL
 
@@ -101,6 +96,11 @@ async def test_agent_cli_proxy_only_injects_bound_bot_token_for_signed_feishu_re
             ):
                 async with session.get(url, headers=headers | override) as response:
                     assert response.status == 403
+            for method in ("POST", "PATCH", "PUT", "DELETE"):
+                body = b'{"text":"write"}'
+                async with session.request(method, url, headers=signed(method, body), data=body) as response:
+                    assert response.status == 403
+                    assert await response.text() == "FEISHU_CLI_WRITE_REQUIRES_APPROVAL"
     assert received == [(path, "Bearer bound-bot-token")]
     assert proxy.log_id == "provider-id"
     token.assert_awaited_once()

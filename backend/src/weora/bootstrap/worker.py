@@ -28,8 +28,15 @@ from weora.modules.delivery.application.service import DeliveryService
 from weora.modules.delivery.domain.models import DeliveryError
 from weora.modules.delivery.infrastructure.docker import DockerSandbox
 from weora.modules.identity.application.service import IdentityService
-from weora.modules.runs.application.execution import RunExecutor, RunLease, RuntimeFailure, RuntimeInput, TextRuntime
-from weora.modules.runs.application.harness import PI_RUNTIME
+from weora.modules.runs.application.execution import (
+    RunExecutor,
+    RunLease,
+    RuntimeFailure,
+    RuntimeInput,
+    RuntimeSession,
+    TextRuntime,
+)
+from weora.modules.runs.application.harness import PI_RUNTIME, ToolCaller
 from weora.modules.runs.application.ports import ExecutionProfile, RunActor
 from weora.modules.runs.application.service import RunService
 from weora.modules.runs.application.task_titles import TITLE_TIMEOUT_SECONDS, generate_next_title
@@ -143,14 +150,22 @@ async def _execute(workspace_id: UUID, run_id: UUID) -> bool:
         claimed_actor: RunActor | None = None
         resolved_key = ""
 
+        console_input = False
+
         async def resolve_profile(lease: RunLease) -> ExecutionProfile:
-            nonlocal resolved_key
+            nonlocal resolved_key, console_input
             resolved, resolved_key = await resolve_run_profile(
                 app.state.console_settings_service,
                 lease.run.workspace_id,
                 lease.run.execution_profile,
                 profile,
                 settings.deepseek_api_key.get_secret_value() if settings.deepseek_api_key else "",
+            )
+            actor = RunActor(lease.run.created_by, lease.run.workspace_id)
+            detail = await runs.access_metadata(actor, lease.run.id)
+            console_input = bool(
+                detail and detail.task.audience == "private"
+                and lease.run.collaboration_context is None and not lease.run.recovery_read_only
             )
             return resolved
 
@@ -207,7 +222,11 @@ async def _execute(workspace_id: UUID, run_id: UUID) -> bool:
                 return result
 
             assert lease.run.execution_profile is not None
-            create_runtime = harness_factory(settings, lease.run.execution_profile, resolved_key)
+            factory = harness_factory(settings, lease.run.execution_profile, resolved_key)
+            console_session = runs.console_session(lease) if console_input else None
+
+            def create_runtime(session: RuntimeSession | None, call: ToolCaller | None) -> TextRuntime:
+                return factory(session or console_session, call)
 
             def with_cli_read_check(runtime: TextRuntime) -> TextRuntime:
                 # 纠正读取只核对本轮租约里的工具证据，旧 Run 的回答和调用不参与。

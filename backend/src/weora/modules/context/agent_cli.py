@@ -24,12 +24,12 @@ from weora.modules.tools.application.gateway import ToolSpec, failure
 
 _FILENAME = r"^[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}$"
 _TRANSFER_LIMIT = 96_000
-_HOST_AUTH = {"https://open.feishu.cn": "Authorization", "https://mcp.feishu.cn": "X-Lark-MCP-TAT"}
+_FEISHU_ORIGIN = "https://open.feishu.cn"
 
 FEISHU_AGENT_CLI = ToolSpec(
     "lark.cli.exec",
     "用当前飞书群绑定的 Bot 执行官方 lark-cli 原生命令。argv 不含 lark-cli 本身。"
-    "可用 lark.cli.skill 查官方 Skill，或用 --help、领域 --help 和 schema 查命令。支持快捷命令、领域命令及 api。"
+    "可用 lark.cli.skill 查官方 Skill，或用 --help、领域 --help 和 schema 查命令。只允许读取飞书 OpenAPI。"
     "例如读电子表格可先查 argv=['sheets','+cells-get','--help']，再读取任务给出的链接。"
     "stdin 可传原始文本，files 可传当前命令所需的 Base64 文件，output_files 可取回指定文件。",
     {
@@ -53,7 +53,7 @@ FEISHU_AGENT_CLI = ToolSpec(
             },
         },
     },
-    # 原生命令可包含远端写入，统一沿用 Gateway 的执行租约和未知结果恢复语义。
+    # 保留既有缓存和恢复边界。旧调用的回执可能来自修复前的写操作。
     effect="write",
     timeout_seconds=40,
 )
@@ -174,6 +174,8 @@ class FeishuAgentCli:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
             await self._stop(process)
+        if proxy.requires_write_approval:
+            return failure("FEISHU_CLI_WRITE_REQUIRES_APPROVAL")
         result: Json = {"ok": process.returncode == 0, "exit_code": process.returncode}
         for name, value in (("stdout", stdout_task.result()), ("stderr", stderr_task.result())):
             if value:
@@ -225,16 +227,18 @@ class _BotProxy:
     def __init__(self, key: str, token: Callable[[], Awaitable[str]]) -> None:
         self.key, self.token = key, token
         self.log_id: str | None = None
+        self.requires_write_approval = False
 
-    async def forward(self, request: web.BaseRequest, session: aiohttp.ClientSession) -> web.StreamResponse:
+    async def _read_signed_body(self, request: web.BaseRequest) -> bytes:
+        """核验飞书目标、签名时效与正文完整性，供出站转发使用。"""
         headers = request.headers
         origin = headers.get("X-Lark-Proxy-Target", "")
-        auth_header = _HOST_AUTH.get(origin)
+        auth_header = "Authorization"
         identity = headers.get("X-Lark-Proxy-Identity")
         version = headers.get("X-Lark-Proxy-Version")
         timestamp = headers.get("X-Lark-Proxy-Timestamp", "")
         if (
-            not auth_header
+            origin != _FEISHU_ORIGIN
             or headers.get("X-Lark-Proxy-Auth-Header") != auth_header
             or identity != "bot"
             or version != "v1"
@@ -261,18 +265,32 @@ class _BotProxy:
         signature = hmac.new(self.key.encode(), canonical.encode(), "sha256").hexdigest()
         if not hmac.compare_digest(signature, headers.get("X-Lark-Proxy-Signature", "")):
             raise web.HTTPForbidden()
+        return body
+
+    async def forward(self, request: web.BaseRequest, session: aiohttp.ClientSession) -> web.StreamResponse:
+        """校验 CLI 签名和只读权限，再用群绑定的 Bot 令牌转发并流式返回响应。"""
+        body = await self._read_signed_body(request)
+
+        # 快捷命令和原始 API 共用代理。只有已签名的实际请求才能触发写审批提示。
+        if request.method not in {"GET", "HEAD"}:
+            self.requires_write_approval = True
+            raise web.HTTPForbidden(text="FEISHU_CLI_WRITE_REQUIRES_APPROVAL")
+        if not request.path.startswith("/open-apis/"):
+            raise web.HTTPForbidden()
+
+        # 通过全部策略后才取令牌。禁止重定向，令牌仅发送给已核验的飞书目标。
         try:
             token = await self.token()
             out_headers = {
                 key: value
-                for key, value in headers.items()
+                for key, value in request.headers.items()
                 if key.lower() in {"content-type", "accept", "user-agent", "range", "x-request-id", "x-lark-request-id"}
                 or key.lower().startswith("x-cli-")
             }
-            out_headers[auth_header] = f"Bearer {token}" if auth_header == "Authorization" else token
+            out_headers["Authorization"] = f"Bearer {token}"
             async with session.request(
                 request.method,
-                URL(origin + request.raw_path, encoded=True),
+                URL(_FEISHU_ORIGIN + request.raw_path, encoded=True),
                 data=body or None,
                 headers=out_headers,
                 allow_redirects=False,

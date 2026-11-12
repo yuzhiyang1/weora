@@ -23,6 +23,15 @@ for await (const line of lines) {
       reply({ type: 'completed', text: '完整会话传输通过' });
       break;
     }
+    if (request.instruction === 'oversized-checkpoint') {
+      reply({ type: 'checkpoint_delta', keep: 0, messages: [{ role: 'assistant', content: 'x'.repeat(1024 * 1024) }], read: [] });
+      continue;
+    }
+    if (request.instruction === 'incomplete-checkpoint') {
+      reply({ type: 'checkpoint_delta', keep: 0, messages: [{ role: 'assistant', content: '部分结果' }], read: [], more: true });
+      reply({ type: 'completed', text: '缺少最后一帧' });
+      break;
+    }
     if (['many-checkpoints', 'too-many-checkpoints'].includes(request.instruction)) {
       // 完整日志的重复运输量超过 2 MB，单帧仍保持在协议限制内。
       const count = request.instruction === 'many-checkpoints' ? 20 : 257;

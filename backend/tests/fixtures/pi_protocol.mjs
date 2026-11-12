@@ -9,6 +9,15 @@ lines.close();
 process.stdin.destroy();
 const reply = value => process.stdout.write(JSON.stringify({ protocol: 'weora.runtime.v1', ...value }));
 switch (input.instruction) {
+  case 'slow-start':
+  case 'slow-model':
+    await new Promise(resolve => setTimeout(resolve, 1200));
+    if (process.env.WEORA_RUNTIME_REPORT_READY === '1') {
+      process.stdout.write(JSON.stringify({ protocol: 'weora.runtime.v1', type: 'ready' }) + '\n');
+    }
+    if (input.instruction === 'slow-model') await new Promise(resolve => setTimeout(resolve, 1200));
+    reply({ type: 'completed', text: '协议测试回答。' });
+    break;
   case 'hold':
     setInterval(() => {}, 1000);
     break;

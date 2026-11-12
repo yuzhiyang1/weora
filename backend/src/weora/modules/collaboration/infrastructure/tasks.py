@@ -142,8 +142,9 @@ class TaskInputModel(Base):
         UniqueConstraint("workspace_id", "created_by", "idempotency_key", name="uq_task_input_key"),
         UniqueConstraint("task_id", "sequence", name="uq_task_input_sequence"),
         UniqueConstraint("run_id", name="uq_task_input_run"),
-        CheckConstraint("status IN ('PENDING','DISPATCHED','REJECTED')", name="ck_task_input_status"),
+        CheckConstraint("status IN ('PENDING','DISPATCHED','REJECTED','STEERING','READ')", name="ck_task_input_status"),
         Index("ix_task_inputs_pending", "status", "created_at", "id"),
+        Index("ix_task_inputs_steering", "anchor_run_id", "steer_fence", "status"),
     )
     id: Mapped[UUID] = mapped_column(primary_key=True)
     task_id: Mapped[UUID] = mapped_column()
@@ -159,6 +160,7 @@ class TaskInputModel(Base):
     checked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     run_id: Mapped[UUID | None] = mapped_column(nullable=True)
     status: Mapped[str] = mapped_column(String(16), default="PENDING")
+    steer_fence: Mapped[int | None] = mapped_column(nullable=True)
     origin_metadata: Mapped[dict[str, object] | None] = mapped_column(JSON(), nullable=True)
 
 
@@ -185,6 +187,7 @@ def _input(row: TaskInputModel) -> TaskInput:
         anchor_run_id=row.anchor_run_id, instruction=row.instruction, idempotency_key=row.idempotency_key,
         request_sha256=row.request_sha256, request_id=row.request_id, created_at=row.created_at,
         sequence=row.sequence, run_id=row.run_id, status=row.status, origin_metadata=row.origin_metadata,
+        steer_fence=row.steer_fence,
     )
 
 
@@ -418,7 +421,8 @@ class SqlAlchemyTaskStore:
             id=item.id, task_id=item.task_id, workspace_id=item.workspace_id, created_by=item.created_by,
             anchor_run_id=item.anchor_run_id, instruction=item.instruction, idempotency_key=item.idempotency_key,
             request_sha256=item.request_sha256, request_id=item.request_id, created_at=item.created_at,
-            sequence=sequence, checked_at=item.created_at, status="PENDING", origin_metadata=item.origin_metadata,
+            sequence=sequence, checked_at=item.created_at, status=item.status, origin_metadata=item.origin_metadata,
+            steer_fence=item.steer_fence,
         )
         self._session.add(row)
         await self._session.flush()
@@ -444,13 +448,31 @@ class SqlAlchemyTaskStore:
         ))
         return _input(row) if row else None
 
-    async def inputs(self, workspace_id: UUID, task_id: UUID, user_id: UUID) -> list[TaskInput]:
+    async def inputs(
+        self, workspace_id: UUID, task_id: UUID, user_id: UUID, *, recent: bool = False,
+    ) -> list[TaskInput]:
+        order = TaskInputModel.sequence.desc() if recent else TaskInputModel.sequence.asc()
         rows = await self._session.scalars(select(TaskInputModel).where(
             TaskInputModel.workspace_id == workspace_id, TaskInputModel.task_id == task_id,
             TaskInputModel.created_by == user_id,
-        ).order_by((TaskInputModel.status == "PENDING").desc(), TaskInputModel.sequence).limit(100))
+        ).order_by((TaskInputModel.status == "PENDING").desc(), order).limit(100))
         # 待处理项优先进入有界窗口，长期任务不会因已有 100 条历史而饿死新输入。
         return sorted((_input(row) for row in rows), key=lambda item: item.sequence)
+
+    async def steering_inputs(
+        self, workspace_id: UUID, run_id: UUID, user_id: UUID, fence: int,
+    ) -> list[TaskInput]:
+        rows = await self._session.scalars(select(TaskInputModel).where(
+            TaskInputModel.workspace_id == workspace_id, TaskInputModel.created_by == user_id,
+            TaskInputModel.anchor_run_id == run_id, TaskInputModel.steer_fence == fence,
+            TaskInputModel.status == "STEERING",
+        ).order_by(TaskInputModel.sequence).limit(32))
+        return [_input(row) for row in rows]
+
+    async def mark_input_read(self, item: TaskInput) -> None:
+        await self._session.execute(update(TaskInputModel).where(
+            TaskInputModel.id == item.id, TaskInputModel.status == "STEERING",
+        ).values(status="READ"))
 
     async def assign_input(self, item: TaskInput, run_id: UUID) -> None:
         await self._session.execute(update(TaskInputModel).where(

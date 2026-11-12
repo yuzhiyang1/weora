@@ -29,6 +29,9 @@ from weora.modules.collaboration.infrastructure.agent_sessions import device_act
 from weora.modules.collaboration.infrastructure.tasks import TaskModel, TaskParticipantModel
 from weora.modules.identity.application.ports import PrincipalRecord
 
+# 领取超时后，原领取者仍可用原键恢复。确认或关闭前，会话继续为这条消息保留。
+_SESSION_OCCUPYING_CLAIM_STATES = ("claimed", "needs_confirmation")
+
 
 def _time(value: datetime | None) -> datetime | None:
     if value is None:
@@ -330,6 +333,10 @@ async def reserve_wake(
     session_id: UUID,
     message_id: UUID,
 ) -> bool:
+    """锁住收件会话并检查消息授权，空闲时登记一次唤醒尝试。
+
+    返回 True 表示本事务取得发起唤醒的资格，客户端仍需回报实际唤醒结果。
+    """
     session = await local_session(db, device, session_id, lock=True)
     await expire(db, session_id)
     row = await db.get(AgentMail, message_id)
@@ -343,11 +350,13 @@ async def reserve_wake(
         or not await _authorized_mail(db, row, members, lock_task=True)
     ):
         return False
+
+    # 未完成的领取和仍有效的唤醒尝试都占用会话，避免向原生会话重复注入通知。
     occupied = await db.scalar(
         select(AgentMail.id)
         .where(
             AgentMail.recipient_id == session_id,
-            (AgentMail.state == "claimed")
+            AgentMail.state.in_(_SESSION_OCCUPYING_CLAIM_STATES)
             | (
                 (AgentMail.state == "pending")
                 & AgentMail.wake_state.in_(("attempting", "accepted"))
@@ -387,19 +396,32 @@ async def claim(
     key: str,
     message_id: UUID | None,
 ) -> dict[str, object] | None:
+    """在收件会话锁内恢复原领取，或为当前会话登记一条新领取。
+
+    重试沿用原回执并重新核对权限。新领取按入队顺序查找可访问消息，
+    返回含正文的领取回执。无可领取消息时返回 None，会话已有未完成领取时返回冲突。
+    """
     await local_session(db, device, session_id, lock=True)
     await expire(db, session_id)
     scope = (AgentMail.workspace_id == device.workspace_id, AgentMail.recipient_id == session_id)
-    old = await db.scalar(select(AgentMail).where(*scope, AgentMail.claim_key == key))
-    if old is not None:
-        if message_id and old.id != message_id:
+
+    # 先恢复原领取，避免把同键重试当成抢占会话的新请求。
+    prior_claim = await db.scalar(select(AgentMail).where(*scope, AgentMail.claim_key == key))
+    if prior_claim is not None:
+        if message_id and prior_claim.id != message_id:
             raise conflict()
-        if old.state in {"claimed", "needs_confirmation"} and await _authorized_mail(db, old, members, lock_task=True):
-            return receipt(old, body=True)
-        # 同一领取键不能继续向下一条邮件推进。
-        return receipt(old) if await _authorized_mail(db, old, members) else None
-    if await db.scalar(select(AgentMail.id).where(*scope, AgentMail.state == "claimed").limit(1)):
+        if prior_claim.state in _SESSION_OCCUPYING_CLAIM_STATES and await _authorized_mail(
+            db, prior_claim, members, lock_task=True
+        ):
+            return receipt(prior_claim, body=True)
+        return receipt(prior_claim) if await _authorized_mail(db, prior_claim, members) else None
+
+    if await db.scalar(
+        select(AgentMail.id).where(*scope, AgentMail.state.in_(_SESSION_OCCUPYING_CLAIM_STATES)).limit(1)
+    ):
         raise AgentMailError(409, "AGENT_SESSION_HAS_ACTIVE_CLAIM", "请先处理当前会话已领取的消息")
+
+    # 排队期间权限可能变化。取消已撤权的消息，再选择本次领取的消息。
     query = select(AgentMail).where(*scope, AgentMail.state == "pending")
     if message_id:
         query = query.where(AgentMail.id == message_id)

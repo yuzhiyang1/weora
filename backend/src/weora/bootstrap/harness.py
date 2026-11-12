@@ -37,6 +37,7 @@ def harness_factory(settings: AppSettings, profile: ExecutionProfile, api_key: s
             providers=frozenset({"deepseek"}),
             entry=Path(settings.omp_runtime_entry or ""),
             private_home=True,
+            report_ready=True,
             api_key=api_key,
             call_tool=call,
             session=session,

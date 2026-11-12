@@ -1,6 +1,7 @@
 """从公开入口验证授权、跨设备寻址、领取和答复。"""
 
 import asyncio
+from datetime import timedelta
 from uuid import uuid4
 
 import pytest
@@ -9,6 +10,7 @@ from httpx import AsyncClient
 from tests.api.test_runs import RunsHarness
 from tests.api.test_runs import runs as runs
 from tests.api.test_task_collaboration import headers, member
+from weora.modules.collaboration.infrastructure import agent_delivery
 
 
 async def device(client: AsyncClient, path: str, name: str) -> tuple[str, dict[str, str]]:
@@ -96,6 +98,23 @@ async def exercise_direct(runs: RunsHarness, *, concurrent: bool = False) -> Non
         claim = await peer.post(claim_path, headers=claim_headers, json={"message_id": message})
         assert claim.json()["item"]["body"] == payload["body"]
         assert (await peer.post(claim_path, headers=claim_headers, json={"message_id": message})).json() == claim.json()
+        following = await browser.post(
+            path + "/messages", headers=sender_auth | {"Idempotency-Key": "following"}, json=payload
+        )
+        assert following.status_code == 201, following.text
+        following_id = following.json()["id"]
+        following_wake = f"{path}/sessions/{target}/messages/{following_id}/wake"
+        # 让已领取消息进入待确认，不等待真实超时，也不直接改表。
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(agent_delivery, "CLAIM_TTL", timedelta(0))
+            assert (await peer.post(following_wake, headers=target_auth)).json() == {"reserved": False}
+            blocked = await peer.post(
+                claim_path, headers=target_auth | {"Idempotency-Key": "next-claim"}, json={"message_id": following_id}
+            )
+            assert blocked.status_code == 409, blocked.text
+            recovered = await peer.post(claim_path, headers=claim_headers, json={"message_id": message})
+            assert recovered.json()["item"]["state"] == "needs_confirmation"
+            assert recovered.json()["item"]["body"] == payload["body"]
         reply = await peer.post(
             path + "/messages",
             headers=target_auth | {"Idempotency-Key": "reply"},
@@ -108,6 +127,7 @@ async def exercise_direct(runs: RunsHarness, *, concurrent: bool = False) -> Non
         )
         assert reply.status_code == 201, reply.text
         assert (await browser.get(f"{path}/messages/{message}", headers=sender_auth)).json()["state"] == "replied"
+        assert (await peer.post(following_wake, headers=target_auth)).json() == {"reserved": True}
         result = await browser.post(
             f"{path}/sessions/{sender}/claims",
             headers=sender_auth | {"Idempotency-Key": "receive-reply"},

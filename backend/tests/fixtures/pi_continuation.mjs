@@ -20,3 +20,5 @@ faux.setResponses([(context) => {
 const text = await runtime.runText(input, { model: faux.getModel(), streamFn: models.streamSimple.bind(models) });
 process.stdout.write(JSON.stringify({ protocol: 'weora.runtime.v1', type: 'completed', text }) + '\n');
 lines.close();
+// Windows 上 readline 的异步迭代器会保留 stdin 读句柄，显式暂停后夹具才能退出。
+process.stdin.pause();
