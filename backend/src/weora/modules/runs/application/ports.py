@@ -76,6 +76,9 @@ class RunRecord:
     collaboration_context: dict[str, object] | None = None
     # 查询时从已授权的任务投影，不冻结到每条运行记录。
     task_title: str | None = None
+    # 只在服务端比较领取代次，不能从 HTTP 请求指定。
+    fencing_token: int = 0
+    lease_expires_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,7 +136,7 @@ class RunStore(Protocol):
 
     async def add(self, submission: RunSubmission, *, request_id: str) -> None: ...
 
-    async def get_private(self, *, actor: RunActor, run_id: UUID) -> RunRecord | None: ...
+    async def get_private(self, *, actor: RunActor, run_id: UUID, lock: bool = False) -> RunRecord | None: ...
 
     async def list_private(self, *, actor: RunActor, limit: int, before: RunRecord | None) -> list[RunRecord]: ...
 

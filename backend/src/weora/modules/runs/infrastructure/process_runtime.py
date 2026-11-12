@@ -15,7 +15,13 @@ from weora.modules.runs.application.execution import RuntimeFailure, RuntimeInpu
 from weora.modules.runs.application.harness import PI_RUNTIME
 from weora.modules.runs.application.ports import ExecutionProfile
 from weora.modules.runs.application.session_delivery import session_history_window
-from weora.shared.runtime_limits import MAX_CHECKPOINT_FRAMES, MAX_TOOL_CALLS
+from weora.shared.runtime_limits import (
+    MAX_CHECKPOINT_FRAME_BYTES,
+    MAX_CHECKPOINT_FRAMES,
+    MAX_CHECKPOINT_TOTAL_BYTES,
+    MAX_SESSION_HISTORY_BYTES,
+    MAX_TOOL_CALLS,
+)
 
 _HOME_VARIABLES = ("HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "XDG_CONFIG_HOME", "XDG_CACHE_HOME")
 
@@ -33,6 +39,7 @@ _SAFE_CODES = frozenset(
         "PROTOCOL_INPUT_LIMIT",
         "MODEL_TIMEOUT",
         "RUN_TIMEOUT",
+        "RUNTIME_PROTOCOL_OUTPUT_LIMIT",
     }
 )
 
@@ -52,6 +59,7 @@ class ProcessRuntime:
         session: RuntimeSession | None = None,
         private_home: bool = False,
         watch_parent: bool = False,
+        report_ready: bool = False,
     ) -> None:
         self._executable = executable
         self._runtime_id, self._providers = runtime_id, providers
@@ -61,18 +69,23 @@ class ProcessRuntime:
         self._session = session
         self._private_home = private_home
         self._watch_parent = watch_parent
+        self._report_ready = report_ready
         self._protocol = "weora.runtime.v2" if session else "weora.runtime.v1"
 
     async def run(self, payload: RuntimeInput, profile: ExecutionProfile) -> str:
         self._delivery_started = False
         self._history_prefix: list[dict[str, object]] = []
         model_messages: list[dict[str, object]] = []
+        history_offsets = [0]
         if self._session:
+            # 会话超过预算时保留已保存的历史并明确失败，不静默裁掉旧消息。
+            history_offsets = self._history_offsets(self._session.messages)
             if self._runtime_id == PI_RUNTIME:
                 # Pi 按模型窗口压缩；恢复前按字节裁剪会丢掉可用于摘要的证据。
                 model_messages = self._session.messages
             else:
                 self._history_prefix, model_messages = session_history_window(self._session.messages)
+                history_offsets = history_offsets[len(self._history_prefix) :]
         if profile.runtime_id != self._runtime_id or profile.provider not in self._providers:
             raise RuntimeFailure("MODEL_CONFIGURATION_MISMATCH")
         if not self._entry.is_file() or not self._api_key:
@@ -94,6 +107,7 @@ class ProcessRuntime:
                             "id": self._session.id,
                             "messages": model_messages,
                             "initial_input_ids": self._session.initial_input_ids,
+                            "checkpoint_mode": "delta",
                         }
                     }
                     if self._session
@@ -116,7 +130,10 @@ class ProcessRuntime:
                 ),
             },
             ensure_ascii=False,
+            separators=(",", ":"),
         ).encode()
+        if self._session and len(request) > MAX_SESSION_HISTORY_BYTES + MAX_CHECKPOINT_FRAME_BYTES:
+            raise RuntimeFailure("PROTOCOL_INPUT_LIMIT")
         # NODE_OPTIONS、个人模型凭据、代理和云凭据均不继承；SDK 只使用显式提供方密钥。
         environment = {
             key: value
@@ -135,6 +152,10 @@ class ProcessRuntime:
         if self._watch_parent:
             # 由受信适配器声明管道的生命周期语义，不接受宿主环境或请求覆盖。
             environment["WEORA_RUNTIME_WATCH_PARENT"] = "1"
+        # 旧运行只有一份总预算。仅在独立整体时限存在时协商启动就绪帧。
+        expect_ready = self._report_ready and profile.execution_timeout_seconds is not None
+        if expect_ready:
+            environment["WEORA_RUNTIME_REPORT_READY"] = "1"
         process: asyncio.subprocess.Process | None = None
         directory: TemporaryDirectory[str] | None = None
         try:
@@ -153,14 +174,29 @@ class ProcessRuntime:
                     cwd=directory.name,
                     creationflags=_creation_flags(),
                     start_new_session=sys.platform != "win32",
-                    limit=300001,
+                    limit=MAX_CHECKPOINT_FRAME_BYTES if self._session else 300001,
                 )
                 assert process.stdin is not None and process.stdout is not None and process.stderr is not None
 
-                result, _ = await asyncio.gather(
-                    self._exchange(process, request, payload, profile.timeout_seconds),
-                    self._read_bounded(process.stderr, 16384),
+                exchange = asyncio.create_task(
+                    self._exchange(
+                        process,
+                        request,
+                        payload,
+                        profile.timeout_seconds,
+                        model_messages,
+                        history_offsets,
+                        expect_ready,
+                    )
                 )
+                errors = asyncio.create_task(self._read_bounded(process.stderr, 16384))
+                try:
+                    result, _ = await asyncio.gather(exchange, errors)
+                finally:
+                    # 先结束协议读取，再由退出清理接管管道，避免两个协程同时读。
+                    exchange.cancel()
+                    errors.cancel()
+                    await asyncio.gather(exchange, errors, return_exceptions=True)
                 if await self._read_bounded(process.stdout, 1):
                     raise RuntimeFailure("RUNTIME_PROTOCOL_INVALID")
                 await process.wait()
@@ -183,7 +219,14 @@ class ProcessRuntime:
                 directory.cleanup()
 
     async def _exchange(
-        self, process: asyncio.subprocess.Process, request: bytes, payload: RuntimeInput, model_seconds: float
+        self,
+        process: asyncio.subprocess.Process,
+        request: bytes,
+        payload: RuntimeInput,
+        model_seconds: float,
+        model_messages: list[dict[str, object]],
+        history_offsets: list[int],
+        expect_ready: bool,
     ) -> str:
         """双向 JSONL 只转发工具请求；Actor、凭据和 fencing 不取自子进程。"""
         assert process.stdin is not None and process.stdout is not None
@@ -193,7 +236,9 @@ class ProcessRuntime:
         if not self._watch_parent and not payload.tools and not self._session:
             process.stdin.close()
         # 双向协议的任一方向失效都应终止本轮，尤其不能忽略输入侧的撤权异常。
-        reader = asyncio.create_task(self._read_frames(process, payload, model_seconds))
+        reader = asyncio.create_task(
+            self._read_frames(process, payload, model_seconds, model_messages, history_offsets, expect_ready)
+        )
         feeder: asyncio.Task[None] | None = None
         if self._session and self._session.pull:
             feeder = asyncio.create_task(self._feed(process))
@@ -231,23 +276,28 @@ class ProcessRuntime:
             await asyncio.sleep(0.2)
 
     async def _read_frames(
-        self, process: asyncio.subprocess.Process, payload: RuntimeInput, model_seconds: float
+        self,
+        process: asyncio.subprocess.Process,
+        payload: RuntimeInput,
+        model_seconds: float,
+        model_messages: list[dict[str, object]],
+        history_offsets: list[int],
+        expect_ready: bool,
     ) -> str:
+        """校验输出预算，分派会话回执与工具请求，直到收到模型终态。"""
         assert process.stdin is not None and process.stdout is not None
         permitted = {tool.name for tool in payload.tools}
-        total, count, checkpoint_count = 0, 0, 0
+        output_bytes = tool_calls = checkpoint_frames = checkpoint_bytes = 0
+        history = model_messages.copy()
+        awaiting_checkpoint_tail = False
         remaining = model_seconds
         while True:
             started = asyncio.get_running_loop().time()
             try:
-                # 只累积等待 Runtime/模型输出的时间；Gateway 自行限制 Tool 等待时间。
-                async with asyncio.timeout(max(0, remaining)):
-                    line = (
-                        await self._read_session_frame(process.stdout)
-                        if self._session
-                        else await process.stdout.readline()
-                    )
-                remaining -= asyncio.get_running_loop().time() - started
+                # 启动阶段由外层整体时限约束。模型计时仍跳过 Gateway 工具等待。
+                async with asyncio.timeout(None if expect_ready else max(0, remaining)):
+                    line = await process.stdout.readline()
+                elapsed = asyncio.get_running_loop().time() - started
             except TimeoutError:
                 raise RuntimeFailure("MODEL_TIMEOUT") from None
             except ValueError as exc:
@@ -267,25 +317,43 @@ class ProcessRuntime:
                 raise RuntimeFailure("RUNTIME_PROTOCOL_INVALID") from exc
             if not isinstance(frame, dict) or frame.get("protocol") != self._protocol:
                 raise RuntimeFailure("RUNTIME_PROTOCOL_INVALID")
-            if len(line) > 300000 and not (self._session and frame.get("type") == "checkpoint"):
+            frame_type = frame.get("type")
+            if expect_ready:
+                expect_ready = False
+                if frame_type == "ready":
+                    if len(line) > 300000:
+                        raise RuntimeFailure("RUNTIME_PROTOCOL_OUTPUT_LIMIT")
+                    if set(frame) != {"protocol", "type"}:
+                        raise RuntimeFailure("RUNTIME_PROTOCOL_INVALID")
+                    continue
+                # 旧入口直接发业务帧，首帧等待仍计入模型预算。
+                if elapsed >= remaining:
+                    raise RuntimeFailure("MODEL_TIMEOUT")
+            remaining -= elapsed
+            is_checkpoint = self._session is not None and frame_type in ("checkpoint", "checkpoint_delta")
+            if awaiting_checkpoint_tail and frame_type not in ("checkpoint_delta", "accepted", "model_retry"):
+                raise RuntimeFailure("RUNTIME_PROTOCOL_INVALID")
+
+            # 历史随会话增长，单独计量检查点，避免挤占普通输出与工具帧预算。
+            if len(line) > (MAX_CHECKPOINT_FRAME_BYTES if is_checkpoint else 300000):
                 raise RuntimeFailure("RUNTIME_PROTOCOL_OUTPUT_LIMIT")
-            if self._session and frame.get("type") == "checkpoint":
-                # 连续会话每轮重发完整日志，重复字节不能算作模型新增输出。
-                # 帧数按共用工具预算约束，检查点本身不受普通响应的单帧字节限制。
-                checkpoint_count += 1
-                if checkpoint_count > MAX_CHECKPOINT_FRAMES:
+            if is_checkpoint:
+                checkpoint_frames += 1
+                checkpoint_bytes += len(line)
+                if checkpoint_frames > MAX_CHECKPOINT_FRAMES or checkpoint_bytes > MAX_CHECKPOINT_TOTAL_BYTES:
                     raise RuntimeFailure("RUNTIME_PROTOCOL_OUTPUT_LIMIT")
             else:
-                total += len(line)
-                if total > 2000000:
+                output_bytes += len(line)
+                if output_bytes > 2000000:
                     raise RuntimeFailure("RUNTIME_PROTOCOL_OUTPUT_LIMIT")
-            if self._session and frame.get("type") == "accepted":
+
+            if self._session and frame_type == "accepted":
                 if set(frame) != {"protocol", "type", "id"} or not isinstance(frame["id"], str):
                     raise RuntimeFailure("RUNTIME_PROTOCOL_INVALID")
                 if self._session.accepted:
                     await self._session.accepted(frame["id"])
                 continue
-            if self._session and frame.get("type") == "model_retry":
+            if self._session and frame_type == "model_retry":
                 status = frame.get("status")
                 if set(frame) != {"protocol", "type", "status"} or (
                     status is not None
@@ -302,32 +370,18 @@ class ProcessRuntime:
                 if self._session.status:
                     await self._session.status(status)
                 continue
-            if self._session and frame.get("type") == "checkpoint":
-                self._delivery_started = True
-                messages, read = frame.get("messages"), frame.get("read")
-                if (
-                    set(frame) != {"protocol", "type", "messages", "read"}
-                    or not isinstance(messages, list)
-                    or any(
-                        not isinstance(item, dict) or item.get("role") not in {"user", "assistant", "toolResult"}
-                        for item in messages
-                    )
-                    or not isinstance(read, list)
-                    or any(not isinstance(item, str) for item in read)
-                    or self._api_key.encode() in line
-                ):
-                    raise RuntimeFailure("RUNTIME_PROTOCOL_INVALID")
-                if self._session.checkpoint:
-                    # 子进程只运输模型窗口；平台回调继续接收完整日志，历史审计不会被裁剪。
-                    await self._session.checkpoint(self._history_prefix + messages, read)
+            if is_checkpoint:
+                awaiting_checkpoint_tail = await self._apply_checkpoint_frame(
+                    frame, line, history, history_offsets, awaiting_checkpoint_tail
+                )
                 continue
-            if frame.get("type") != "tool_call":
+            if frame_type != "tool_call":
                 # 最终响应之后关闭输入，防止退出等待和后续越权工具请求。
                 if not process.stdin.is_closing():
                     process.stdin.close()
                 return self._result(line)
-            count += 1
-            if count > MAX_TOOL_CALLS:
+            tool_calls += 1
+            if tool_calls > MAX_TOOL_CALLS:
                 raise RuntimeFailure("TOOL_BUDGET_EXCEEDED")
             # 从这个边界起，工具可能已经产生副作用；后续断连必须走原生恢复，不能重投整轮。
             self._delivery_started = True
@@ -351,6 +405,61 @@ class ProcessRuntime:
             process.stdin.write(encoded + b"\n")
             await process.stdin.drain()
 
+    async def _apply_checkpoint_frame(
+        self,
+        frame: dict[str, object],
+        line: bytes,
+        history: list[dict[str, object]],
+        history_offsets: list[int],
+        awaiting_tail: bool,
+    ) -> bool:
+        """合并一帧会话历史，收到末帧后才一起保存历史与已读回执。
+
+        返回 True 表示当前批次尚未收齐，内存中的变更还未提交。
+        """
+        assert self._session is not None
+        self._delivery_started = True
+
+        # 旧版检查点会替换整份可见历史，增量帧显式指定保留的前缀。
+        fields = {"protocol", "type", "messages", "read"}
+        keep: object = 0
+        has_more = False
+        if frame["type"] == "checkpoint_delta":
+            fields.add("keep")
+            keep = frame.get("keep")
+            if "more" in frame:
+                fields.add("more")
+                if type(frame["more"]) is not bool:
+                    raise RuntimeFailure("RUNTIME_PROTOCOL_INVALID")
+                has_more = frame["more"]
+
+        # 续帧只能追加，且已读回执必须随末帧到达，避免确认一段未持久化的历史。
+        messages, read_ids = frame.get("messages"), frame.get("read")
+        if (
+            set(frame) != fields
+            or type(keep) is not int
+            or not 0 <= keep <= len(history)
+            or (awaiting_tail and keep != len(history))
+            or (has_more and (not messages or read_ids))
+            or not isinstance(messages, list)
+            or any(
+                not isinstance(item, dict) or item.get("role") not in {"user", "assistant", "toolResult"}
+                for item in messages
+            )
+            or not isinstance(read_ids, list)
+            or any(not isinstance(item, str) for item in read_ids)
+            or self._api_key.encode() in line
+        ):
+            raise RuntimeFailure("RUNTIME_PROTOCOL_INVALID")
+
+        # 复用保留前缀的字节计数，先验证剩余预算，再替换内存中的尾部。
+        suffix_offsets = self._history_offsets(messages, base=history_offsets[keep])
+        history[keep:] = messages
+        history_offsets[keep + 1 :] = suffix_offsets[1:]
+        if not has_more and self._session.checkpoint:
+            await self._session.checkpoint(self._history_prefix + history, read_ids)
+        return has_more
+
     def _result(self, content: bytes) -> str:
         try:
             message = json.loads(content)
@@ -373,19 +482,16 @@ class ProcessRuntime:
         return text
 
     @staticmethod
-    async def _read_session_frame(reader: asyncio.StreamReader) -> bytes:
-        """分段取出管道中的长检查点，避免 readline 的固定缓存上限截断会话。"""
-        chunks: list[bytes] = []
-        while True:
-            try:
-                chunks.append(await reader.readuntil(b"\n"))
-                break
-            except asyncio.LimitOverrunError as error:
-                chunks.append(await reader.readexactly(error.consumed))
-            except asyncio.IncompleteReadError as error:
-                chunks.append(error.partial)
-                break
-        return b"".join(chunks)
+    def _history_offsets(messages: list[dict[str, object]], *, base: int = 0) -> list[int]:
+        """记录每个前缀的大小，追加时无需反复序列化旧日志。"""
+        offsets = [base]
+        for message in messages:
+            size = len(json.dumps(message, ensure_ascii=False, separators=(",", ":")).encode())
+            offset = offsets[-1] + size + 1
+            if offset > MAX_SESSION_HISTORY_BYTES:
+                raise RuntimeFailure("RUNTIME_PROTOCOL_OUTPUT_LIMIT")
+            offsets.append(offset)
+        return offsets
 
     @staticmethod
     async def _read_bounded(reader: asyncio.StreamReader, limit: int) -> bytes:
@@ -419,7 +525,17 @@ class ProcessRuntime:
                 os.killpg(process.pid, signal.SIGKILL)
         with suppress(ProcessLookupError):
             process.kill()
-        await process.wait()
+        assert process.stdout is not None and process.stderr is not None
+        # 超限后未消费的管道会阻止 Windows 等待退出。丢弃剩余数据，不能重新累积到内存。
+        await asyncio.gather(
+            process.wait(), ProcessRuntime._discard(process.stdout), ProcessRuntime._discard(process.stderr)
+        )
+
+    @staticmethod
+    async def _discard(reader: asyncio.StreamReader) -> None:
+        """排空已终止子进程的管道，释放等待退出时的背压。"""
+        while await reader.read(8192):
+            pass
 
 
 def _creation_flags() -> int:

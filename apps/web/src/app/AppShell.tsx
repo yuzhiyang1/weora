@@ -101,6 +101,7 @@ const settingsSections: typeof sections = [
     label: "设置",
     items: [
       { label: "个人资料", path: "/settings/profile", icon: UserRound },
+      { label: "本地 Agent", path: "/settings/local-agents", icon: Bot },
       { label: "代码", path: "/settings/code", icon: GitBranch },
       { label: "业务空间", path: "/settings/business-space", icon: FolderGit2 },
     ],

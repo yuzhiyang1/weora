@@ -33,6 +33,7 @@ from weora.modules.agents.application.runtime import AgentRuntimeContextAssemble
 from weora.modules.agents.application.service import AgentRegistryService
 from weora.modules.agents.infrastructure.skill_catalog import SkillsModuleVersionCatalog
 from weora.modules.agents.infrastructure.unit_of_work import SqlAlchemyAgentsUnitOfWork
+from weora.modules.collaboration.agent_mail_api import router as agent_mail_router
 from weora.modules.collaboration.api import router as tasks_router
 from weora.modules.collaboration.application.inbox import InboxService
 from weora.modules.collaboration.application.tasks import TaskRecord
@@ -86,6 +87,7 @@ from weora.modules.skills.application.service import SkillRegistryService
 from weora.modules.skills.infrastructure.unit_of_work import SqlAlchemySkillsUnitOfWork
 from weora.shared.api.request_id import RequestIdMiddleware
 from weora.shared.infrastructure.database import create_database
+from weora.shared.infrastructure.postgres_watch import PostgresWatch
 from weora.shared.object_storage import ObjectStoragePort
 
 
@@ -102,16 +104,20 @@ def create_app(
         owned_engine, session_factory = create_database(resolved_settings.database_url)
     object_storage = object_storage_factory(resolved_settings)
     run_watch = RunWatch()
+    agent_mail_watch = PostgresWatch("weora_agent_mail_changed")
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         """统一释放对象存储和数据库连接池。"""
         async def stop_listener() -> None:
-            if listener is not None:
+            for listener in listeners:
                 listener.cancel()
-                await asyncio.gather(listener, return_exceptions=True)
+            await asyncio.gather(*listeners, return_exceptions=True)
 
-        listener = asyncio.create_task(run_watch.listen(owned_engine)) if owned_engine is not None else None
+        listeners = (
+            [asyncio.create_task(watch.listen(owned_engine)) for watch in (run_watch, agent_mail_watch)]
+            if owned_engine is not None else []
+        )
         try:
             yield
         finally:
@@ -150,6 +156,7 @@ def create_app(
         )
 
     app.state.db_session_factory = session_factory
+    app.state.agent_mail_watch = agent_mail_watch
     app.state.object_storage = object_storage
     # TODO(上线前): 关闭并删除开发阶段的密码绕过，只保留正式认证流程。
     development_auth_bypass_enabled = (
@@ -407,6 +414,7 @@ def create_app(
     app.include_router(agents_router, prefix=resolved_settings.api_prefix)
     app.include_router(runs_router, prefix=resolved_settings.api_prefix)
     app.include_router(tasks_router, prefix=resolved_settings.api_prefix)
+    app.include_router(agent_mail_router, prefix=resolved_settings.api_prefix)
     app.include_router(inbox_router, prefix=resolved_settings.api_prefix)
     app.include_router(computer_router, prefix=resolved_settings.api_prefix)
     app.include_router(computer_credential_router, prefix=resolved_settings.api_prefix)

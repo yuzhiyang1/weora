@@ -18,6 +18,7 @@ from weora.modules.collaboration.infrastructure.tasks import TaskInputModel, Tas
 from weora.modules.delivery.infrastructure.persistence import DeliveryPlanModel
 from weora.modules.identity.application.service import IdentityService
 from weora.modules.identity.infrastructure.models import WorkspaceMembershipModel
+from weora.modules.runs.application.harness import PI_RUNTIME
 from weora.modules.runs.application.ports import ExecutionProfile, RunActor
 from weora.modules.runs.application.service import RunService
 from weora.modules.runs.infrastructure.execution_access import ModulesExecutionAccess
@@ -50,6 +51,45 @@ async def follow(h: RunsHarness, run_id: object, text: str, key: str = "follow-1
     response = await h.client.post(f"{h.path}/{run_id}/continue", json={"instruction": text}, headers=h.headers(key))
     assert response.status_code == 202, response.text
     return cast(dict[str, object], response.json())
+
+
+@pytest.mark.anyio
+async def test_console_steering_waits_for_model_read_and_does_not_spill_into_next_run(runs: RunsHarness) -> None:
+    first = await create(runs)
+    run_id = UUID(str(first["id"]))
+    path = f"{runs.path}/{run_id}"
+    service = cast(RunService, runs.app.state.run_service)
+    store = SqlAlchemyExecutionStore(runs.sessions)
+    async with runs.sessions() as session, session.begin():
+        await session.execute(update(RunModel).where(RunModel.id == run_id).values(execution_profile={
+            "runtime_id": PI_RUNTIME, "provider": "deepseek", "model_id": "test-model", "timeout_seconds": 30,
+        }))
+
+    payload = {"instruction": "先只读排查", "mode": "steer"}
+    blocked = await runs.client.post(path + "/continue", json=payload, headers=runs.headers("steer"))
+    assert blocked.status_code == 409
+    lease = await store.claim(workspace_id=UUID(runs.workspace_id), run_id=run_id, owner="steer-test", lease_seconds=30)
+    assert lease
+    first_input = await runs.client.post(path + "/continue", json=payload, headers=runs.headers("steer"))
+    assert first_input.status_code == 202, first_input.text
+    input_id = first_input.json()["input_id"]
+    session_control = service.console_session(lease)
+    assert session_control.pull and session_control.checkpoint
+    assert await session_control.pull() == [(input_id, "先只读排查")]
+    assert (await runs.client.get(path + "/conversation")).json()["inputs"][0]["status"] == "STEERING"
+    await session_control.checkpoint([], [input_id])
+    assert (await runs.client.get(path + "/conversation")).json()["inputs"][0]["status"] == "READ"
+    assert await session_control.pull() == []
+
+    second_input = await runs.client.post(path + "/continue", json=payload, headers=runs.headers("too-late"))
+    assert second_input.status_code == 202
+    assert await store.finish(lease, status="SUCCEEDED", output="已核对")
+    conversation = (await runs.client.get(path + "/conversation")).json()
+    assert conversation["runs"][0]["output"] == "已核对"
+    assert [item["status"] for item in conversation["inputs"]] == ["READ", "MISSED"]
+    replay = await runs.client.post(path + "/continue", json=payload, headers=runs.headers("steer"))
+    assert replay.status_code == 202 and replay.json()["input_id"] == input_id
+    assert await service.dispatch_task_inputs() == 0
 
 
 @pytest.mark.anyio

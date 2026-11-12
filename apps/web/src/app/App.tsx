@@ -82,6 +82,11 @@ const TaskDetailPage = lazy(() =>
     default: module.TaskDetailPage,
   })),
 );
+const LocalAgentsPage = lazy(() =>
+  import("../features/settings/LocalAgentsPage").then((module) => ({
+    default: module.LocalAgentsPage,
+  })),
+);
 const InboxPage = lazy(() =>
   import("../features/inbox/InboxPage").then((module) => ({
     default: module.InboxPage,
@@ -251,6 +256,7 @@ export function App() {
                 element={<ProfileSettingsPage />}
               />
               <Route path="settings/code" element={<CodeSettingsPage />} />
+              <Route path="settings/local-agents" element={<LocalAgentsPage />} />
               <Route
                 path="settings/members"
                 element={<WorkspaceMembersPage />}

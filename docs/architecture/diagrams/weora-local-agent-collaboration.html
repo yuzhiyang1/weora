@@ -1,0 +1,356 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Weora 本地 Agent 跨机协作架构</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --paper: #f7f8fa;
+      --secondary: #eef0f3;
+      --ink: #1c1f23;
+      --muted: #646a73;
+      --rule: #d4d7dd;
+      --accent: #005fd7;
+      --sans: Geist, Aptos, "Segoe UI Variable", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+      --serif: "Instrument Serif", "Noto Serif SC", "Songti SC", SimSun, serif;
+      --mono: "Geist Mono", Consolas, "Liberation Mono", monospace;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--paper); color: var(--ink); font: 16px/1.65 var(--sans); }
+    main { max-width: 1360px; margin: 0 auto; padding: 44px 24px 64px; }
+    header { max-width: 980px; margin-bottom: 32px; }
+    h1, h2 { font-family: var(--serif); font-weight: 400; line-height: 1.25; }
+    h1 { margin: 8px 0 16px; font-size: clamp(30px, 4vw, 46px); }
+    h2 { margin: 0 0 8px; font-size: 28px; }
+    h3 { margin: 0 0 4px; font-size: 17px; }
+    p { margin: 0 0 12px; }
+    .status { color: var(--accent); font-size: 13px; font-weight: 600; }
+    .lede { font-size: 18px; }
+    .section-note, figcaption { color: var(--muted); font-size: 14px; }
+    section { margin-top: 32px; }
+    figure { margin: 16px 0 0; }
+    figcaption { margin-top: 10px; }
+    .canvas { width: 100%; max-width: 100%; min-width: 0; overflow-x: auto; border: 1px solid var(--rule); border-radius: 8px; }
+    .canvas:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+    svg { display: block; width: 100%; min-width: 1280px; }
+    svg text { font-family: var(--sans); }
+    svg .mono { font-family: var(--mono); }
+    svg .zone-title { font-size: 15px; font-weight: 600; }
+    svg .node-title { font-size: 18px; font-weight: 600; }
+    svg .node-detail { font-size: 14px; }
+    svg .label { font-size: 14px; font-weight: 500; }
+    svg .legend { font-size: 13px; }
+    .details { max-width: 1120px; }
+    .rules { margin: 16px 0 0; }
+    .rules > div { display: grid; grid-template-columns: 176px minmax(0, 1fr); gap: 16px; padding: 14px 0; border-top: 1px solid var(--rule); }
+    dt { font-weight: 650; }
+    dd { margin: 0; }
+    ol { margin: 12px 0 0; padding-left: 25px; }
+    li { margin: 7px 0; }
+    code { font: .9em var(--mono); overflow-wrap: anywhere; }
+    a { color: var(--accent); }
+    footer { margin-top: 36px; padding-top: 16px; border-top: 1px solid var(--rule); color: var(--muted); font-size: 14px; }
+    @media (max-width: 640px) {
+      main { padding: 24px 16px 40px; }
+      .rules > div { grid-template-columns: minmax(0, 1fr); gap: 4px; }
+    }
+    @media print {
+      main { max-width: none; padding: 0; }
+      .canvas { overflow-x: visible; }
+      svg { min-width: 0; }
+      figure, .rules > div { break-inside: avoid; }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <p class="status">Weora · 目标架构</p>
+    <h1>本地 Agent 跨机协作</h1>
+    <p class="lede">开发者把正在使用的 Codex 或 Claude Code 会话加入联调。Agent 在各自电脑上继续工作，通过 Weora 找到对方、提问、回传证据并复测。</p>
+  </header>
+
+  <section aria-labelledby="architecture-heading">
+    <h2 id="architecture-heading">系统架构</h2>
+    <p class="section-note">Weora 管理项目、消息和共享材料。两个本地连接器分别负责把消息送进准确的原生会话。</p>
+    <figure>
+      <div class="canvas" tabindex="0" aria-label="系统架构图，可横向滚动">
+        <svg viewBox="0 0 1280 720" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="weora-local-agent-collaboration-title weora-local-agent-collaboration-desc">
+          <title id="weora-local-agent-collaboration-title">Weora 本地 Agent 跨机协作架构</title>
+          <desc id="weora-local-agent-collaboration-desc">两台开发者电脑上的原生会话经各自连接器接入 Weora，由网关鉴权、协作服务保存消息并通知会话领取，同时提供授权的历史与证据。</desc>
+          <defs>
+            <marker id="arch-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 Z" fill="#646a73"/></marker>
+            <marker id="arch-arrow-blue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 Z" fill="#005fd7"/></marker>
+          </defs>
+          <rect width="1280" height="720" fill="#f7f8fa"/>
+
+          <!-- 三个信任区各自拥有身份和数据边界，连线先于组件绘制。 -->
+          <g fill="#f2f3f5" stroke="#646a73" stroke-width="1" stroke-dasharray="5 5">
+            <rect x="24" y="36" width="280" height="616" rx="8"/>
+            <rect x="336" y="36" width="608" height="616" rx="8"/>
+            <rect x="976" y="36" width="280" height="616" rx="8"/>
+          </g>
+          <g fill="#f7f8fa">
+            <rect x="44" y="52" width="172" height="24" rx="2"/>
+            <rect x="356" y="52" width="152" height="24" rx="2"/>
+            <rect x="996" y="52" width="172" height="24" rx="2"/>
+          </g>
+          <g class="zone-title" fill="#646a73">
+            <text x="56" y="69">H · 前端开发者电脑</text>
+            <text x="368" y="69">Weora 服务端</text>
+            <text x="1008" y="69">H · 后端开发者电脑</text>
+          </g>
+
+          <!-- 实线负责请求和回执，拒绝路径在网关外显式终止。 -->
+          <g fill="none" stroke="#646a73" stroke-width="1.5" marker-end="url(#arch-arrow)">
+            <path d="M576 532 V564"/>
+            <path d="M704 532 V564"/>
+            <path d="M604 604 H676"/>
+          </g>
+          <g fill="none" stroke="#646a73" stroke-width="1.5" marker-start="url(#arch-arrow)" marker-end="url(#arch-arrow)">
+            <path d="M164 224 V320"/>
+            <path d="M1116 224 V320"/>
+          </g>
+          <g fill="none" stroke="#005fd7" stroke-width="1.8" marker-start="url(#arch-arrow-blue)" marker-end="url(#arch-arrow-blue)">
+            <path d="M280 360 H448"/>
+            <path d="M832 360 H1000"/>
+            <path d="M640 416 V448"/>
+          </g>
+          <path d="M280 400 H432" fill="none" stroke="#646a73" stroke-width="1.5" stroke-dasharray="5 4"/>
+          <path d="M432 392 V408" fill="none" stroke="#646a73" stroke-width="2"/>
+
+          <g fill="#f7f8fa">
+            <rect x="172" y="260" width="104" height="24" rx="2"/>
+            <rect x="1004" y="260" width="104" height="24" rx="2"/>
+            <rect x="304" y="328" width="120" height="24" rx="2"/>
+            <rect x="856" y="328" width="120" height="24" rx="2"/>
+            <rect x="648" y="420" width="104" height="24" rx="2"/>
+            <rect x="468" y="536" width="100" height="24" rx="2"/>
+            <rect x="712" y="536" width="100" height="24" rx="2"/>
+            <rect x="612" y="572" width="56" height="24" rx="2"/>
+            <rect x="300" y="408" width="124" height="24" rx="2"/>
+          </g>
+          <g class="label" fill="#646a73" text-anchor="middle">
+            <text x="224" y="277">本机工具与投递</text>
+            <text x="1056" y="277">本机工具与投递</text>
+            <text x="518" y="553">发布与检索</text>
+            <text x="762" y="553">入库与审计</text>
+            <text x="640" y="589">索引</text>
+            <text x="362" y="425">越权请求拒绝</text>
+          </g>
+          <g class="label" fill="#005fd7" text-anchor="middle">
+            <text x="364" y="345">WSS 主动出站</text>
+            <text x="916" y="345">WSS 主动出站</text>
+            <text x="700" y="437">授权后的消息</text>
+          </g>
+
+          <!-- P/A/T/H 标记责任。端侧负责唤醒与转发，平台保存投递和领取状态。 -->
+          <g data-node-id="front-agent">
+            <rect x="48" y="120" width="232" height="104" rx="6" fill="#fff" stroke="#1c1f23" stroke-width="1.2"/>
+            <text x="64" y="145" class="mono" font-size="12" fill="#646a73">A</text>
+            <text x="64" y="174" class="node-title" fill="#1c1f23">Codex 原生会话</text>
+            <text x="64" y="200" class="node-detail" fill="#646a73">前端代码、报错与复测</text>
+          </g>
+          <g data-node-id="front-connector">
+            <rect x="48" y="320" width="232" height="120" rx="6" fill="#fff" stroke="#1c1f23" stroke-width="1.2"/>
+            <text x="64" y="345" class="mono" font-size="12" fill="#646a73">T</text>
+            <text x="64" y="374" class="node-title" fill="#1c1f23">Weora 本地连接器</text>
+            <text x="64" y="401" class="node-detail" fill="#646a73">会话绑定、唤醒与转发</text>
+            <text x="64" y="424" class="node-detail" fill="#646a73">Codex 投递适配器</text>
+          </g>
+          <g data-node-id="collaboration">
+            <rect x="448" y="448" width="384" height="84" rx="6" fill="#e8f3ff" stroke="#005fd7" stroke-width="1.6"/>
+            <text x="468" y="476" class="mono" font-size="12" fill="#005fd7">P</text>
+            <text x="488" y="479" class="node-title" fill="#1c1f23">协作服务</text>
+            <text x="468" y="505" class="node-detail" fill="#646a73">项目会话目录、联调线程、消息队列与回执</text>
+          </g>
+          <g data-node-id="gateway">
+            <rect x="448" y="316" width="384" height="100" rx="6" fill="#e8f3ff" stroke="#005fd7" stroke-width="1.6"/>
+            <text x="468" y="341" class="mono" font-size="12" fill="#005fd7">P</text>
+            <text x="468" y="368" class="node-title" fill="#1c1f23">接入网关与授权</text>
+            <text x="468" y="395" class="node-detail" fill="#646a73">用户与设备认证、项目与会话授权、限流和撤权</text>
+          </g>
+          <g data-node-id="shared-evidence">
+            <rect x="372" y="564" width="232" height="72" rx="6" fill="#fff" stroke="#1c1f23" stroke-width="1.2"/>
+            <text x="388" y="591" class="mono" font-size="12" fill="#646a73">P</text>
+            <text x="408" y="592" class="node-title" fill="#1c1f23">授权历史与证据</text>
+            <text x="388" y="617" class="node-detail" fill="#646a73">会话摘录、接口契约、测试结果</text>
+          </g>
+          <g data-node-id="storage">
+            <rect x="676" y="564" width="232" height="72" rx="6" fill="#eef0f3" stroke="#646a73" stroke-width="1.2"/>
+            <text x="692" y="591" class="mono" font-size="12" fill="#646a73">P</text>
+            <text x="712" y="592" class="node-title" fill="#1c1f23">持久化存储</text>
+            <text x="692" y="617" class="node-detail" fill="#646a73">PostgreSQL、对象存储、审计</text>
+          </g>
+          <g data-node-id="back-agent">
+            <rect x="1000" y="120" width="232" height="104" rx="6" fill="#fff" stroke="#1c1f23" stroke-width="1.2"/>
+            <text x="1016" y="145" class="mono" font-size="12" fill="#646a73">A</text>
+            <text x="1016" y="174" class="node-title" fill="#1c1f23">Claude Code 原生会话</text>
+            <text x="1016" y="200" class="node-detail" fill="#646a73">已有调查、接口实现与修复</text>
+          </g>
+          <g data-node-id="back-connector">
+            <rect x="1000" y="320" width="232" height="120" rx="6" fill="#fff" stroke="#1c1f23" stroke-width="1.2"/>
+            <text x="1016" y="345" class="mono" font-size="12" fill="#646a73">T</text>
+            <text x="1016" y="374" class="node-title" fill="#1c1f23">Weora 本地连接器</text>
+            <text x="1016" y="401" class="node-detail" fill="#646a73">会话绑定、唤醒与转发</text>
+            <text x="1016" y="424" class="node-detail" fill="#646a73">Claude Code 投递适配器</text>
+          </g>
+          <g class="legend" fill="#646a73">
+            <path d="M24 664 H1256" stroke="#d4d7dd"/>
+            <text x="40" y="698">H 开发者　 A Agent　 T 本地工具　 P 平台</text>
+            <path d="M352 693 H396" stroke="#646a73" stroke-width="1.5" marker-end="url(#arch-arrow)"/>
+            <text x="408" y="698">本机调用与数据访问</text>
+            <path d="M592 693 H636" stroke="#005fd7" stroke-width="1.8" marker-end="url(#arch-arrow-blue)"/>
+            <text x="648" y="698">协作消息与回执</text>
+            <path d="M808 693 H852" stroke="#646a73" stroke-width="1.5" stroke-dasharray="5 4"/>
+            <path d="M852 686 V700" stroke="#646a73" stroke-width="1.5"/>
+            <text x="864" y="698">拒绝的请求</text>
+            <path d="M1008 693 H1052" stroke="#646a73" stroke-width="1" stroke-dasharray="5 5"/>
+            <text x="1064" y="698">信任边界</text>
+          </g>
+        </svg>
+      </div>
+      <figcaption>同一开发者可登记多个会话。消息始终定向到已授权的会话绑定，收件后由本机 Agent 使用自己的工具与权限处理。</figcaption>
+    </figure>
+  </section>
+
+  <section aria-labelledby="sequence-heading">
+    <h2 id="sequence-heading">一条问题怎样进入同事的原会话</h2>
+    <p class="section-note">以「订单分页接口返回空列表」为例。前端 Agent 提问，后端 Agent 结合已打开的会话查代码并回复。</p>
+    <figure>
+      <div class="canvas" tabindex="0" aria-label="联调消息时序图，可横向滚动">
+        <svg viewBox="0 0 1280 720" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="weora-local-agent-delivery-title weora-local-agent-delivery-desc">
+          <title id="weora-local-agent-delivery-title">本地 Agent 联调消息时序</title>
+          <desc id="weora-local-agent-delivery-desc">前端 Codex 通过连接器提交问题，Weora 持久化并通知后端连接器唤醒 Claude Code，后端通过连接器领取正文并回复。</desc>
+          <defs>
+            <marker id="seq-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10 Z" fill="#646a73"/></marker>
+            <marker id="seq-arrow-blue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10 Z" fill="#005fd7"/></marker>
+            <marker id="seq-arrow-open" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L9 5 L0 10" fill="none" stroke="#646a73" stroke-width="1.4"/></marker>
+          </defs>
+          <rect width="1280" height="720" fill="#f7f8fa"/>
+
+          <!-- WSS 通知唤醒目标会话，正文领取和回复都经服务端记账。 -->
+          <g stroke="#646a73" stroke-opacity=".55" stroke-dasharray="4 4">
+            <path d="M120 84 V616 M368 84 V616 M640 84 V616 M912 84 V616 M1160 84 V616"/>
+          </g>
+          <g fill="none" stroke="#646a73" stroke-width="1.5" marker-end="url(#seq-arrow)">
+            <path d="M120 132 H368"/>
+            <path d="M368 180 H640"/>
+            <path d="M912 372 H640"/>
+            <path d="M1160 420 H912"/>
+            <path d="M912 468 H640"/>
+          </g>
+          <g fill="none" stroke="#646a73" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#seq-arrow)">
+            <path d="M640 228 H368"/>
+          </g>
+          <g fill="none" stroke="#646a73" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#seq-arrow-open)">
+            <path d="M640 276 H912"/>
+            <path d="M640 516 H368"/>
+          </g>
+          <g fill="none" stroke="#005fd7" stroke-width="1.8" marker-end="url(#seq-arrow-blue)">
+            <path d="M912 324 H1160"/>
+            <path d="M368 564 H120"/>
+          </g>
+          <g fill="#f7f8fa">
+            <rect x="152" y="100" width="184" height="24" rx="2"/>
+            <rect x="412" y="148" width="184" height="24" rx="2"/>
+            <rect x="420" y="196" width="168" height="24" rx="2"/>
+            <rect x="692" y="244" width="168" height="24" rx="2"/>
+            <rect x="944" y="292" width="184" height="24" rx="2"/>
+            <rect x="684" y="340" width="184" height="24" rx="2"/>
+            <rect x="944" y="388" width="184" height="24" rx="2"/>
+            <rect x="684" y="436" width="184" height="24" rx="2"/>
+            <rect x="420" y="484" width="168" height="24" rx="2"/>
+            <rect x="152" y="532" width="184" height="24" rx="2"/>
+          </g>
+          <g class="label" fill="#646a73" text-anchor="middle">
+            <text x="244" y="117">向指定会话提问</text>
+            <text x="504" y="165">提交问题与幂等键</text>
+            <text x="504" y="213">鉴权入库后回执</text>
+            <text x="776" y="261">通知有待领消息</text>
+            <text x="776" y="357">代理会话领取正文</text>
+            <text x="1036" y="405">回答并引用原问题</text>
+            <text x="776" y="453">保存回复和证据</text>
+            <text x="504" y="501">下发关联回复</text>
+          </g>
+          <g class="label" fill="#005fd7" text-anchor="middle">
+            <text x="1036" y="309">唤醒指定原生会话</text>
+            <text x="244" y="549">收到回复并继续复测</text>
+          </g>
+          <g fill="#fff" stroke="#1c1f23" stroke-width="1.2">
+            <rect x="24" y="32" width="192" height="52" rx="6"/>
+            <rect x="272" y="32" width="192" height="52" rx="6"/>
+            <rect x="816" y="32" width="192" height="52" rx="6"/>
+            <rect x="1064" y="32" width="192" height="52" rx="6"/>
+          </g>
+          <rect x="544" y="32" width="192" height="52" rx="6" fill="#e8f3ff" stroke="#005fd7" stroke-width="1.6"/>
+          <g class="node-title" fill="#1c1f23" text-anchor="middle">
+            <text x="120" y="64">前端 Codex</text>
+            <text x="368" y="64">前端连接器</text>
+            <text x="640" y="64">Weora 平台</text>
+            <text x="912" y="64">后端连接器</text>
+            <text x="1160" y="64">后端 Claude Code</text>
+          </g>
+          <g class="legend" fill="#646a73">
+            <path d="M24 636 H1256" stroke="#d4d7dd"/>
+            <path d="M40 665 H84" stroke="#646a73" stroke-width="1.5" marker-end="url(#seq-arrow)"/>
+            <text x="96" y="670">调用</text>
+            <path d="M200 665 H244" stroke="#646a73" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#seq-arrow)"/>
+            <text x="256" y="670">回执</text>
+            <path d="M360 665 H404" stroke="#646a73" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#seq-arrow-open)"/>
+            <text x="416" y="670">异步消息或事件</text>
+            <path d="M608 665 H652" stroke="#005fd7" stroke-width="1.8" marker-end="url(#seq-arrow-blue)"/>
+            <text x="664" y="670">原生会话投递</text>
+          </g>
+        </svg>
+      </div>
+      <figcaption>目标会话通过本地工具领取消息，正文沿领取请求原路返回。唤醒回执与消息领取分别记账。</figcaption>
+    </figure>
+  </section>
+
+  <section class="details" aria-labelledby="contracts-heading">
+    <h2 id="contracts-heading">关键设计约束</h2>
+    <dl class="rules">
+      <div>
+        <dt>设备与会话绑定</dt>
+        <dd>开发者登录 Weora 后登记设备，从原生会话内显式加入联调。服务端签发绑定 ID，关联工作空间、项目、成员、设备、客户端配置和原生会话 ID。重连恢复原绑定，切换账号或客户端配置后重新验证。目录仅显示获准的会话和在线状态，仓库、分支与工作摘要由用户授权发布。</dd>
+      </div>
+      <div>
+        <dt>可靠投递与恢复</dt>
+        <dd>PostgreSQL 同事务保存消息、目标投递记录和审计事件，按发送会话与幂等键去重。WSS 用于通知目标会话有新消息，重连时按绑定查询服务端待处理记录。目标会话通过连接器领取正文，服务端按消息 ID 原子登记领取。重复通知只会触发查询，已领取消息不会重新分配。领取后失联时按已知回执对账。对必须直接注入正文的适配器，结果不明时记为待确认，能证明未交付或支持幂等投递时才自动重投。</dd>
+      </div>
+      <div>
+        <dt>客户端适配与隔离</dt>
+        <dd>CLI + Skill 提供发现、提问、领取和回复能力。连接器按客户端能力选择原生队列、hook 或主动读信。空闲时可唤醒的会话由适配器唤醒，忙碌时按会话设置等待安全边界。多个窗口各自绑定。Agent 继续用本机权限和原生审批，来自同事 Agent 的内容携带来源标记，按外部输入处理。</dd>
+      </div>
+      <div>
+        <dt>授权历史与附件</dt>
+        <dd>会话所有者选择要发布的消息摘录、接口约定与证据，平台生成带来源、版本、发布者和受众的快照。消息和快照读取分别鉴权。索引与附件下载沿用快照权限，撤权后停止新增投递与下载，已有接收副本由对应保留政策处理。</dd>
+      </div>
+      <div>
+        <dt>联调线程与终止</dt>
+        <dd>一个联调线程绑定项目，可关联 Weora 任务，记录问题、回复、提交 SHA、测试环境和验证结果。双方各自在本地仓库工作，通过约定的测试环境或共享契约复测。线程设置轮次上限、有效期和人工停止。撤权、设备离线、会话未恢复、等待人工审批都能从状态中辨认。</dd>
+      </div>
+    </dl>
+  </section>
+
+  <section class="details" aria-labelledby="difficulty-heading">
+    <h2 id="difficulty-heading">实现难度</h2>
+    <p><strong>总体偏高，最难的是原生会话投递和故障恢复。</strong> 项目授权、消息落库、会话目录和附件访问可以沿用 Weora 的模块边界。真正需要逐个客户端验证的是，应用已经开着、同时打开多个会话、执行到一半或刚刚重连时，消息能否进入正确的那一个。</p>
+    <ol>
+      <li><strong>最高难度 · 本地适配。</strong> Codex CLI、Codex Desktop 和 Claude Code 分别维护兼容矩阵。记录能否绑定原会话、唤醒空闲、等待忙碌和确认接收。以实际客户端行为作为能力依据。</li>
+      <li><strong>高难度 · 投递与撤权。</strong> 重点验证连接器在注入前后崩溃、服务端重复下发、设备凭据撤销、跨项目读写和旧会话恢复。避免串会话、重复执行和撤权后补发。</li>
+      <li><strong>中高难度 · 跨端联调。</strong> 用两个账号、两台电脑、两个仓库跑通「提问 → 接口查证 → 修复 → 复测」。产物需带接口版本和测试环境。Agent 停止条件与有副作用操作的审批也在同一场景验证。</li>
+    </ol>
+  </section>
+
+  <footer>
+    <p>目标设计以 Weora 服务端中继和存储为部署前提。参考 Reason Network 的原生会话发现与投递机制，Weora 自行管理会话注册、项目授权和消息持久化。</p>
+    <p>会话在线领取和提交回复依赖 Weora 可达。设备离线期间，新消息留在服务端，重连后恢复领取。</p>
+    <p>上游参考 <code>reason-machines/reason-network</code> · <code>5442c8b</code> · <code>DESIGN.md</code> 的会话投递章节</p>
+  </footer>
+</main>
+</body>
+</html>

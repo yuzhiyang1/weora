@@ -29,6 +29,7 @@ import {
   type RunEvent,
 } from "./api";
 import { RunStatusTag } from "./RunStatusTag";
+import { RunConversationPanel, useRunComposer } from "./RunConversationPanel";
 import { DeliveryPanel } from "./DeliveryPanel";
 import { ComputerPanel } from "./ComputerPanel";
 import { RunReport } from "./RunReport";
@@ -58,8 +59,11 @@ function RunDetailContent({ runId }: { runId: string }) {
   const key = runKey(workspace.id, user.id, runId);
   const [accessRevoked, setAccessRevoked] = useState(false);
   const revoked = useRef(false);
+  // 连接复验只隐藏私有面板，未确认的输入和重试键仍属于当前运行。
+  const composer = useRunComposer(workspace.id, user.id, runId, revoked);
+  const clearDraft = composer.clear;
   const [searchParams] = useSearchParams();
-  const [activeTab, setActiveTab] = useState(() => searchParams.get("tab") === "delivery" ? "delivery" : "overview");
+  const [activeTab, setActiveTab] = useState(() => searchParams.get("tab") === "delivery" ? "delivery" : "conversation");
   const [cancelOpen, setCancelOpen] = useState(false);
   const detailNavigation = useRef<HTMLElement>(null);
   const [events, setEvents] = useState<RunEvent[]>([]);
@@ -70,6 +74,7 @@ function RunDetailContent({ runId }: { runId: string }) {
     const privatePrefixes = new Set([
       "runs",
       "run-context",
+      "run-conversation",
       "run-tools",
       "run-delivery",
       "run-repositories",
@@ -94,8 +99,9 @@ function RunDetailContent({ runId }: { runId: string }) {
     revoked.current = true;
     setAccessRevoked(true);
     setEvents([]);
+    clearDraft();
     clearPrivateCache();
-  }, [clearPrivateCache]);
+  }, [clearDraft, clearPrivateCache]);
   useEffect(() => {
     // 子面板卸载后再次清理，覆盖同一时刻轮询响应与 React 提交之间的竞态。
     if (accessRevoked) clearPrivateCache();
@@ -249,6 +255,7 @@ function RunDetailContent({ runId }: { runId: string }) {
           <Button onClick={() => {
             void query.refetch();
             setEventAttempt((value) => value + 1);
+            void queryClient.invalidateQueries({ queryKey: ["run-conversation", workspace.id, user.id, runId] });
             void queryClient.invalidateQueries({ queryKey: ["run-tools", workspace.id, user.id, runId] });
             void queryClient.invalidateQueries({ queryKey: ["run-delivery", workspace.id, user.id, runId] });
           }}>刷新状态</Button>
@@ -263,7 +270,6 @@ function RunDetailContent({ runId }: { runId: string }) {
           ) : null}
           {canCancel ? (
             <Button
-              type="danger"
               disabled={recover.isPending}
               onClick={() => {
                 cancel.reset();
@@ -346,6 +352,18 @@ function RunDetailContent({ runId }: { runId: string }) {
           onChange={setActiveTab}
           className="run-detail-tabs"
         >
+          <TabPane itemKey="conversation" tab="Agent 对话">
+            {activeTab === "conversation" && (
+              <RunConversationPanel
+                composer={composer}
+                workspaceId={workspace.id}
+                userId={user.id}
+                run={run}
+                onAccessRevoked={forgetPrivateRun}
+                onShowTools={() => setActiveTab("tools")}
+              />
+            )}
+          </TabPane>
           <TabPane itemKey="overview" tab="任务概览">
             <div className="detail-columns">
               <section className="detail-card">

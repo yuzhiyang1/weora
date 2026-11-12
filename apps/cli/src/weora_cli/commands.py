@@ -18,6 +18,7 @@ class Command:
     name: str
     description: str
     arguments: tuple[Argument, ...] = ()
+    side_effects: bool = False
 
     def describe(self) -> dict[str, JsonValue]:
         properties: dict[str, JsonValue] = {
@@ -32,8 +33,8 @@ class Command:
         return {
             "name": self.name,
             "description": self.description,
-            "kind": "utility",
-            "side_effects": False,
+            "kind": "business" if self.side_effects else "utility",
+            "side_effects": self.side_effects,
             "input_schema": {
                 "$schema": "https://json-schema.org/draft/2020-12/schema",
                 "type": "object",
@@ -47,4 +48,5 @@ COMMANDS = (
     Command("version", "查看 CLI 版本与输出协议版本"),
     Command("commands", "列出当前已实现的命令"),
     Command("schema", "查看全部命令或指定命令的输入 Schema", (Argument("command", "命令路径，省略时返回全部命令"),)),
+    Command("collab", "配对本机、查找会话、发送和领取协作消息", side_effects=True),
 )

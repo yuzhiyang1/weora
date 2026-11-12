@@ -40,13 +40,13 @@ class CliTests(unittest.TestCase):
             },
         )
 
-    def test_discovery_does_not_advertise_unavailable_business_tools(self) -> None:
+    def test_discovery_advertises_local_collaboration(self) -> None:
         result = self.run_cli("commands")
         self.assertEqual(result.returncode, 0)
         data = json.loads(result.stdout)["data"]
-        self.assertEqual([command["name"] for command in data["commands"]], ["version", "commands", "schema"])
-        self.assertEqual(data["business_capabilities"], [])
-        self.assertTrue(all(not command["side_effects"] for command in data["commands"]))
+        self.assertEqual([command["name"] for command in data["commands"]], ["version", "commands", "schema", "collab"])
+        self.assertEqual(data["business_capabilities"], ["collab"])
+        self.assertEqual([c["name"] for c in data["commands"] if c["side_effects"]], ["collab"])
 
     def test_schema_and_discovery_use_the_same_contract(self) -> None:
         discovered = json.loads(self.run_cli("commands").stdout)["data"]["commands"]

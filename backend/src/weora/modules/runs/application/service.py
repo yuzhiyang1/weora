@@ -9,6 +9,8 @@ from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 from weora.modules.collaboration.application.tasks import TaskInput, TaskRecord, summarize_task_title
+from weora.modules.runs.application.execution import RunLease, RuntimeFailure, RuntimeSession
+from weora.modules.runs.application.harness import OMP_RUNTIME, PI_RUNTIME
 from weora.modules.runs.application.ports import (
     ExecutionProfile,
     ProjectContextCatalog,
@@ -29,6 +31,7 @@ from weora.modules.runs.domain.errors import (
     RunModelSelectionError,
     RunNotFoundError,
     RunProjectSelectionError,
+    RunSteeringUnavailableError,
     RunSubmissionRaceError,
 )
 
@@ -181,6 +184,7 @@ class RunService:
         request_id: str,
         origin_metadata: dict[str, object] | None = None,
         thread_keys: tuple[str, ...] = (),
+        steer: bool = False,
     ) -> TaskInput:
         """向已有私有 Task 可靠追加输入，提交后尝试按队列顺序创建下一轮 Run。
 
@@ -197,6 +201,8 @@ class RunService:
             raise RunNotFoundError
         if (detail.task.audience == "group") != (origin_metadata is not None):
             # Console 私有输入不能借已有群任务转发到群。
+            raise RunNotFoundError
+        if steer and (origin_metadata is not None or detail.task.audience != "private"):
             raise RunNotFoundError
         if origin_metadata:
             previous = detail.task.origin_metadata or {}
@@ -217,7 +223,7 @@ class RunService:
         # 请求摘要固定本轮指令与来源，重复键只允许取回同一份输入。
         digest = hashlib.sha256(
             json.dumps(
-                [str(detail.task.id), instruction, origin_metadata],
+                [str(detail.task.id), instruction, origin_metadata] + (["steer", str(run_id)] if steer else []),
                 ensure_ascii=False,
                 sort_keys=True,
             ).encode()
@@ -226,7 +232,8 @@ class RunService:
         for attempt in range(3):
             try:
                 async with self._uow_factory() as uow:
-                    await uow.tasks.lock_private(actor.workspace_id, detail.task.id, actor.user_id)
+                    if not await uow.tasks.lock_private(actor.workspace_id, detail.task.id, actor.user_id):
+                        raise RunNotFoundError
                     collaboration = await uow.tasks.collaboration(actor.workspace_id, detail.task.id)
                     if collaboration and (
                         collaboration.assignment or collaboration.pending or collaboration.status == "in_review"
@@ -238,8 +245,19 @@ class RunService:
                             raise RunIdempotencyConflictError
                         item = existing
                     else:
-                        pending = await uow.tasks.inputs(actor.workspace_id, detail.task.id, actor.user_id)
-                        if sum(entry.status == "PENDING" for entry in pending) >= 32:
+                        fence = None
+                        if steer:
+                            current = await uow.store.get_private(actor=actor, run_id=run_id, lock=True)
+                            if not current or not self._can_steer(current):
+                                raise RunSteeringUnavailableError
+                            fence = current.fencing_token
+                            pending = await uow.tasks.steering_inputs(
+                                actor.workspace_id, run_id, actor.user_id, fence,
+                            )
+                        else:
+                            inputs = await uow.tasks.inputs(actor.workspace_id, detail.task.id, actor.user_id)
+                            pending = [entry for entry in inputs if entry.status == "PENDING"]
+                        if len(pending) >= 32:
                             raise RunContinuationLimitError
                         item = await uow.tasks.add_input(
                             TaskInput(
@@ -254,6 +272,8 @@ class RunService:
                                 request_id=request_id[:128],
                                 created_at=datetime.now(UTC),
                                 origin_metadata=origin_metadata,
+                                status="STEERING" if steer else "PENDING",
+                                steer_fence=fence,
                             )
                         )
                         for key in thread_keys:
@@ -266,8 +286,112 @@ class RunService:
                     raise
 
         # 输入先提交再尝试派发，进程中断也不会丢失已经接收的人类消息。
-        await self.dispatch_task_input(item)
+        if not steer:
+            await self.dispatch_task_input(item)
         return await self.task_input(actor, item.id)
+
+    @staticmethod
+    def _can_steer(run: RunRecord) -> bool:
+        return (
+            run.status == "RUNNING"
+            and run.cancellation_requested_at is None
+            and run.collaboration_context is None
+            and not run.recovery_read_only
+            and run.lease_expires_at is not None
+            and run.lease_expires_at > datetime.now(UTC)
+            and run.execution_profile is not None
+            and run.execution_profile.runtime_id in {PI_RUNTIME, OMP_RUNTIME}
+        )
+
+    def console_session(self, lease: RunLease) -> RuntimeSession:
+        """接入执行内核的已读回执，只允许领取者消费本轮消息。"""
+        run = lease.run
+        actor = RunActor(run.created_by, run.workspace_id)
+
+        async def pull() -> list[tuple[str, str]]:
+            async with self._uow_factory() as uow:
+                items = await uow.tasks.steering_inputs(run.workspace_id, run.id, run.created_by, lease.fencing_token)
+                if not items:
+                    return []
+                try:
+                    current, task = await self._authorized_run(uow, actor, run.id)
+                except RunNotFoundError:
+                    raise RuntimeFailure("ACCESS_REVOKED") from None
+                if task.audience != "private" or not self._can_steer(current) or (
+                    current.fencing_token != lease.fencing_token
+                ):
+                    return []
+                return [(str(item.id), item.instruction) for item in items]
+
+        async def checkpoint(_: list[dict[str, object]], read: list[str]) -> None:
+            if not read:
+                return
+            async with self._uow_factory() as uow:
+                items = await uow.tasks.steering_inputs(run.workspace_id, run.id, run.created_by, lease.fencing_token)
+                consumed = [item for item in items if str(item.id) in read]
+                if not consumed:
+                    return
+                current = await uow.store.get_private(actor=actor, run_id=run.id, lock=True)
+                if current and self._can_steer(current) and current.fencing_token == lease.fencing_token:
+                    for item in consumed:
+                        await uow.tasks.mark_input_read(item)
+                    await uow.commit()
+
+        return RuntimeSession(f"{run.id}:{lease.fencing_token}", pull=pull, checkpoint=checkpoint)
+
+    async def conversation(self, actor: RunActor, workspace_id: UUID, run_id: UUID) -> dict[str, object]:
+        """返回本人可访问的运行输出和续接指令，群聊及共享运行仅展示当前轮。"""
+        self._require_workspace(actor, workspace_id)
+        async with self._uow_factory() as uow:
+            run, task = await self._authorized_run(uow, actor, run_id)
+            private = task.audience == "private" and run.collaboration_context is None
+            collaboration = await uow.tasks.collaboration(workspace_id, task.id) if private else None
+            can_send = private and not (
+                collaboration
+                and (collaboration.assignment or collaboration.pending or collaboration.status == "in_review")
+            )
+            items = await uow.tasks.inputs(workspace_id, task.id, actor.user_id, recent=True) if private else []
+            candidates = await uow.store.task_runs(actor=actor, task_id=task.id, limit=12) if private else [run]
+            candidates = [row for row in candidates if row.id != run.id] + [run]
+            visible: dict[UUID, RunRecord] = {}
+            history = []
+            for row in sorted(candidates, key=lambda entry: (entry.created_at, entry.id)):
+                if row.id == run.id:
+                    authorized, source = run, task
+                elif row.collaboration_context is not None:
+                    continue
+                else:
+                    try:
+                        authorized, source = await self._authorized_run(uow, actor, row.id)
+                    except RunNotFoundError:
+                        continue
+                visible[row.id] = authorized
+                history.append({
+                    "id": str(row.id), "instruction": source.instruction, "output": authorized.output_text,
+                    "status": authorized.status, "created_at": authorized.created_at,
+                    "updated_at": authorized.updated_at,
+                    "agent_name": authorized.agent_name,
+                })
+            messages = []
+            for item in items:
+                status = item.status
+                target = visible.get(item.anchor_run_id)
+                if status == "STEERING" and (
+                    not target or not self._can_steer(target) or target.fencing_token != item.steer_fence
+                ):
+                    status = "MISSED"
+                messages.append({
+                    "id": str(item.id), "instruction": item.instruction, "status": status,
+                    "mode": "steer" if item.steer_fence is not None else "continue",
+                    "run_id": str(item.anchor_run_id) if item.steer_fence is not None else (
+                        str(item.run_id) if item.run_id else None
+                    ),
+                    "created_at": item.created_at,
+                })
+            return {
+                "runs": history, "inputs": messages, "can_send": can_send,
+                "can_steer": can_send and self._can_steer(run),
+            }
 
     async def task_input(self, actor: RunActor, input_id: UUID) -> TaskInput:
         """查询发起人自己的输入回执，并复核其原任务当前仍可访问。"""

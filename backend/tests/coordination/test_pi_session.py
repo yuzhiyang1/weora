@@ -40,8 +40,11 @@ async def test_long_tool_flow_crosses_real_parent_child_transport(steps: int) ->
         return {"ok": True}
 
     runtime = PiTextRuntime(
-        node_executable=node, entry=Path("tests/fixtures/pi_session.mjs"), api_key="test-only-key",
-        call_tool=invoke, session=PiSession("long-protocol-session"),
+        node_executable=node,
+        entry=Path("tests/fixtures/pi_session.mjs"),
+        api_key="test-only-key",
+        call_tool=invoke,
+        session=PiSession("long-protocol-session"),
     )
     profile = ExecutionProfile("pi-agent-core@1.3.0", "deepseek", "test-model", 100, 10)
     payload = RuntimeInput("系统", f"protocol-tools-{steps}", (ToolSpec("context.read", "读取", {}),))
@@ -110,6 +113,41 @@ async def test_repeated_session_snapshots_have_a_separate_bounded_budget(instruc
     else:
         assert await runtime.run(RuntimeInput("系统", instruction), profile) == "有界会话检查点通过"
     assert saved == [140000] * expected
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("instruction", "saved_count", "code"),
+    [
+        ("oversized-checkpoint", 0, "RUNTIME_PROTOCOL_OUTPUT_LIMIT"),
+        ("many-checkpoints", 2, "RUNTIME_PROTOCOL_OUTPUT_LIMIT"),
+        ("incomplete-checkpoint", 0, "RUNTIME_PROTOCOL_INVALID"),
+    ],
+)
+async def test_checkpoint_byte_limits_prevent_partial_persistence(
+    instruction: str, saved_count: int, code: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("需要 Node")
+    monkeypatch.setattr("weora.modules.runs.infrastructure.process_runtime.MAX_CHECKPOINT_TOTAL_BYTES", 300000)
+    saved = []
+
+    async def checkpoint(messages: list[dict[str, object]], read: list[str]) -> None:
+        saved.append(messages)
+
+    runtime = PiTextRuntime(
+        node_executable=node,
+        entry=Path("tests/fixtures/pi_session.mjs"),
+        api_key="test-only-key",
+        session=PiSession("bounded-session", checkpoint=checkpoint),
+    )
+    profile = ExecutionProfile(
+        runtime_id="pi-agent-core@1.3.0", provider="deepseek", model_id="test-model", max_tokens=100, timeout_seconds=10
+    )
+    with pytest.raises(RuntimeFailure, match=code):
+        await runtime.run(RuntimeInput("系统", instruction), profile)
+    assert len(saved) == saved_count
 
 
 @pytest.mark.anyio

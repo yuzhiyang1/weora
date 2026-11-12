@@ -25,6 +25,7 @@ import {
 } from "./api";
 import { AssignTaskDialog, ReviewTaskDialog, ShareTaskDialog } from "./TaskDialogs";
 import { TaskBoard } from "./TaskBoard";
+import { AgentCollaborationPanel } from "./AgentCollaborationPanel";
 import { taskStatusOptions, taskStatuses } from "./task-status";
 import "./tasks.css";
 
@@ -299,6 +300,10 @@ export function TaskDetailContent({ taskId, embedded = false }: { taskId: string
             </>
           )}
         </TaskSection>
+      )}
+      {!embedded && task.title && (
+        <AgentCollaborationPanel workspaceId={workspaceId} taskId={taskId} memberId={principal?.user.id ?? ""}
+          canJoin={task.status !== "done" && task.status !== "cancelled"} />
       )}
       <TaskSection title="任务动态" className="task-history task-activity-section" embedded={embedded}>
         {task.activity.length ? (

@@ -147,6 +147,7 @@ async def continue_task(
         item = await service.continue_task(
             actor=_actor(principal), run_id=run_id, instruction=payload.instruction,
             idempotency_key=idempotency_key, request_id=get_request_id() or "unknown",
+            steer=payload.mode == "steer",
         )
     except RunError as error:
         _raise_http(error)
@@ -167,6 +168,19 @@ async def task_inputs(
     return {"items": [{"input_id": str(item.id), "task_id": str(item.task_id), "status": item.status,
                        "run_id": str(item.run_id) if item.run_id else None, "sequence": item.sequence}
                       for item in items]}
+
+
+@router.get("/{run_id}/conversation")
+async def run_conversation(
+    workspace_id: UUID, run_id: UUID, request: Request, response: Response,
+    principal: Annotated[PrincipalRecord, Depends(current_principal)],
+) -> dict[str, object]:
+    """正文只随当前会话权限返回，浏览器和代理均不得缓存。"""
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return await _service(request).conversation(_actor(principal), workspace_id, run_id)
+    except RunError as error:
+        _raise_http(error)
 
 
 @router.get("/{run_id}", response_model=RunDetailResponse)

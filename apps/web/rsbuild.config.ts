@@ -24,6 +24,7 @@ export default defineConfig({
         context: ["/api"],
         target: apiProxyTarget,
         changeOrigin: true,
+        ws: true,
       },
     ],
   },

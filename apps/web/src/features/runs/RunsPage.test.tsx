@@ -11,6 +11,8 @@ import userEvent from "@testing-library/user-event";
 
 import { App } from "../../app/App";
 import { consoleWrite, createRun, runKey } from "./api";
+// 路由仍经 App 加载，先解析详情模块，避免冷磁盘读取消耗页面断言的等待时间。
+import "./RunDetailPage";
 
 const principal = {
   user: { id: "user-1", display_name: "开发者", email: "dev@example.com" },
@@ -88,6 +90,17 @@ function mockRunRequests(
       if (path.endsWith("/runs?limit=20"))
         return response({ items: [run], next_before_id: null });
       if (path.endsWith("/runs/run-1")) return response(run);
+      if (path.endsWith("/runs/run-1/conversation")) {
+        const detailResponse = await overrides?.(path.replace(/\/conversation$/, ""), init);
+        if (detailResponse && !detailResponse.ok) return detailResponse;
+        const detail = detailResponse ? await detailResponse.json() as typeof run : run;
+        return response({
+          can_send: true,
+          can_steer: detail.status === "RUNNING",
+          runs: [{ ...detail, output: detail.output_text }],
+          inputs: [],
+        });
+      }
       if (path.includes("/events?"))
         return response({
           items: [
@@ -154,7 +167,6 @@ describe("Console 运行", () => {
         : undefined,
     );
     render(<App />);
-    // 冷启动会先加载路由及 Markdown 模块；正文安全断言应在页面就绪后执行。
     await screen.findByRole("heading", { name: "排查登录异常" }, { timeout: 5000 });
     expect(screen.getByText(/研发助手 · 固定版本 1.0.0/)).toBeInTheDocument();
     expect(
@@ -335,7 +347,7 @@ describe("Console 运行", () => {
     let current = run;
     const mock = mockRunRequests((path) => path.endsWith("/runs/run-1") ? response(current) : undefined);
     render(<App />);
-    expect(await screen.findByText(run.instruction)).toBeInTheDocument();
+    expect(await within(await screen.findByRole("list", { name: "对话消息" })).findByText(run.instruction)).toBeInTheDocument();
     await waitFor(() => expect(TestEventSource.instances).toHaveLength(1));
     const stream = TestEventSource.instances[0]!;
     expect(stream.url).toContain("/runs/run-1/watch");
@@ -347,7 +359,7 @@ describe("Console 运行", () => {
         data: JSON.stringify({ status: current.status, last_sequence: current.last_sequence, title: null }),
       }));
     });
-    expect(await screen.findByText("执行成功")).toBeInTheDocument();
+    expect(await within(screen.getByRole("complementary", { name: "运行信息" })).findByText("执行成功")).toBeInTheDocument();
     await userEvent.click(screen.getByRole("tab", { name: "事实记录" }));
     expect(await screen.findByText("run.created")).toBeInTheDocument();
     act(() => {
@@ -357,6 +369,42 @@ describe("Console 运行", () => {
     expect(screen.queryByText(run.instruction)).not.toBeInTheDocument();
     expect(stream.closed).toBe(true);
   });
+
+  it("断线复验期间隐藏对话，恢复后用原提交键重试", async () => {
+    vi.stubGlobal("EventSource", TestEventSource);
+    window.history.replaceState({}, "", "/runs/run-1");
+    document.cookie = "weora_csrf=csrf-value; Path=/";
+    const requests: { key: string | null; body: unknown }[] = [];
+    let failFirst: (value: Response) => void = () => {};
+    mockRunRequests((path, init) => {
+      if (!path.endsWith("/runs/run-1/continue")) return undefined;
+      requests.push({ key: new Headers(init?.headers).get("Idempotency-Key"), body: init?.body });
+      if (requests.length === 1) return new Promise<Response>((resolve) => { failFirst = resolve; });
+      return response({ input_id: "input-1" }, 201);
+    });
+    const user = userEvent.setup();
+    render(<App />);
+    const editor = await screen.findByRole("textbox", { name: "补充指令" });
+    await user.type(editor, "核对重试幂等");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+    await waitFor(() => expect(requests).toHaveLength(1));
+
+    act(() => TestEventSource.instances[0]!.onerror?.());
+    expect(await screen.findByText("正在重新验证任务访问权限")).toBeInTheDocument();
+    expect(screen.queryByRole("textbox", { name: "补充指令" })).not.toBeInTheDocument();
+    await act(() => failFirst(response({ detail: { message: "提交结果未知" } }, 504)));
+    await waitFor(() => expect(TestEventSource.instances).toHaveLength(2), { timeout: 5000 });
+    act(() => TestEventSource.instances[1]!.dispatchEvent(new MessageEvent("run_state", {
+      data: JSON.stringify({ status: run.status, last_sequence: run.last_sequence, title: run.task_title }),
+    })));
+
+    expect(await screen.findByRole("textbox", { name: "补充指令" })).toHaveValue("核对重试幂等");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+    await waitFor(() => expect(requests).toHaveLength(2));
+    expect(requests[0]!.key).toMatch(/^[0-9a-f]{32}$/);
+    expect(requests[1]).toEqual(requests[0]);
+    await waitFor(() => expect(screen.getByRole("textbox", { name: "补充指令" })).toHaveValue(""));
+  }, 10000);
 
   it("成功终态轮换SSE后不轮询详情和事件，撤权仍清除正文缓存", async () => {
     vi.stubGlobal("EventSource", TestEventSource);
@@ -387,7 +435,10 @@ describe("Console 运行", () => {
         await act(() => vi.advanceTimersByTimeAsync(5000));
       }
       const reads = mock.mock.calls.filter(([input]) => String(input).includes("/runs/run-1"));
-      expect(reads.map(([input]) => String(input))).toEqual(["/api/v1/workspaces/workspace-1/runs/run-1"]);
+      expect(reads.map(([input]) => String(input))).toEqual([
+        "/api/v1/workspaces/workspace-1/runs/run-1",
+        "/api/v1/workspaces/workspace-1/runs/run-1/conversation",
+      ]);
     } finally {
       vi.useRealTimers();
     }
@@ -406,6 +457,7 @@ describe("Console 运行", () => {
       ),
     ).toBeUndefined();
     for (const prefix of [
+      "run-conversation",
       "run-context",
       "run-tools",
       "run-delivery",
@@ -433,7 +485,7 @@ describe("Console 运行", () => {
     window.history.replaceState({}, "", "/runs/run-1");
     const mock = mockRunRequests();
     render(<App />);
-    expect(await screen.findByText(run.instruction)).toBeInTheDocument();
+    expect(await within(await screen.findByRole("list", { name: "对话消息" })).findByText(run.instruction)).toBeInTheDocument();
     await waitFor(() => expect(TestEventSource.instances).toHaveLength(1));
     vi.useFakeTimers();
     vi.spyOn(Math, "random").mockReturnValue(0);
@@ -450,7 +502,7 @@ describe("Console 运行", () => {
       expect(TestEventSource.instances).toHaveLength(6);
       expect(screen.getByRole("button", { name: "重试连接" })).toBeInTheDocument();
       expect(screen.queryByText(run.instruction)).not.toBeInTheDocument();
-      expect(mock.mock.calls.filter(([input]) => String(input).includes("/runs/run-1"))).toHaveLength(1);
+      expect(mock.mock.calls.filter(([input]) => String(input).endsWith("/runs/run-1"))).toHaveLength(1);
     } finally {
       vi.useRealTimers();
     }
