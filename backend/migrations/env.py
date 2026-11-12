@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from weora.bootstrap.settings import get_settings
 from weora.modules.agents.infrastructure import models as agent_models  # noqa: F401
+from weora.modules.collaboration.infrastructure import agent_mail as agent_mail_models  # noqa: F401
 from weora.modules.collaboration.infrastructure import tasks as task_models  # noqa: F401
 from weora.modules.computers import credentials as computer_models  # noqa: F401
 from weora.modules.console_settings import store as console_settings_models  # noqa: F401

@@ -4,7 +4,10 @@ version = "0.1.0"
 description = "Weora platform CLI for people and coding agents"
 readme = "README.md"
 requires-python = "~=3.12.0"
-dependencies = []
+dependencies = [
+    "keyring>=25,<26",
+    "websockets>=15,<17",
+]
 
 [project.scripts]
 weora = "weora_cli.cli:main"

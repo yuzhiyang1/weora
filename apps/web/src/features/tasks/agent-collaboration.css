@@ -1,0 +1,36 @@
+.agent-collab-stack {
+  display: grid;
+  gap: calc(var(--spacing) * 3);
+  min-width: 0;
+}
+
+.agent-collab-stack h3 {
+  font-size: 0.875rem;
+  font-weight: 600;
+}
+
+.agent-collab-row,
+.agent-collab-actions {
+  display: flex;
+  align-items: center;
+  gap: calc(var(--spacing) * 2);
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.agent-collab-row {
+  justify-content: space-between;
+}
+
+.agent-collab-message,
+.agent-collab-command {
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.agent-collab-message {
+  display: grid;
+  gap: calc(var(--spacing) * 2);
+  padding-block: calc(var(--spacing) * 2);
+  border-block-start: 1px solid var(--border);
+}
