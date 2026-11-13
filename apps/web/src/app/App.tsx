@@ -24,6 +24,9 @@ const InvitationPage = lazy(() =>
     default: module.InvitationPage,
   })),
 );
+const CliAuthorizePage = lazy(() =>
+  import("../features/auth/CliAuthorizePage").then((module) => ({ default: module.CliAuthorizePage })),
+);
 const WorkspaceMembersPage = lazy(() =>
   import("../features/settings/WorkspaceMembersPage").then((module) => ({
     default: module.WorkspaceMembersPage,
@@ -204,6 +207,7 @@ export function App() {
           />
           <Route path="join" element={<InvitationPage />} />
           <Route element={<RequireAuth />}>
+            <Route path="cli/authorize/:loginId" element={<CliAuthorizePage />} />
             <Route element={<WorkspaceShell />}>
               <Route index element={<OverviewPage />} />
               <Route path="agents" element={<AgentsPage />} />

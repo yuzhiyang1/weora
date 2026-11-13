@@ -50,4 +50,7 @@ COMMANDS = (
     Command("schema", "查看全部命令或指定命令的输入 Schema", (Argument("command", "命令路径，省略时返回全部命令"),)),
     Command("collab", "配对本机、查找会话、发送和领取协作消息", side_effects=True),
     Command("skill", "绑定、同步和统计团队 Skill", side_effects=True),
+    Command("auth", "在浏览器登录、验证身份或退出", side_effects=True),
+    Command("login", "在浏览器登录 Weora CLI", side_effects=True),
+    Command("logout", "注销当前 CLI 设备凭据", side_effects=True),
 )

@@ -25,6 +25,23 @@ class AgentDevice(Base):
     seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class CliLoginRequest(Base):
+    """浏览器审批与 CLI 兑换共用的一次性登录请求。"""
+
+    __tablename__ = "cli_login_requests"
+    __table_args__ = (Index("ix_cli_login_requests_source_created", "source_key", "created_at"),)
+
+    id: Mapped[UUID] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(80))
+    verifier_hash: Mapped[str] = mapped_column(String(64))
+    source_key: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    next_poll_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    denied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    device_id: Mapped[UUID | None] = mapped_column(ForeignKey("collab_agent_devices.id"))
+
+
 class AgentSession(Base):
     """UUID 寻址。原生 ID 与设备、运行时和配置实例共同标识会话。"""
 

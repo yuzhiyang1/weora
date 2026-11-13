@@ -24,6 +24,18 @@ uv tool install --python 3.12 ./apps/cli
 
 当前尚未发布到包仓库；开发验证使用 `uv run` 即可，不要求全局安装。
 
+## 登录 Weora
+
+```powershell
+weora login --url https://weora.example.com
+weora auth status
+weora logout
+```
+
+`weora login` 打开浏览器。使用 Weora 账号登录，核对终端验证码、设备和工作空间后确认。CLI 将设备凭据保存到系统钥匙串。设备登录有效期为 30 天，也可在「设置 → 本地 Agent」撤销。
+
+无图形环境可以用 `weora auth login --url https://weora.example.com --no-wait` 取得链接和请求 ID。完成浏览器确认后，在同一台机器运行 `weora auth login --resume <请求ID>`。
+
 ## 让两个本地会话对话
 
 1. 在 Weora 的「设置 → 本地 Agent」点「配对设备」，在开发电脑上运行页面给出的命令，按提示输入一次性配对码。设备凭据由系统钥匙串保存。
@@ -51,7 +63,7 @@ Codex 自动接收依赖支持 `queue` 的真实可执行文件及正确的配�
 
 ## 安装和同步团队 Skill
 
-1. 工作空间管理员在「Skills」上传包并发布版本。成员先在控制台配对设备。在「设置 → 本地 Agent」打开已登录设备的「Skill 权限」，选择「仅同步」或「同步并统计」。
+1. 工作空间管理员在「Skills」上传包并发布版本。成员先运行 `weora login`。在「设置 → 本地 Agent」打开已登录设备的「Skill 权限」，选择「仅同步」或「同步并统计」。
 2. 进入 Git 检出目录，绑定正在使用的工具。绑定会安装启动入口并下载已发布的 Skill。Codex 首次需要在 `/hooks` 中信任 Weora 的 Hook。
 
    ```powershell
@@ -93,7 +105,7 @@ weora skill launch --runtime trae --executable "C:\Path\To\Trae.exe" -- .
 {"ok":false,"error":{"code":"INVALID_ARGUMENT","message":"..."}}
 ```
 
-`commands` 的 `business_capabilities` 包含 `collab` 和 `skill`。用各命令的 `--help` 查看操作和参数。原生 Hook 与 `skill launch` 使用宿主的输入输出协议。
+`commands` 的 `business_capabilities` 包含 `auth`、`collab` 和 `skill`。用各命令的 `--help` 查看操作和参数。原生 Hook 与 `skill launch` 使用宿主的输入输出协议。
 
 ## 验证与构建
 

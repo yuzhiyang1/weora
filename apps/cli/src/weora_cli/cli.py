@@ -9,7 +9,7 @@ from typing import NoReturn
 
 from keyring.errors import KeyringError
 
-from weora_cli import collaboration, skill_telemetry, skills
+from weora_cli import cli_auth, collaboration, skill_telemetry, skills
 from weora_cli.collab_client import CollabError
 from weora_cli.commands import COMMANDS, JsonValue
 
@@ -37,6 +37,8 @@ def build_parser() -> Parser:
             collaboration.arguments(subparser)
         elif command.name == "skill":
             skills.arguments(subparser)
+        elif command.name in {"auth", "login", "logout"}:
+            cli_auth.arguments(subparser, command.name)
     return parser
 
 
@@ -46,7 +48,7 @@ def execute(args: argparse.Namespace) -> JsonValue:
     if args.operation == "commands":
         return {
             "commands": [command.describe() for command in COMMANDS],
-            "business_capabilities": ["collab", "skill"],
+            "business_capabilities": ["collab", "skill", "auth"],
         }
     if args.operation == "schema":
         target = " ".join(args.command)
@@ -58,6 +60,8 @@ def execute(args: argparse.Namespace) -> JsonValue:
         return collaboration.execute(args)
     if args.operation == "skill":
         return skills.execute(args)
+    if args.operation in {"auth", "login", "logout"}:
+        return cli_auth.execute(args)
     raise UsageError("未找到命令。")
 
 

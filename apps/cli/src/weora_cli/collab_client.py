@@ -175,7 +175,7 @@ def paired_client(*, timeout: float = 12) -> Client:
     workspace = os.environ.get("WEORA_COLLAB_WORKSPACE", str(raw.get("workspace") or ""))
     device_id = str(raw.get("device_id") or "")
     if not base or not workspace:
-        raise CollabError("DEVICE_NOT_PAIRED", "请先在 Weora 的「本地 Agent」页配对设备。")
+        raise CollabError("DEVICE_NOT_PAIRED", "请先运行 weora login --url <Weora 服务地址>。")
     # 环境变量只用于调用方已管理的密钥注入，例如隔离的集成测试。
     account = f"{base}/{workspace}"
     if device_id:

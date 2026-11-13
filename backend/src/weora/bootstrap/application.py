@@ -37,6 +37,7 @@ from weora.modules.collaboration.agent_mail_api import router as agent_mail_rout
 from weora.modules.collaboration.api import router as tasks_router
 from weora.modules.collaboration.application.inbox import InboxService
 from weora.modules.collaboration.application.tasks import TaskRecord
+from weora.modules.collaboration.cli_login_api import router as cli_login_router
 from weora.modules.collaboration.inbox_api import router as inbox_router
 from weora.modules.collaboration.infrastructure.inbox import InboxStore
 from weora.modules.computers.api import router as computer_router
@@ -417,6 +418,7 @@ def create_app(
     app.include_router(runs_router, prefix=resolved_settings.api_prefix)
     app.include_router(tasks_router, prefix=resolved_settings.api_prefix)
     app.include_router(agent_mail_router, prefix=resolved_settings.api_prefix)
+    app.include_router(cli_login_router, prefix=resolved_settings.api_prefix)
     app.include_router(inbox_router, prefix=resolved_settings.api_prefix)
     app.include_router(computer_router, prefix=resolved_settings.api_prefix)
     app.include_router(computer_credential_router, prefix=resolved_settings.api_prefix)
