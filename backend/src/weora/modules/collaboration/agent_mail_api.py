@@ -111,7 +111,7 @@ async def _device(
     lock: bool = False,
 ) -> AsyncIterator[tuple[AsyncSession, AgentDevice, PrincipalRecord]]:
     async with _db(connection) as db:
-        device, principal = await sessions.authenticate(db, _identity(connection), workspace_id, bearer, lock=lock)
+        device, principal = await sessions.authenticate(db, workspace_id, bearer, lock=lock)
         yield db, device, principal
 
 
@@ -146,7 +146,7 @@ async def pair_device(
 ) -> dict[str, object]:
     response.headers["Cache-Control"] = "no-store"
     async with _db(request) as db:
-        return await sessions.pair(db, _identity(request), workspace_id, payload.code)
+        return await sessions.pair(db, workspace_id, payload.code)
 
 
 @router.delete("/devices/{device_id}", status_code=204)

@@ -6,6 +6,8 @@ from types import TracebackType
 from uuid import UUID, uuid4
 
 from sqlalchemy import and_, delete, or_, select
+from sqlalchemy.dialects.postgresql import insert as postgres_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -23,6 +25,7 @@ from weora.modules.skills.infrastructure.models import (
     SkillDraftModel,
     SkillEventModel,
     SkillModel,
+    SkillPackageModel,
     SkillVersionModel,
 )
 from weora.shared.infrastructure.database import SessionFactory
@@ -50,7 +53,7 @@ def _draft_from_model(model: SkillDraftModel | None) -> SkillDraftRecord | None:
     )
 
 
-def _version_from_model(model: SkillVersionModel) -> SkillVersionRecord:
+def version_from_model(model: SkillVersionModel) -> SkillVersionRecord:
     """把不可变版本 ORM 快照转换为应用层记录。"""
     return SkillVersionRecord(
         id=model.id,
@@ -115,6 +118,28 @@ class SqlAlchemySkillStore:
 
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
+
+    async def put_package(self, workspace_id: UUID, digest: str, archive: bytes) -> None:
+        """重复上传复用同一包，并发冲突不回滚外层发布事务。"""
+        insert = sqlite_insert if self._session.get_bind().dialect.name == "sqlite" else postgres_insert
+        statement = insert(SkillPackageModel).values(
+            workspace_id=workspace_id,
+            package_sha256=digest,
+            archive_bytes=archive,
+        )
+        await self._session.execute(
+            statement.on_conflict_do_nothing(
+                index_elements=[SkillPackageModel.workspace_id, SkillPackageModel.package_sha256],
+            )
+        )
+
+    async def read_package(self, workspace_id: UUID, digest: str) -> bytes | None:
+        return await self._session.scalar(
+            select(SkillPackageModel.archive_bytes).where(
+                SkillPackageModel.workspace_id == workspace_id,
+                SkillPackageModel.package_sha256 == digest,
+            )
+        )
 
     async def create_skill(
         self,
@@ -202,7 +227,17 @@ class SqlAlchemySkillStore:
         *,
         workspace_id: UUID,
         skill_id: UUID,
+        lock: bool = False,
     ) -> SkillRecord | None:
+        if lock:
+            # 先锁资产行，再读草稿。等待并发替换后需要读到新的快照。
+            locked = await self._session.scalar(
+                select(SkillModel.id)
+                .where(SkillModel.workspace_id == workspace_id, SkillModel.id == skill_id)
+                .with_for_update()
+            )
+            if locked is None:
+                return None
         statement = (
             select(SkillModel, SkillDraftModel, SkillVersionModel.version)
             .outerjoin(SkillDraftModel, SkillDraftModel.skill_id == SkillModel.id)
@@ -350,7 +385,7 @@ class SqlAlchemySkillStore:
             )
             .order_by(SkillVersionModel.published_at.desc(), SkillVersionModel.id.desc())
         )
-        return [_version_from_model(model) for model in (await self._session.scalars(statement)).all()]
+        return [version_from_model(model) for model in (await self._session.scalars(statement)).all()]
 
     async def get_version(
         self,
@@ -366,7 +401,7 @@ class SqlAlchemySkillStore:
                 SkillVersionModel.version == version,
             )
         )
-        return _version_from_model(model) if model is not None else None
+        return version_from_model(model) if model is not None else None
 
     async def list_published_versions_by_ids(
         self,
@@ -388,7 +423,7 @@ class SqlAlchemySkillStore:
         rows = (await self._session.execute(statement)).all()
         return [
             PublishedSkillVersionRecord(
-                version=_version_from_model(model),
+                version=version_from_model(model),
                 skill_slug=slug,
                 skill_display_name=display_name,
             )

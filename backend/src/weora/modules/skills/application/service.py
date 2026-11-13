@@ -2,6 +2,7 @@
 
 import base64
 import binascii
+import hashlib
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -14,6 +15,7 @@ from weora.modules.skills.application.ports import (
     SkillEventRecord,
     SkillListPage,
     SkillRecord,
+    SkillStore,
     SkillsUnitOfWorkFactory,
     SkillVersionRecord,
 )
@@ -31,7 +33,7 @@ from weora.modules.skills.domain.errors import (
     WorkspaceAccessDeniedError,
 )
 from weora.modules.skills.domain.package import SkillPackageInspector
-from weora.shared.object_storage import BytesObjectSource, ObjectKey, ObjectStoragePort
+from weora.shared.object_storage import ObjectKey, ObjectStoragePort
 from weora.shared.object_storage.errors import ObjectNotFoundError
 
 _SEMVER_PATTERN = re.compile(
@@ -51,7 +53,7 @@ class SkillActor:
 
 
 class SkillRegistryService:
-    """协调包校验、对象存储和元数据事务。"""
+    """在同一事务中保存 Skill 包与元数据，兼容旧对象存储版本。"""
 
     _WRITE_ROLES = frozenset({"owner", "admin"})
 
@@ -75,26 +77,15 @@ class SkillRegistryService:
         archive_bytes: bytes,
         request_id: str,
     ) -> SkillRecord:
-        """校验并上传标准化包，再原子创建 Skill、草稿和审计事件。"""
+        """在同一事务保存包、Skill 草稿和审计事件。"""
         self._require_workspace(actor, workspace_id)
         self._require_write_role(actor)
-        storage = self._require_storage()
         inspected = self._package_inspector.inspect(archive_bytes)
         now = datetime.now(UTC)
         skill_id = uuid4()
-        object_key = ObjectKey(f"skills/{workspace_id}/{skill_id}/draft/{inspected.content_sha256}.skill")
-        await storage.put(
-            object_key,
-            BytesObjectSource(
-                data=inspected.archive,
-                content_type="application/zip",
-                filename=f"{inspected.slug}.skill",
-            ),
-        )
-
         draft = SkillDraftRecord(
             package_name=package_name,
-            storage_key=object_key.value,
+            storage_key="",
             package_size=len(inspected.archive),
             package_sha256=inspected.package_sha256,
             content_sha256=inspected.content_sha256,
@@ -116,19 +107,15 @@ class SkillRegistryService:
             updated_at=now,
             draft=draft,
         )
-        try:
-            async with self._uow_factory() as uow:
-                await uow.store.create_skill(
-                    skill=skill,
-                    draft=draft,
-                    actor_id=actor.user_id,
-                    request_id=request_id,
-                )
-                await uow.commit()
-        except Exception:
-            # 对象存储不参与数据库事务；元数据失败时尽力移除孤儿草稿对象。
-            await storage.delete(object_key)
-            raise
+        async with self._uow_factory() as uow:
+            await uow.store.put_package(workspace_id, inspected.package_sha256, inspected.archive)
+            await uow.store.create_skill(
+                skill=skill,
+                draft=draft,
+                actor_id=actor.user_id,
+                request_id=request_id,
+            )
+            await uow.commit()
         return skill
 
     async def list_skills(
@@ -216,54 +203,35 @@ class SkillRegistryService:
         """用新标准包原子替换当前草稿，历史发布版本不受影响。"""
         self._require_workspace(actor, workspace_id)
         self._require_write_role(actor)
-        storage = self._require_storage()
-        current = await self.get_skill(actor=actor, workspace_id=workspace_id, skill_id=skill_id)
-        if current.status == "archived":
-            raise SkillArchivedError
-
         inspected = self._package_inspector.inspect(archive_bytes)
-        if inspected.slug != current.slug:
-            # 草稿替换不允许偷偷把一个资产变成另一个包。
-            raise SkillManifestInvalidError
-
-        now = datetime.now(UTC)
-        object_key = ObjectKey(f"skills/{workspace_id}/{skill_id}/draft/{inspected.content_sha256}.skill")
-        await storage.put(
-            object_key,
-            BytesObjectSource(
-                data=inspected.archive,
-                content_type="application/zip",
-                filename=f"{inspected.slug}.skill",
-            ),
-        )
         draft = SkillDraftRecord(
             package_name=package_name,
-            storage_key=object_key.value,
+            storage_key="",
             package_size=len(inspected.archive),
             package_sha256=inspected.package_sha256,
             content_sha256=inspected.content_sha256,
             files=inspected.files,
             compatibility=inspected.compatibility,
             warnings=inspected.warnings,
-            updated_at=now,
+            updated_at=datetime.now(UTC),
         )
-        old_key = current.draft.storage_key if current.draft else None
-        try:
-            async with self._uow_factory() as uow:
-                await uow.store.replace_draft(
-                    workspace_id=workspace_id,
-                    skill_id=skill_id,
-                    draft=draft,
-                    actor_id=actor.user_id,
-                    request_id=request_id,
-                )
-                await uow.commit()
-        except Exception:
-            if old_key != object_key.value:
-                await storage.delete(object_key)
-            raise
-        if old_key and old_key != object_key.value:
-            await storage.delete(ObjectKey(old_key))
+        async with self._uow_factory() as uow:
+            current = await uow.store.get_skill(workspace_id=workspace_id, skill_id=skill_id, lock=True)
+            if current is None:
+                raise SkillNotFoundError
+            if current.status == "archived":
+                raise SkillArchivedError
+            if inspected.slug != current.slug:
+                raise SkillManifestInvalidError
+            await uow.store.put_package(workspace_id, inspected.package_sha256, inspected.archive)
+            await uow.store.replace_draft(
+                workspace_id=workspace_id,
+                skill_id=skill_id,
+                draft=draft,
+                actor_id=actor.user_id,
+                request_id=request_id,
+            )
+            await uow.commit()
         return draft
 
     async def publish(
@@ -276,77 +244,49 @@ class SkillRegistryService:
         changelog: str,
         request_id: str,
     ) -> SkillVersionRecord:
-        """从当前草稿复制出版本专属对象，并创建不可变数据库快照。"""
+        """锁定当前草稿并发布不可变版本。"""
         self._require_workspace(actor, workspace_id)
         self._require_write_role(actor)
         version = version.strip()
         changelog = changelog.strip()
         if not _SEMVER_PATTERN.fullmatch(version) or len(version) > 64 or not changelog:
             raise SkillVersionInvalidError
-        storage = self._require_storage()
-        skill = await self.get_skill(actor=actor, workspace_id=workspace_id, skill_id=skill_id)
-        if skill.status == "archived":
-            raise SkillArchivedError
-        draft = skill.draft
-        if draft is None or any(item.blocks_publish for item in draft.warnings):
-            raise SkillDraftNotReadyError
         async with self._uow_factory() as uow:
-            existing_version = await uow.store.get_version(
-                workspace_id=workspace_id,
+            skill = await uow.store.get_skill(workspace_id=workspace_id, skill_id=skill_id, lock=True)
+            if skill is None:
+                raise SkillNotFoundError
+            if skill.status == "archived":
+                raise SkillArchivedError
+            if await uow.store.get_version(workspace_id=workspace_id, skill_id=skill_id, version=version):
+                raise SkillVersionConflictError
+            draft = skill.draft
+            if draft is None or any(item.blocks_publish for item in draft.warnings):
+                raise SkillDraftNotReadyError
+            await self._read_archive(uow.store, workspace_id, draft)
+            published = SkillVersionRecord(
+                id=uuid4(),
                 skill_id=skill_id,
+                workspace_id=workspace_id,
                 version=version,
+                changelog=changelog,
+                storage_key="",
+                package_name=f"{skill.slug}-{version}.skill",
+                package_size=draft.package_size,
+                package_sha256=draft.package_sha256,
+                content_sha256=draft.content_sha256,
+                files=draft.files,
+                compatibility=draft.compatibility,
+                warnings=draft.warnings,
+                published_by=actor.user_id,
+                published_at=datetime.now(UTC),
             )
-        if existing_version is not None:
-            raise SkillVersionConflictError
-
-        target_key = ObjectKey(f"skills/{workspace_id}/{skill_id}/versions/{version}/{draft.content_sha256}.skill")
-        await storage.copy(
-            ObjectKey(draft.storage_key),
-            target_key,
-            expected_sha256=draft.package_sha256,
-        )
-        published = SkillVersionRecord(
-            id=uuid4(),
-            skill_id=skill_id,
-            workspace_id=workspace_id,
-            version=version,
-            changelog=changelog,
-            storage_key=target_key.value,
-            package_name=f"{skill.slug}-{version}.skill",
-            package_size=draft.package_size,
-            package_sha256=draft.package_sha256,
-            content_sha256=draft.content_sha256,
-            files=draft.files,
-            compatibility=draft.compatibility,
-            warnings=draft.warnings,
-            published_by=actor.user_id,
-            published_at=datetime.now(UTC),
-        )
-        try:
-            async with self._uow_factory() as uow:
-                await uow.store.publish_version(
-                    skill=skill,
-                    version=published,
-                    actor_id=actor.user_id,
-                    request_id=request_id,
-                )
-                await uow.commit()
-        except SkillVersionConflictError:
-            # 同版本并发发布可能复用了同一个对象；只有未被胜出版本引用时才删除。
-            async with self._uow_factory() as uow:
-                existing = await uow.store.get_version(
-                    workspace_id=workspace_id,
-                    skill_id=skill_id,
-                    version=version,
-                )
-            if existing is None or existing.storage_key != target_key.value:
-                await storage.delete(target_key)
-            raise
-        except Exception:
-            # 版本对象已复制但元数据事务失败时，尽力清理未被引用的对象。
-            await storage.delete(target_key)
-            raise
-        await storage.delete(ObjectKey(draft.storage_key))
+            await uow.store.publish_version(
+                skill=skill,
+                version=published,
+                actor_id=actor.user_id,
+                request_id=request_id,
+            )
+            await uow.commit()
         return published
 
     async def list_versions(
@@ -410,26 +350,25 @@ class SkillRegistryService:
             skill_id=skill_id,
             version=version,
         )
-        storage = self._require_storage()
-        try:
-            object_read = await storage.read(ObjectKey(record.storage_key))
-        except ObjectNotFoundError as exc:
-            raise SkillObjectMissingError from exc
-        if (
-            object_read.metadata.sha256 != record.package_sha256
-            or object_read.metadata.content_length != record.package_size
-        ):
-            await object_read.aclose()
-            raise SkillObjectMissingError
+        return await self.download_record(actor, record, request_id)
 
+    async def download_record(
+        self,
+        actor: SkillActor,
+        record: SkillVersionRecord,
+        request_id: str,
+    ) -> SkillDownload:
+        """CLI 和控制台使用同一套固定版本下载和审计。"""
+        self._require_workspace(actor, record.workspace_id)
         async with self._uow_factory() as uow:
+            archive = await self._read_archive(uow.store, record.workspace_id, record)
             await uow.store.add_event(
-                workspace_id=workspace_id,
-                skill_id=skill_id,
+                workspace_id=record.workspace_id,
+                skill_id=record.skill_id,
                 event_type="SKILL_DOWNLOAD_REQUESTED",
                 actor_id=actor.user_id,
                 request_id=request_id,
-                data={"version": version, "content_sha256": record.content_sha256},
+                data={"version": record.version, "content_sha256": record.content_sha256},
                 occurred_at=datetime.now(UTC),
             )
             await uow.commit()
@@ -437,8 +376,60 @@ class SkillRegistryService:
             filename=record.package_name,
             package_sha256=record.package_sha256,
             package_size=record.package_size,
-            object_read=object_read,
+            archive=archive,
         )
+
+    async def read_version_archive(self, workspace_id: UUID, version_id: UUID) -> bytes:
+        """为历史 Agent 绑定读取精确版本，并在首次验证后回填旧包。"""
+        async with self._uow_factory() as uow:
+            versions = await uow.store.list_published_versions_by_ids(
+                workspace_id=workspace_id,
+                version_ids=(version_id,),
+            )
+            if not versions:
+                raise SkillNotFoundError
+            archive = await self._read_archive(uow.store, workspace_id, versions[0].version)
+            await uow.commit()
+        return archive
+
+    async def backfill_draft_archive(self, workspace_id: UUID, skill_id: UUID) -> None:
+        """发布或替换草稿期间，回填只读取加锁后仍存在的草稿。"""
+        async with self._uow_factory() as uow:
+            skill = await uow.store.get_skill(workspace_id=workspace_id, skill_id=skill_id, lock=True)
+            if skill is not None and skill.draft is not None:
+                await self._read_archive(uow.store, workspace_id, skill.draft)
+            await uow.commit()
+
+    async def _read_archive(
+        self,
+        store: SkillStore,
+        workspace_id: UUID,
+        record: SkillDraftRecord | SkillVersionRecord,
+    ) -> bytes:
+        archive = await store.read_package(workspace_id, record.package_sha256)
+        legacy = archive is None and bool(record.storage_key)
+        if legacy:
+            # 旧版本仍可从原 OSS 键恢复，回填前必须校验原始字节。
+            try:
+                source = await self._require_storage().read(ObjectKey(record.storage_key))
+            except ObjectNotFoundError as error:
+                raise SkillObjectMissingError from error
+            chunks = bytearray()
+            try:
+                async for chunk in source:
+                    chunks.extend(chunk)
+                    if len(chunks) > record.package_size:
+                        raise SkillObjectMissingError
+                archive = bytes(chunks)
+            finally:
+                await source.aclose()
+        if archive is None or len(archive) != record.package_size:
+            raise SkillObjectMissingError
+        if hashlib.sha256(archive).hexdigest() != record.package_sha256:
+            raise SkillObjectMissingError
+        if legacy:
+            await store.put_package(workspace_id, record.package_sha256, archive)
+        return archive
 
     async def set_archived(
         self,

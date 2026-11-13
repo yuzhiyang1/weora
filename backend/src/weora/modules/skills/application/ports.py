@@ -8,7 +8,6 @@ from typing import Protocol
 from uuid import UUID
 
 from weora.modules.skills.domain.package import SkillCompatibility, SkillFile, SkillWarning
-from weora.shared.object_storage import ObjectRead
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,7 +91,7 @@ class SkillDownload:
     filename: str
     package_sha256: str
     package_size: int
-    object_read: ObjectRead
+    archive: bytes
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,6 +104,10 @@ class SkillListPage:
 
 class SkillStore(Protocol):
     """一次 Skills 事务内需要的聚合读写操作。"""
+
+    async def put_package(self, workspace_id: UUID, digest: str, archive: bytes) -> None: ...
+
+    async def read_package(self, workspace_id: UUID, digest: str) -> bytes | None: ...
 
     async def create_skill(
         self,
@@ -131,6 +134,7 @@ class SkillStore(Protocol):
         *,
         workspace_id: UUID,
         skill_id: UUID,
+        lock: bool = False,
     ) -> SkillRecord | None: ...
 
     async def update_metadata(

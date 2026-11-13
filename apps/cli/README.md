@@ -49,6 +49,35 @@ weora collab reply --session <自己的会话ID> --message <原消息ID> --body 
 
 Codex 自动接收依赖支持 `queue` 的真实可执行文件及正确的配置目录。可用 `WEORA_CODEX_BIN` 指定二进制，用 `WEORA_CODEX_APP_SERVER` 指定同一台电脑上的 App Server。多个 Codex 或 Claude Code 配置目录分别启动连接器，沿用各自的 `CODEX_HOME` 或 `CLAUDE_CONFIG_DIR`。默认将提示排到当前轮次之后；连接器加 `--resume-codex` 后，在客户端支持时尝试恢复尚未加载的会话。Claude Code 的自动接收需要该原生会话提供本机 inbox。
 
+## 安装和同步团队 Skill
+
+1. 工作空间管理员在「Skills」上传包并发布版本。成员先在控制台配对设备。在「设置 → 本地 Agent」打开已登录设备的「Skill 权限」，选择「仅同步」或「同步并统计」。
+2. 进入 Git 检出目录，绑定正在使用的工具。绑定会安装启动入口并下载已发布的 Skill。Codex 首次需要在 `/hooks` 中信任 Weora 的 Hook。
+
+   ```powershell
+   weora skill bind --runtime codex
+   weora skill status --runtime codex
+   weora skill pull --runtime codex
+   weora skill install meeting-summary@1.0.0 --runtime codex
+   weora skill update meeting-summary --to 1.1.0 --runtime codex
+   weora skill follow meeting-summary --runtime codex
+   weora skill uninstall meeting-summary --runtime codex
+   weora skill usage flush --runtime codex
+   ```
+
+3. 后续打开或恢复会话时，支持原生 Hook 的工具会在后台检查更新。宿主重新扫描目录后即可看到新版本。离线时保留已安装包；遇到同名副本或本地改动时，`pull` 返回冲突路径。
+
+用户范围加 `--scope user`；Hermes 和 DeepSeek Harness 使用这个范围。Trae、Trae CN 安装后须在「设置 → Hooks」启用配置。Kiro 使用 CLI V3 的 Hook 文件格式。也可在打开客户端前手动同步，或用 `--executable` 指定客户端程序：
+
+```powershell
+weora skill bind --runtime trae
+weora skill launch --runtime trae --executable "C:\Path\To\Trae.exe" -- .
+```
+
+当前提供 21 个安装目标及原生事件适配。控制台「Skill 详情 → 使用统计」区分点名和确认加载，两种信号在同一轮合计一次使用。安装、下载和启动同步不计使用次数。各工具的实际采集能力取决于版本、Hook 是否启用，以及事件是否包含能确认的加载证据。
+
+当前分发范围为已授权设备所属的工作空间。角色、项目与标签分发策略，以及成员提交候选包，见[完整设计](../../docs/product/skill-sharing-design.md)。
+
 ## 输出约定
 
 - `--help`：stdout 输出可读帮助，退出码 0。
@@ -64,7 +93,7 @@ Codex 自动接收依赖支持 `queue` 的真实可执行文件及正确的配�
 {"ok":false,"error":{"code":"INVALID_ARGUMENT","message":"..."}}
 ```
 
-`commands` 的 `business_capabilities` 包含 `collab`。用 `weora collab --help` 查看各业务操作和参数。原生 hook 直接输出客户端要求的 JSON；连接器将待领取消息引用写入 stderr。
+`commands` 的 `business_capabilities` 包含 `collab` 和 `skill`。用各命令的 `--help` 查看操作和参数。原生 Hook 与 `skill launch` 使用宿主的输入输出协议。
 
 ## 验证与构建
 

@@ -49,10 +49,11 @@ import {
   updateSkill,
 } from "./api";
 import { SkillPackageDialog } from "./SkillPackageDialog";
+import { SkillUsagePanel } from "./SkillUsagePanel";
 import { formatDate, SkillLogo, StatusBadge } from "./SkillsPage";
 import { useDiscardChanges } from "../settings/useDiscardChanges";
 
-type DetailTab = "overview" | "versions" | "activity";
+type DetailTab = "overview" | "versions" | "activity" | "usage";
 
 export function SkillDetailPage() {
   const { principal } = useAuth();
@@ -224,6 +225,10 @@ function SkillDetailContent({
             events={eventsQuery.data?.items ?? []}
             loading={eventsQuery.isPending}
           />
+        </TabPane>
+        <TabPane itemKey="usage" tab="使用统计">
+          {tab === "usage" && <SkillUsagePanel workspaceId={workspaceId} skillId={skillId}
+            versions={versionsQuery.data?.items ?? []} canWrite={canWrite} />}
         </TabPane>
       </Tabs>
 

@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Banner, Button, Card, Input, Modal, Select, Tag } from "../../components/console";
 import { useAuth } from "../auth/AuthProvider";
-import { errorMessage } from "../runs/api";
+import { consoleRequest, consoleWrite, errorMessage } from "../runs/api";
 import { CopyInstruction, SessionStatus } from "../tasks/AgentCollaborationPanel";
 import {
   createPairing, listContactMembers, listDevices, listMySessions, revokeDevice, saveContactMembers,
@@ -21,9 +21,16 @@ function LocalAgentsSettings({ workspace }: { workspace: string }) {
   const [name, setName] = useState("");
   const [edit, setEdit] = useState<{ id: string; name: string; members: string[] }>();
   const [revoking, setRevoking] = useState<{ id: string; name: string }>();
+  const [skillDevice, setSkillDevice] = useState<{ id: string; name: string }>();
   const [feedback, setFeedback] = useState("");
   const pairingFinish = useRef<HTMLButtonElement>(null);
   const devices = useQuery({ queryKey: [...scope, "devices"], queryFn: () => listDevices(workspace), refetchInterval: 8000 });
+  const grants = useQuery({
+    queryKey: [...scope, "skill-grants"],
+    queryFn: () => consoleRequest<{ items: { device_id: string; usage_enabled: boolean }[] }>(
+      workspace, "/skill-distribution/grants",
+    ),
+  });
   const sessions = useQuery({ queryKey: [...scope, "sessions"], queryFn: () => listMySessions(workspace), refetchInterval: 8000 });
   const members = useQuery({ queryKey: [...scope, "members"], queryFn: () => listContactMembers(workspace), enabled: !!edit });
   const refresh = () => void cache.invalidateQueries({ queryKey: scope });
@@ -40,6 +47,13 @@ function LocalAgentsSettings({ workspace }: { workspace: string }) {
     mutationFn: (value: NonNullable<typeof edit>) => saveContactMembers(workspace, value.id, value.members),
     onSuccess: () => { setEdit(undefined); setFeedback("直接联系权限已更新。"); refresh(); },
   });
+  const changeSkillGrant = useMutation({
+    mutationFn: ({ id, usage }: { id: string; usage: boolean | null }) =>
+      consoleWrite(workspace, `/skill-distribution/devices/${encodeURIComponent(id)}/grant`,
+        usage === null ? undefined : { usage_enabled: usage }, usage === null ? "DELETE" : "PUT"),
+    onSuccess: () => { setSkillDevice(undefined); setFeedback("设备的 Skill 权限已更新。"); refresh(); },
+  });
+  const selectedGrant = grants.data?.items.find((item) => item.device_id === skillDevice?.id);
   const cancelPairing = () => {
     if (pair.isPending) return;
     setPairing(false);
@@ -57,14 +71,23 @@ function LocalAgentsSettings({ workspace }: { workspace: string }) {
       <Card title="已登记设备">
         <div className="agent-collab-stack">
           <SettingsLoading loading={devices.isPending} error={devices.error} retry={devices.refetch} />
+          <SettingsLoading loading={grants.isPending} error={grants.error} retry={grants.refetch} />
           {devices.data?.items.length === 0 && <p className="task-muted">暂无设备。先配对运行本地 Agent 的电脑。</p>}
           {devices.data?.items.map((device) => {
             const inactive = Boolean(device.revoked_at) || device.expired;
+            const grant = grants.data?.items.find((item) => item.device_id === device.id);
             return (
               <div className="agent-collab-row" key={device.id}>
                 <strong>{device.name}</strong>
                 <div className="agent-collab-actions">
                   <Tag>{device.revoked_at ? "已撤销" : inactive ? "已过期" : device.paired ? "已配对" : "等待配对"}</Tag>
+                  {!inactive && device.paired && grants.data && <>
+                    {grant && <Tag>{grant.usage_enabled ? "同步并统计" : "仅同步"}</Tag>}
+                    <Button size="small" onClick={() => {
+                      changeSkillGrant.reset();
+                      setSkillDevice(device);
+                    }}>Skill 权限</Button>
+                  </>}
                   {!inactive && <Button size="small" onClick={() => { remove.reset(); setRevoking(device); }}>撤销</Button>}
                 </div>
               </div>
@@ -160,6 +183,25 @@ function LocalAgentsSettings({ workspace }: { workspace: string }) {
             <SettingsResult error={remove.error} />
             <div className="agent-collab-actions">
               <Button type="danger" loading={remove.isPending} onClick={() => remove.mutate(revoking.id)}>确认撤销</Button>
+            </div>
+          </div>
+        </Modal>
+      )}
+      {skillDevice && (
+        <Modal title={`Skill 权限 · ${skillDevice.name}`} visible
+          onCancel={() => { if (!changeSkillGrant.isPending) setSkillDevice(undefined); }}
+          maskClosable={!changeSkillGrant.isPending} closeOnEsc={!changeSkillGrant.isPending}>
+          <div className="agent-collab-stack">
+            <p>授权后，这台设备可以安装和同步工作空间已发布的 Skill。</p>
+            <p>开启统计后，设备会报告使用的 Skill 版本、时间和点名或加载信号。提示词、工具输出和本机路径留在设备上。</p>
+            <SettingsResult error={changeSkillGrant.error} />
+            <div className="agent-collab-actions">
+              {selectedGrant && <Button disabled={changeSkillGrant.isPending}
+                onClick={() => changeSkillGrant.mutate({ id: skillDevice.id, usage: null })}>关闭同步</Button>}
+              <Button disabled={changeSkillGrant.isPending}
+                onClick={() => changeSkillGrant.mutate({ id: skillDevice.id, usage: false })}>仅同步</Button>
+              <Button type="primary" loading={changeSkillGrant.isPending}
+                onClick={() => changeSkillGrant.mutate({ id: skillDevice.id, usage: true })}>同步并统计</Button>
             </div>
           </div>
         </Modal>

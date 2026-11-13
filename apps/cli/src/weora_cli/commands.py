@@ -49,4 +49,5 @@ COMMANDS = (
     Command("commands", "列出当前已实现的命令"),
     Command("schema", "查看全部命令或指定命令的输入 Schema", (Argument("command", "命令路径，省略时返回全部命令"),)),
     Command("collab", "配对本机、查找会话、发送和领取协作消息", side_effects=True),
+    Command("skill", "绑定、同步和统计团队 Skill", side_effects=True),
 )

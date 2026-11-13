@@ -1,11 +1,10 @@
 """Skill Registry HTTP 路由。"""
 
-from collections.abc import AsyncIterator
 from typing import Annotated, NoReturn, cast
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response
 
 from weora.modules.identity.api.dependencies import current_principal, write_principal
 from weora.modules.identity.application.ports import PrincipalRecord
@@ -329,8 +328,8 @@ async def download_skill_version(
     version: str,
     request: Request,
     principal: Annotated[PrincipalRecord, Depends(current_principal)],
-) -> StreamingResponse:
-    """完成权限和摘要校验后流式下载发布包。"""
+) -> Response:
+    """完成权限和摘要校验后下载发布包。"""
     try:
         download = await _service(request).download_version(
             actor=_actor(principal),
@@ -342,16 +341,8 @@ async def download_skill_version(
     except SkillRegistryError as exc:
         _raise_http_error(exc)
 
-    async def body() -> AsyncIterator[bytes]:
-        """无论客户端是否完整消费响应，都释放对象存储连接。"""
-        try:
-            async for chunk in download.object_read:
-                yield chunk
-        finally:
-            await download.object_read.aclose()
-
-    return StreamingResponse(
-        body(),
+    return Response(
+        download.archive,
         media_type="application/zip",
         headers={
             "Content-Disposition": f'attachment; filename="{download.filename}"',

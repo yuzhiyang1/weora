@@ -25,7 +25,7 @@ from weora.modules.collaboration.infrastructure.agent_mail import (
 )
 from weora.modules.collaboration.infrastructure.tasks import TaskModel, TaskParticipantModel
 from weora.modules.identity.application.ports import PrincipalRecord
-from weora.modules.identity.application.service import IdentityService
+from weora.modules.identity.infrastructure.unit_of_work import get_active_workspace_principal_in_session
 
 
 def _digest(secret: str) -> str:
@@ -69,7 +69,6 @@ async def begin_pairing(db: AsyncSession, owner: PrincipalRecord, name: str) -> 
 
 async def pair(
     db: AsyncSession,
-    identity: IdentityService,
     workspace_id: UUID,
     code: str,
 ) -> dict[str, object]:
@@ -85,7 +84,9 @@ async def pair(
         device is None
         or device.revoked_at is not None
         or _utc(device.expires_at) <= datetime.now(UTC)
-        or not await identity.get_active_workspace_principal(user_id=device.user_id, workspace_id=workspace_id)
+        or not await get_active_workspace_principal_in_session(
+            db, user_id=device.user_id, workspace_id=workspace_id
+        )
     ):
         raise AgentMailError(401, "AGENT_DEVICE_PAIRING_INVALID", "配对码无效或已过期")
     secret = token_urlsafe(32)
@@ -95,26 +96,47 @@ async def pair(
     return device_view(device) | {"token": secret}
 
 
+async def _device_by_bearer(
+    db: AsyncSession,
+    workspace_id: UUID,
+    authorization: str | None,
+    *,
+    lock: bool,
+) -> AgentDevice | None:
+    scheme, _, secret = (authorization or "").partition(" ")
+    if scheme.lower() != "bearer" or not 32 <= len(secret) <= 128:
+        return None
+    query = select(AgentDevice).where(
+        AgentDevice.workspace_id == workspace_id,
+        AgentDevice.token_hash == _digest(secret),
+    )
+    matches = await db.scalars(query.with_for_update() if lock else query)
+    return matches.one_or_none()
+
+
 async def authenticate(
     db: AsyncSession,
-    identity: IdentityService,
     workspace_id: UUID,
     authorization: str | None,
     *,
     lock: bool = False,
 ) -> tuple[AgentDevice, PrincipalRecord]:
-    scheme, _, secret = (authorization or "").partition(" ")
-    if scheme.lower() == "bearer" and 32 <= len(secret) <= 128:
-        query = select(AgentDevice).where(
-            AgentDevice.workspace_id == workspace_id,
-            AgentDevice.token_hash == _digest(secret),
+    device = await _device_by_bearer(db, workspace_id, authorization, lock=lock)
+    if device and device_active(device):
+        principal = await get_active_workspace_principal_in_session(
+            db, user_id=device.user_id, workspace_id=workspace_id
         )
-        device = await db.scalar(query.with_for_update() if lock else query)
-        if device and device_active(device):
-            principal = await identity.get_active_workspace_principal(user_id=device.user_id, workspace_id=workspace_id)
-            if principal:
-                return device, principal
+        if principal:
+            return device, principal
     raise AgentMailError(401, "AGENT_DEVICE_UNAUTHORIZED", "请重新配对 Weora 设备")
+
+
+async def revoke_by_bearer(db: AsyncSession, workspace_id: UUID, authorization: str | None) -> None:
+    # 成员被移出后仍可销毁自己的凭据，避免重新加入时旧凭据恢复访问。
+    device = await _device_by_bearer(db, workspace_id, authorization, lock=True)
+    if device is None:
+        raise AgentMailError(401, "AGENT_DEVICE_UNAUTHORIZED", "请重新配对 Weora 设备")
+    _revoke(device)
 
 
 async def devices(db: AsyncSession, owner: PrincipalRecord) -> list[dict[str, object]]:
@@ -141,6 +163,10 @@ async def revoke(db: AsyncSession, owner: PrincipalRecord, device_id: UUID) -> N
     )
     if device is None:
         raise unavailable()
+    _revoke(device)
+
+
+def _revoke(device: AgentDevice) -> None:
     if device.revoked_at is None:
         device.revoked_at = datetime.now(UTC)
         device.pairing_hash = None

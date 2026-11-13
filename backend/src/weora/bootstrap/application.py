@@ -82,6 +82,7 @@ from weora.modules.runs.infrastructure.module_access import RunContentGuard
 from weora.modules.runs.infrastructure.project_catalog import ProjectsModuleCatalog
 from weora.modules.runs.infrastructure.unit_of_work import SqlAlchemyRunsUnitOfWork
 from weora.modules.runs.infrastructure.watch import RunWatch
+from weora.modules.skills.api.distribution_routes import router as skill_distribution_router
 from weora.modules.skills.api.routes import router as skills_router
 from weora.modules.skills.application.service import SkillRegistryService
 from weora.modules.skills.infrastructure.unit_of_work import SqlAlchemySkillsUnitOfWork
@@ -184,7 +185,7 @@ def create_app(
     app.state.agent_registry_service = AgentRegistryService(
         uow_factory=lambda: SqlAlchemyAgentsUnitOfWork(session_factory),
         skill_catalog=SkillsModuleVersionCatalog(skill_registry_service),
-        runtime_context_assembler=AgentRuntimeContextAssembler(object_storage),
+        runtime_context_assembler=AgentRuntimeContextAssembler(skill_registry_service.read_version_archive),
     )
     guard = RunContentGuard(app.state.identity_service)
 
@@ -411,6 +412,7 @@ def create_app(
     app.include_router(identity_router, prefix=resolved_settings.api_prefix)
     app.include_router(workspace_identity_router, prefix=resolved_settings.api_prefix)
     app.include_router(skills_router, prefix=resolved_settings.api_prefix)
+    app.include_router(skill_distribution_router, prefix=resolved_settings.api_prefix)
     app.include_router(agents_router, prefix=resolved_settings.api_prefix)
     app.include_router(runs_router, prefix=resolved_settings.api_prefix)
     app.include_router(tasks_router, prefix=resolved_settings.api_prefix)

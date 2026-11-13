@@ -1,8 +1,9 @@
-"""使用真实阿里云 OSS 验证 Skill Registry 端到端对象链路。"""
+"""使用真实阿里云 OSS 验证历史 Skill 包迁移。"""
 
 import hashlib
 import os
 from contextlib import suppress
+from uuid import UUID
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -13,8 +14,9 @@ from tests.api.test_skills import build_skill_package
 from weora.bootstrap.application import create_app
 from weora.bootstrap.object_storage import create_object_storage
 from weora.bootstrap.settings import AppSettings
+from weora.modules.skills.infrastructure.models import SkillPackageModel, SkillVersionModel
 from weora.shared.infrastructure.database import Base
-from weora.shared.object_storage import ObjectKey
+from weora.shared.object_storage import BytesObjectSource, ObjectKey
 
 pytestmark = [
     pytest.mark.integration,
@@ -26,8 +28,8 @@ pytestmark = [
 
 
 @pytest.mark.anyio
-async def test_skill_upload_publish_and_download_against_real_bucket() -> None:
-    """真实执行草稿上传、版本复制、草稿清理和发布包下载。"""
+async def test_skill_download_backfills_legacy_package_from_real_bucket() -> None:
+    """迁移旧版本的原始字节，再证明删除旧对象不影响数据库包下载。"""
     settings = AppSettings()
     storage = create_object_storage(settings)
     assert storage is not None
@@ -79,10 +81,8 @@ async def test_skill_upload_publish_and_download_against_real_bucket() -> None:
             assert created.status_code == 201, created.text
             skill_id = created.json()["id"]
             draft = created.json()["draft"]
-            draft_key = ObjectKey(
-                f"skills/{workspace_id}/{skill_id}/draft/{draft['content_sha256']}.skill"
-            )
-            assert await storage.stat(draft_key) is not None
+            draft_key = ObjectKey(f"skills/{workspace_id}/{skill_id}/draft/{draft['content_sha256']}.skill")
+            assert await storage.stat(draft_key) is None
 
             published = await client.post(
                 f"{base_path}/{skill_id}/publish",
@@ -94,14 +94,24 @@ async def test_skill_upload_publish_and_download_against_real_bucket() -> None:
             version_key = ObjectKey(
                 f"skills/{workspace_id}/{skill_id}/versions/0.1.0/{version['content_sha256']}.skill"
             )
-            assert await storage.stat(draft_key) is None
-            assert await storage.stat(version_key) is not None
+            assert await storage.stat(version_key) is None
+            async with session_factory() as db, db.begin():
+                record = await db.get(SkillVersionModel, UUID(version["id"]))
+                package = await db.get(SkillPackageModel, (UUID(workspace_id), version["package_sha256"]))
+                assert record and package
+                await storage.put(
+                    version_key,
+                    BytesObjectSource(package.archive_bytes, content_type="application/zip"),
+                )
+                record.storage_key = version_key.value
+                await db.delete(package)
 
-            downloaded = await client.get(
-                f"{base_path}/{skill_id}/versions/0.1.0/download"
-            )
+            downloaded = await client.get(f"{base_path}/{skill_id}/versions/0.1.0/download")
             assert downloaded.status_code == 200
             assert hashlib.sha256(downloaded.content).hexdigest() == version["package_sha256"]
+            await storage.delete(version_key)
+            read_again = await client.get(f"{base_path}/{skill_id}/versions/0.1.0/download")
+            assert read_again.content == downloaded.content
     finally:
         if version_key is not None:
             with suppress(Exception):

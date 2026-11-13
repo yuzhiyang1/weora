@@ -44,9 +44,14 @@ class CliTests(unittest.TestCase):
         result = self.run_cli("commands")
         self.assertEqual(result.returncode, 0)
         data = json.loads(result.stdout)["data"]
-        self.assertEqual([command["name"] for command in data["commands"]], ["version", "commands", "schema", "collab"])
-        self.assertEqual(data["business_capabilities"], ["collab"])
-        self.assertEqual([c["name"] for c in data["commands"] if c["side_effects"]], ["collab"])
+        self.assertEqual(
+            [command["name"] for command in data["commands"]],
+            ["version", "commands", "schema", "collab", "skill"],
+        )
+        self.assertEqual(data["business_capabilities"], ["collab", "skill"])
+        self.assertEqual(
+            [c["name"] for c in data["commands"] if c["side_effects"]], ["collab", "skill"]
+        )
 
     def test_schema_and_discovery_use_the_same_contract(self) -> None:
         discovered = json.loads(self.run_cli("commands").stdout)["data"]["commands"]
