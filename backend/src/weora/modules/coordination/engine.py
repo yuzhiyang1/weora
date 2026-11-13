@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 from typing import Literal
 from uuid import UUID
 
-from weora.modules.context.replies import TASK_ACCEPTANCE_REPLY, brief_reply
+from weora.modules.context.replies import TASK_ACCEPTANCE_REPLY
 from weora.modules.coordination.domain import (
     Assignment,
     Clock,
@@ -1260,11 +1260,9 @@ class Engine:
                 for item in ticket.inputs
             ):
                 continue
-            link = f"\n\n完整结果：{console_url.rstrip('/')}/runs/{assignment.run_id}" if console_url else ""
-            if len(link) >= 150:
-                link = ""
-            suffix = link or "\n\n完整结果见 Weora 运行详情。"
-            summary = brief_reply(report.summary).split("\n\n详细过程见 Weora 运行记录。", 1)[0]
-            limit = 240 - len(suffix)
-            text = summary if len(summary) <= limit else summary[:limit - 1].rstrip() + "…"
-            self.reply(origin.id, "result", text + suffix, ticket_id=ticket.id)
+            summary = report.summary.strip()
+            if console_url:
+                link = f"\n\n[查看运行详情]({console_url.rstrip('/')}/runs/{assignment.run_id})"
+                if len(summary) + len(link) <= 16000:
+                    summary += link
+            self.reply(origin.id, "result", summary, ticket_id=ticket.id)
