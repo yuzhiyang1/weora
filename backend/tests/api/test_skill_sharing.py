@@ -60,7 +60,7 @@ async def sharing_client(request: pytest.FixtureRequest) -> AsyncIterator[tuple[
 async def test_member_contributes_and_owner_reviews_without_overwriting_newer_draft(
     sharing_client: tuple[AsyncClient, FastAPI],
 ) -> None:
-    """覆盖设备授权、别名搜索、原文读取、同包重试、审核冲突和上传人快照。"""
+    """覆盖成员发布与审计、候选包审核、草稿修订冲突和上传人快照。"""
     owner, app = sharing_client
     registered = await owner.post(
         "/api/v1/auth/register",
@@ -96,6 +96,7 @@ async def test_member_contributes_and_owner_reviews_without_overwriting_newer_dr
         )
         assert joined.status_code == 201, joined.text
         assert joined.json()["workspace"]["role"] == "member"
+        member_id = joined.json()["user"]["id"]
         member_csrf = {"X-CSRF-Token": member.cookies["weora_csrf"]}
         device_id, auth = await device(member, root + "/agent-collaboration", "贡献者设备")
         files = {"package": ("meeting-summary.zip", original)}
@@ -115,7 +116,8 @@ async def test_member_contributes_and_owner_reviews_without_overwriting_newer_dr
         assert first.json()["status"] == "draft"
         assert (await member.post(upload_path, headers=auth, files=files)).json() == first.json()
         skill_path = f"{root}/skills/{first.json()['skill_id']}"
-        assert (await member.get(skill_path + "/files/preview", params={"path": "SKILL.md"})).status_code == 403
+        draft_preview = await member.get(skill_path + "/files/preview", params={"path": "SKILL.md"})
+        assert draft_preview.status_code == 200 and "# 使用说明" in draft_preview.json()["text"]
         summary = (await member.get(root + "/skills", params={"search": "会议纪要助手"})).json()["items"][0]
         assert (summary["display_name"], summary["description"], summary["uploader_name"]) == (
             "会议纪要助手",
@@ -123,10 +125,21 @@ async def test_member_contributes_and_owner_reviews_without_overwriting_newer_dr
             "林晓",
         )
         publish = {"version": "1.0.0", "changelog": "首次发布"}
-        assert (await member.post(skill_path + "/publish", headers=member_csrf, json=publish)).status_code == 403
-        release = await owner.post(skill_path + "/publish", headers=owner_csrf, json=publish)
+        assert (await member.post(skill_path + "/publish", json=publish)).status_code == 403
+        assert (
+            await member.post(
+                skill_path.replace(workspace, str(uuid4())) + "/publish", headers=member_csrf, json=publish,
+            )
+        ).status_code == 404
+        release = await member.post(skill_path + "/publish", headers=member_csrf, json=publish)
         assert release.status_code == 201, release.text
         assert release.json()["uploader_name"] == "林晓"
+        assert release.json()["published_by"] == member_id
+        events = await owner.get(skill_path + "/events")
+        assert events.status_code == 200, events.text
+        publication = next(item for item in events.json()["items"] if item["event_type"] == "SKILL_PUBLISHED")
+        assert (publication["actor_id"], publication["actor_name"]) == (member_id, "林晓")
+        assert publication["data"]["actor_name"] == "林晓"
         preview = await member.get(skill_path + "/files/preview", params={"version": "1.0.0", "path": "SKILL.md"})
         assert preview.status_code == 200 and "# 使用说明" in preview.json()["text"]
         assert (
@@ -142,6 +155,9 @@ async def test_member_contributes_and_owner_reviews_without_overwriting_newer_dr
         candidate_id = proposed.json()["contribution_id"]
         candidate_path = f"{skill_path}/contributions/{candidate_id}"
         assert (await member.get(candidate_path)).status_code == 403
+        assert (
+            await member.post(candidate_path + "/decision", headers=member_csrf, json={"accept": True})
+        ).status_code == 403
         assert (await member.post(upload_path, headers=auth, files=replacement)).json() == proposed.json()
         assert (await owner.get(skill_path)).json()["draft"] is None
         candidate = await owner.get(candidate_path)
@@ -175,7 +191,23 @@ async def test_member_contributes_and_owner_reviews_without_overwriting_newer_dr
             json={"version": "1.1.0", "changelog": "审核通过"},
         )
         assert released.status_code == 201 and released.json()["uploader_name"] == "林晓"
+        assert released.json()["published_by"] == registered.json()["user"]["id"]
         assert (await owner.get(skill_path + "/contributions")).json() == []
+
+        unsafe = await member.post(
+            upload_path,
+            headers=auth,
+            files={"package": ("unsafe-skill.zip", build_skill_package(
+                name="unsafe-skill", extra_files={"secrets/deploy.pem": "-----BEGIN PRIVATE KEY-----\n"},
+            ))},
+        )
+        assert unsafe.status_code == 201, unsafe.text
+        unsafe_path = f"{root}/skills/{unsafe.json()['skill_id']}"
+        private_file = {"path": "secrets/deploy.pem"}
+        assert (await member.get(unsafe_path + "/files/preview", params=private_file)).status_code == 403
+        unsafe_release = await member.post(unsafe_path + "/publish", headers=member_csrf, json=publish)
+        assert unsafe_release.status_code == 422
+        assert unsafe_release.json()["detail"]["code"] == "SKILL_DRAFT_NOT_READY"
 
 
 @pytest.mark.anyio

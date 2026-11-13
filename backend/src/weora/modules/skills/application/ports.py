@@ -200,7 +200,7 @@ class SkillStore(Protocol):
         *,
         skill: SkillRecord,
         version: SkillVersionRecord,
-        actor_id: UUID,
+        actor_name: str | None,
         request_id: str,
     ) -> None: ...
 

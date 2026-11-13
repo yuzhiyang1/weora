@@ -63,7 +63,7 @@ Codex 自动接收依赖支持 `queue` 的真实可执行文件及正确的配�
 
 ## 安装和同步团队 Skill
 
-1. 工作空间管理员在「Skills」上传包并发布版本。成员先运行 `weora login`。在「设置 → 本地 Agent」打开已登录设备的「Skill 权限」，选择「仅同步」或「同步并统计」。
+1. 工作空间管理员可在「Skills」上传包，工作空间成员均可发布草稿。成员先运行 `weora login`。在「设置 → 本地 Agent」打开已登录设备的「Skill 权限」，选择「仅同步」或「同步并统计」。
 2. 进入 Git 检出目录，绑定正在使用的工具。绑定会安装启动入口并下载已发布的 Skill。Codex 首次需要在 `/hooks` 中信任 Weora 的 Hook。
 
    ```powershell
@@ -132,4 +132,4 @@ backend/.venv/Scripts/mypy --config-file apps/cli/pyproject.toml apps/cli/src ap
 weora skill push ./my-skill
 ```
 
-首次提交会创建待发布草稿。同名包进入该 Skill 的「待审核」列表。管理员可预览文件、查看校验结果、接受为草稿或驳回，接受后在控制台发布版本。包内 `agents/openai.yaml` 的展示名称和简介可在控制台搜索，CLI 安装仍使用 `SKILL.md` 的标识符。
+首次提交会创建待发布草稿。同名包进入该 Skill 的「待审核」列表，管理员可预览文件、查看校验结果、接受为草稿或驳回。工作空间成员可在控制台发布草稿，活动记录会显示实际发布人。包内 `agents/openai.yaml` 的展示名称和简介可在控制台搜索，CLI 安装仍使用 `SKILL.md` 的标识符。
