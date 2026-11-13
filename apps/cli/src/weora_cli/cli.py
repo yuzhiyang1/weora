@@ -7,7 +7,9 @@ import sys
 from importlib.metadata import version
 from typing import NoReturn
 
-from weora_cli import collaboration
+from keyring.errors import KeyringError
+
+from weora_cli import cli_auth, collaboration, skill_telemetry, skills
 from weora_cli.collab_client import CollabError
 from weora_cli.commands import COMMANDS, JsonValue
 
@@ -33,6 +35,10 @@ def build_parser() -> Parser:
             subparser.add_argument(argument.name, nargs="*", help=argument.description)
         if command.name == "collab":
             collaboration.arguments(subparser)
+        elif command.name == "skill":
+            skills.arguments(subparser)
+        elif command.name in {"auth", "login", "logout"}:
+            cli_auth.arguments(subparser, command.name)
     return parser
 
 
@@ -40,7 +46,10 @@ def execute(args: argparse.Namespace) -> JsonValue:
     if args.operation == "version":
         return {"version": version("weora-cli"), "protocol_version": PROTOCOL_VERSION}
     if args.operation == "commands":
-        return {"commands": [command.describe() for command in COMMANDS], "business_capabilities": ["collab"]}
+        return {
+            "commands": [command.describe() for command in COMMANDS],
+            "business_capabilities": ["collab", "skill", "auth"],
+        }
     if args.operation == "schema":
         target = " ".join(args.command)
         commands = [command for command in COMMANDS if not target or command.name == target]
@@ -49,6 +58,10 @@ def execute(args: argparse.Namespace) -> JsonValue:
         return {"commands": [command.describe() for command in commands]}
     if args.operation == "collab":
         return collaboration.execute(args)
+    if args.operation == "skill":
+        return skills.execute(args)
+    if args.operation in {"auth", "login", "logout"}:
+        return cli_auth.execute(args)
     raise UsageError("未找到命令。")
 
 
@@ -65,6 +78,16 @@ def main(argv: list[str] | None = None) -> int:
             stream.reconfigure(encoding="utf-8")
     try:
         args = build_parser().parse_args(argv)
+        if args.operation == "skill" and args.action == "hook":
+            if isinstance(sys.stdin, io.TextIOWrapper):
+                sys.stdin.reconfigure(encoding="utf-8")
+            skill_telemetry.hook(args.runtime, args.event)
+            if args.runtime == "zcode":
+                # ZCode process Hook 需要一行 JSON，空对象表示不干预会话。
+                print("{}")
+            return 0
+        if args.operation == "skill" and args.action == "launch":
+            return skills.launch_bound(args)
         if args.operation == "collab" and args.action == "hook":
             # 原生 hook 使用客户端自己的协议，不能包一层 CLI 响应。
             print(json.dumps(collaboration.hook_output(args), ensure_ascii=False))
@@ -75,6 +98,12 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     except CollabError as exc:
         emit({"ok": False, "error": {"code": exc.code, "message": str(exc), "data": exc.data}}, error=True)
+        return 1
+    except KeyringError:
+        emit(
+            {"ok": False, "error": {"code": "KEYRING_UNAVAILABLE", "message": "系统钥匙串不可用，请先解锁或配置它。"}},
+            error=True,
+        )
         return 1
     except KeyboardInterrupt:
         return 130

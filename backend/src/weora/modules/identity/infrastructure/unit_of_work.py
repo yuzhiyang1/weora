@@ -554,6 +554,13 @@ class SqlAlchemyIdentityStore:
         return int((await self._session.scalar(statement)) or 0)
 
 
+async def get_active_workspace_principal_in_session(
+    session: AsyncSession, *, user_id: UUID, workspace_id: UUID
+) -> PrincipalRecord | None:
+    """供持有事务的调用方复用连接，查询仍由 Identity 校验用户及成员状态。"""
+    return await SqlAlchemyIdentityStore(session).get_principal_by_user_id(user_id, workspace_id=workspace_id)
+
+
 class SqlAlchemyIdentityUnitOfWork:
     """为一次 Identity 用例持有独立数据库事务。"""
 

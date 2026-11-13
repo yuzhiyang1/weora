@@ -111,7 +111,7 @@ async def _device(
     lock: bool = False,
 ) -> AsyncIterator[tuple[AsyncSession, AgentDevice, PrincipalRecord]]:
     async with _db(connection) as db:
-        device, principal = await sessions.authenticate(db, _identity(connection), workspace_id, bearer, lock=lock)
+        device, principal = await sessions.authenticate(db, workspace_id, bearer, lock=lock)
         yield db, device, principal
 
 
@@ -124,6 +124,27 @@ async def list_devices(workspace_id: UUID, request: Request, owner: Read) -> dic
     _scope(owner, workspace_id)
     async with _db(request) as db:
         return {"items": await sessions.devices(db, owner)}
+
+
+@router.get("/device-self")
+async def device_identity(
+    workspace_id: UUID, request: Request, response: Response, authorization: Bearer = None,
+) -> dict[str, object]:
+    response.headers["Cache-Control"] = "no-store"
+    async with _device(request, workspace_id, authorization) as (_, device, principal):
+        return sessions.device_view(device) | {
+            "user_id": principal.user_id,
+            "display_name": principal.display_name,
+            "workspace_id": principal.workspace_id,
+            "workspace_name": principal.workspace_name,
+            "role": principal.role,
+        }
+
+
+@router.delete("/device-self", status_code=204)
+async def revoke_current_device(workspace_id: UUID, request: Request, authorization: Bearer = None) -> None:
+    async with _db(request) as db:
+        await sessions.revoke_by_bearer(db, workspace_id, authorization)
 
 
 @router.post("/devices", status_code=201)
@@ -146,7 +167,7 @@ async def pair_device(
 ) -> dict[str, object]:
     response.headers["Cache-Control"] = "no-store"
     async with _db(request) as db:
-        return await sessions.pair(db, _identity(request), workspace_id, payload.code)
+        return await sessions.pair(db, workspace_id, payload.code)
 
 
 @router.delete("/devices/{device_id}", status_code=204)

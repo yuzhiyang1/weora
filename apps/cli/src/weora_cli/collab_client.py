@@ -50,6 +50,73 @@ class _NoRedirect(HTTPRedirectHandler):
         return None
 
 
+def validate_server(base: str, *, allow_path: bool = False) -> str:
+    base = base.strip().rstrip("/")
+    try:
+        url = urlsplit(base)
+        local = url.hostname in {"localhost", "127.0.0.1", "::1"}
+        if (
+            url.hostname
+            and url.username is None
+            and url.password is None
+            and not url.query
+            and not url.fragment
+            and (allow_path or not url.path)
+            and (url.scheme == "https" or (url.scheme == "http" and local))
+        ):
+            _ = url.port
+            return base
+    except ValueError:
+        pass
+    raise CollabError("INVALID_SERVER", "请输入 HTTPS Weora 服务地址。本机开发可使用 HTTP 回环地址。")
+
+
+def request_json(
+    method: str,
+    url: str,
+    data: dict[str, JsonValue] | None = None,
+    *,
+    token: str = "",
+    key: str | None = None,
+    timeout: float = 12,
+    body: bytes | None = None,
+    content_type: str | None = None,
+) -> dict[str, JsonValue]:
+    """发送 JSON 或已有编码的请求体，统一凭据、重定向与错误处理。"""
+    headers = {"Accept": "application/json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    if data is not None:
+        headers["Content-Type"] = "application/json"
+        body = json.dumps(data, ensure_ascii=False).encode()
+    elif content_type:
+        headers["Content-Type"] = content_type
+    if key:
+        headers["Idempotency-Key"] = key
+    request = Request(
+        url,
+        data=body,
+        headers=headers,
+        method=method,
+    )
+    try:
+        with build_opener(_NoRedirect()).open(request, timeout=timeout) as response:
+            return as_object(json.loads(response.read()) if response.status != 204 else {})
+    except HTTPError as error:
+        try:
+            detail = as_object(as_object(json.loads(error.read())).get("detail"))
+        except (ValueError, CollabError):
+            detail = {}
+        code = detail.get("code")
+        message = detail.get("message")
+        raise CollabError(
+            str(code or f"HTTP_{error.code}"),
+            str(message or f"Weora 请求失败（HTTP {error.code}）。"),
+        ) from error
+    except (URLError, TimeoutError, OSError) as error:
+        raise CollabError("WEORA_UNREACHABLE", "暂时无法连接 Weora。") from error
+
+
 @dataclass(frozen=True)
 class Client:
     base: str
@@ -58,17 +125,7 @@ class Client:
     timeout: float = 12
 
     def __post_init__(self) -> None:
-        url = urlsplit(self.base)
-        local = url.hostname in {"localhost", "127.0.0.1", "::1"}
-        if (
-            not url.hostname
-            or url.username is not None
-            or url.password is not None
-            or url.query
-            or url.fragment
-            or (url.scheme != "https" and not (url.scheme == "http" and local))
-        ):
-            raise CollabError("INVALID_SERVER", "请输入 HTTPS Weora 地址。本机开发可使用 HTTP 回环地址。")
+        validate_server(self.base, allow_path=True)
         try:
             UUID(self.workspace)
         except ValueError as error:
@@ -95,35 +152,7 @@ class Client:
         *,
         key: str | None = None,
     ) -> dict[str, JsonValue]:
-        headers = {"Accept": "application/json"}
-        if self.token:
-            headers["Authorization"] = f"Bearer {self.token}"
-        if data is not None:
-            headers["Content-Type"] = "application/json"
-        if key:
-            headers["Idempotency-Key"] = key
-        request = Request(
-            self.path + path,
-            data=json.dumps(data, ensure_ascii=False).encode() if data is not None else None,
-            headers=headers,
-            method=method,
-        )
-        try:
-            with build_opener(_NoRedirect()).open(request, timeout=self.timeout) as response:
-                return as_object(json.loads(response.read()) if response.status != 204 else {})
-        except HTTPError as error:
-            try:
-                detail = as_object(as_object(json.loads(error.read())).get("detail"))
-            except (ValueError, CollabError):
-                detail = {}
-            code = detail.get("code")
-            message = detail.get("message")
-            raise CollabError(
-                str(code or f"HTTP_{error.code}"),
-                str(message or f"Weora 请求失败（HTTP {error.code}）。"),
-            ) from error
-        except (URLError, TimeoutError, OSError) as error:
-            raise CollabError("WEORA_UNREACHABLE", "连接 Weora 失败。重试发送时请复用原来的幂等键。") from error
+        return request_json(method, self.path + path, data, token=self.token, key=key, timeout=self.timeout)
 
 
 def as_object(value: JsonValue) -> dict[str, JsonValue]:
@@ -139,16 +168,20 @@ def items(value: dict[str, JsonValue]) -> list[dict[str, JsonValue]]:
     return [as_object(row) for row in rows]
 
 
-def paired_client(*, timeout: float = 12) -> Client:
+def read_config() -> dict[str, JsonValue]:
     try:
-        raw = as_object(json.loads(config_path().read_text(encoding="utf-8")))
+        return as_object(json.loads(config_path().read_text(encoding="utf-8")))
     except (OSError, ValueError):
-        raw = {}
+        return {}
+
+
+def paired_client(*, timeout: float = 12) -> Client:
+    raw = read_config()
     base = os.environ.get("WEORA_COLLAB_URL", str(raw.get("base") or "")).rstrip("/")
     workspace = os.environ.get("WEORA_COLLAB_WORKSPACE", str(raw.get("workspace") or ""))
     device_id = str(raw.get("device_id") or "")
     if not base or not workspace:
-        raise CollabError("DEVICE_NOT_PAIRED", "请先在 Weora 的「本地 Agent」页配对设备。")
+        raise CollabError("DEVICE_NOT_PAIRED", "请先运行 weora login --url <Weora 服务地址>。")
     # 环境变量只用于调用方已管理的密钥注入，例如隔离的集成测试。
     account = f"{base}/{workspace}"
     if device_id:
@@ -166,7 +199,11 @@ def pair(base: str, workspace: str, code: str) -> dict[str, JsonValue]:
     device_id = result.get("id")
     if not isinstance(secret, str) or not isinstance(device_id, str):
         raise CollabError("INVALID_RESPONSE", "Weora 没有返回设备凭据。")
+    save_device(client, device_id, secret)
+    return result
+
+
+def save_device(client: Client, device_id: str, secret: str) -> None:
     # 同一个系统账户可能并行连接同一工作空间的多个测试设备。
     keyring.set_password(SERVICE, f"{client.account}/{device_id}", secret)
-    write_json(config_path(), {"base": client.base, "workspace": workspace, "device_id": device_id})
-    return result
+    write_json(config_path(), {"base": client.base, "workspace": client.workspace, "device_id": device_id})

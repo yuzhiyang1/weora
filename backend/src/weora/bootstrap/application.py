@@ -37,6 +37,7 @@ from weora.modules.collaboration.agent_mail_api import router as agent_mail_rout
 from weora.modules.collaboration.api import router as tasks_router
 from weora.modules.collaboration.application.inbox import InboxService
 from weora.modules.collaboration.application.tasks import TaskRecord
+from weora.modules.collaboration.cli_login_api import router as cli_login_router
 from weora.modules.collaboration.inbox_api import router as inbox_router
 from weora.modules.collaboration.infrastructure.inbox import InboxStore
 from weora.modules.computers.api import router as computer_router
@@ -82,8 +83,10 @@ from weora.modules.runs.infrastructure.module_access import RunContentGuard
 from weora.modules.runs.infrastructure.project_catalog import ProjectsModuleCatalog
 from weora.modules.runs.infrastructure.unit_of_work import SqlAlchemyRunsUnitOfWork
 from weora.modules.runs.infrastructure.watch import RunWatch
+from weora.modules.skills.api.distribution_routes import router as skill_distribution_router
 from weora.modules.skills.api.routes import router as skills_router
 from weora.modules.skills.application.service import SkillRegistryService
+from weora.modules.skills.infrastructure.distribution import grant_cli_skill_sync
 from weora.modules.skills.infrastructure.unit_of_work import SqlAlchemySkillsUnitOfWork
 from weora.shared.api.request_id import RequestIdMiddleware
 from weora.shared.infrastructure.database import create_database
@@ -181,10 +184,11 @@ def create_app(
         object_storage=object_storage,
     )
     app.state.skill_registry_service = skill_registry_service
+    app.state.grant_cli_skill_sync = grant_cli_skill_sync
     app.state.agent_registry_service = AgentRegistryService(
         uow_factory=lambda: SqlAlchemyAgentsUnitOfWork(session_factory),
         skill_catalog=SkillsModuleVersionCatalog(skill_registry_service),
-        runtime_context_assembler=AgentRuntimeContextAssembler(object_storage),
+        runtime_context_assembler=AgentRuntimeContextAssembler(skill_registry_service.read_version_archive),
     )
     guard = RunContentGuard(app.state.identity_service)
 
@@ -411,10 +415,12 @@ def create_app(
     app.include_router(identity_router, prefix=resolved_settings.api_prefix)
     app.include_router(workspace_identity_router, prefix=resolved_settings.api_prefix)
     app.include_router(skills_router, prefix=resolved_settings.api_prefix)
+    app.include_router(skill_distribution_router, prefix=resolved_settings.api_prefix)
     app.include_router(agents_router, prefix=resolved_settings.api_prefix)
     app.include_router(runs_router, prefix=resolved_settings.api_prefix)
     app.include_router(tasks_router, prefix=resolved_settings.api_prefix)
     app.include_router(agent_mail_router, prefix=resolved_settings.api_prefix)
+    app.include_router(cli_login_router, prefix=resolved_settings.api_prefix)
     app.include_router(inbox_router, prefix=resolved_settings.api_prefix)
     app.include_router(computer_router, prefix=resolved_settings.api_prefix)
     app.include_router(computer_credential_router, prefix=resolved_settings.api_prefix)

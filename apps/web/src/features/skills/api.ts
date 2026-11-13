@@ -22,6 +22,13 @@ export type SkillWarning = {
   blocks_publish: boolean;
 };
 
+/** 版本包内的展示信息，安装和引用继续使用 slug。 */
+export type SkillInterface = {
+  display_name: string | null;
+  short_description: string | null;
+  default_prompt: string | null;
+};
+
 export type SkillDraft = {
   package_name: string;
   package_size: number;
@@ -31,6 +38,8 @@ export type SkillDraft = {
   compatibility: SkillCompatibility[];
   warnings: SkillWarning[];
   updated_at: string;
+  uploader_name: string | null;
+  interface: SkillInterface | null;
 };
 
 export type SkillSummary = {
@@ -41,11 +50,13 @@ export type SkillSummary = {
   status: "active" | "archived";
   latest_published_version: string | null;
   updated_at: string;
+  uploader_name: string | null;
 };
 
 export type SkillDetail = SkillSummary & {
   draft: SkillDraft | null;
   created_at: string;
+  interface: SkillInterface | null;
 };
 
 export type SkillVersion = {
@@ -61,12 +72,29 @@ export type SkillVersion = {
   warnings: SkillWarning[];
   published_by: string;
   published_at: string;
+  uploader_name: string | null;
+  interface: SkillInterface | null;
 };
+
+export type SkillContribution = {
+  id: string;
+  uploader_name: string | null;
+  package_name: string;
+  created_at: string;
+};
+
+/** 预览请求必须明确指定发布版本、当前草稿或候选包。 */
+export type SkillFileSource =
+  | { version: string }
+  | { contributionId: string }
+  | { draft: string };
 
 export type SkillEvent = {
   id: string;
   event_type: string;
   actor_id: string;
+  /** 下载时的显示名，历史记录可用当前成员名补齐。 */
+  actor_name: string | null;
   request_id: string;
   data: Record<string, unknown>;
   occurred_at: string;
@@ -170,6 +198,40 @@ export function getSkill(
   return request(workspaceId, `/${skillId}`);
 }
 
+/** 源文件作为 JSON 文本返回，浏览器仅在阅读区渲染。 */
+export function previewSkillFile(
+  workspaceId: string,
+  skillId: string,
+  source: SkillFileSource,
+  path: string,
+  signal: AbortSignal,
+): Promise<{ text: string | null }> {
+  const params = new URLSearchParams({ path });
+  if ("version" in source) params.set("version", source.version);
+  if ("contributionId" in source) params.set("contribution_id", source.contributionId);
+  if ("draft" in source) params.set("draft_sha256", source.draft);
+  return request(workspaceId, `/${skillId}/files/preview?${params}`, { signal });
+}
+
+/** 仅管理员能查询同名上传的待审核包。 */
+export function listSkillContributions(workspaceId: string, skillId: string): Promise<SkillContribution[]> {
+  return request(workspaceId, `/${skillId}/contributions`);
+}
+
+/** 复用草稿校验报告显示候选包。 */
+export function getSkillContribution(workspaceId: string, skillId: string, id: string): Promise<SkillDraft> {
+  return request(workspaceId, `/${skillId}/contributions/${id}`);
+}
+
+/** 接受时使用服务端修订校验，防止覆盖后来上传的草稿。 */
+export function decideSkillContribution(workspaceId: string, skillId: string, id: string, accept: boolean): Promise<void> {
+  return request(workspaceId, `/${skillId}/contributions/${id}/decision`, {
+    method: "POST",
+    headers: writeHeaders("application/json"),
+    body: JSON.stringify({ accept }),
+  });
+}
+
 export function updateSkill(
   workspaceId: string,
   skillId: string,
@@ -199,7 +261,7 @@ export function replaceSkillDraft(
 export function publishSkill(
   workspaceId: string,
   skillId: string,
-  input: { version: string; changelog: string },
+  input: { version: string; changelog: string; draft_sha256: string },
 ): Promise<SkillVersion> {
   return request(workspaceId, `/${skillId}/publish`, {
     method: "POST",

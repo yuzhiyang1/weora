@@ -29,6 +29,7 @@ import {
   type SkillSummary,
 } from "./api";
 import { SkillPackageDialog } from "./SkillPackageDialog";
+import "./skill-reader.css";
 
 export function SkillsPage() {
   const { principal } = useAuth();
@@ -74,10 +75,17 @@ export function SkillsPage() {
           <SkillLogo />
           <span>
             <strong>{skill.display_name}</strong>
+            {skill.display_name !== skill.slug && <code className="skill-list-slug">{skill.slug}</code>}
             <small>{skill.description}</small>
           </span>
         </Link>
       ),
+    },
+    {
+      title: "上传人",
+      dataIndex: "uploader_name",
+      width: 116,
+      render: (value: string | null) => <span className="skill-uploader">{value || "未知"}</span>,
     },
     {
       title: "状态",
@@ -118,7 +126,6 @@ export function SkillsPage() {
     <section className="asset-page asset-mobile-list page-enter">
       <header className="page-header">
         <div>
-          <span className="page-eyebrow">ASSET REGISTRY</span>
           <Typography.Title heading={1}>Skills</Typography.Title>
           <Typography.Paragraph>
             上传、校验、发布并分发团队可复用的能力包。

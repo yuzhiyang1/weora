@@ -37,11 +37,16 @@ services:
       WEORA_REGISTRATION_ENABLED: "${WEORA_REGISTRATION_ENABLED:-true}"
       WEORA_WORKSPACE_INVITE_KEY: "${WEORA_WORKSPACE_INVITE_KEY:-}"
       WEORA_SESSION_COOKIE_SECURE: "false"
+      # 仅信任本机和前端 Nginx 提供的客户端地址。
+      FORWARDED_ALLOW_IPS: "127.0.0.1,${WEORA_PROXY_IP:-172.31.247.2}"
     depends_on:
       postgres:
         condition: service_healthy
     ports:
       - "8000:8000"
+    networks:
+      default: {}
+      web-proxy: {}
     healthcheck:
       test:
         [
@@ -63,6 +68,17 @@ services:
         condition: service_healthy
     ports:
       - "3000:80"
+    networks:
+      web-proxy:
+        ipv4_address: "${WEORA_PROXY_IP:-172.31.247.2}"
+
+networks:
+  web-proxy:
+    ipam:
+      config:
+        - subnet: "${WEORA_PROXY_SUBNET:-172.31.247.0/24}"
+          # 动态地址池避开 Nginx 的固定地址，后端先启动时也不会占用它。
+          ip_range: "${WEORA_PROXY_IP_RANGE:-172.31.247.128/25}"
 
 volumes:
   postgres-data:

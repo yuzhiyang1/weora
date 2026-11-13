@@ -11,7 +11,11 @@ services:
     volumes:
       - ./backend/alembic.ini:/app/alembic.ini:ro
       - ./backend/migrations:/app/migrations:ro
-    networks: [default, computer-control, computers]
+    networks:
+      default: {}
+      web-proxy: {}
+      computer-control: {}
+      computers: {}
 
   frontend:
     ports: !override ["127.0.0.1:3000:80"]

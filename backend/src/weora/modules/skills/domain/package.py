@@ -38,6 +38,8 @@ _SENSITIVE_FILE_NAMES = {
     "id_ed25519",
 }
 
+_MAX_INTERFACE_BYTES = 64 * 1024
+
 
 @dataclass(frozen=True, slots=True)
 class SkillFile:
@@ -69,6 +71,15 @@ class SkillCompatibility:
 
 
 @dataclass(frozen=True, slots=True)
+class SkillInterface:
+    """包内可选展示信息，按草稿和发布版本保存快照。"""
+
+    display_name: str | None = None
+    short_description: str | None = None
+    default_prompt: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class InspectedSkillPackage:
     """校验成功后可安全持久化的标准化 Skill 包。"""
 
@@ -81,6 +92,7 @@ class InspectedSkillPackage:
     files: tuple[SkillFile, ...]
     compatibility: tuple[SkillCompatibility, ...]
     warnings: tuple[SkillWarning, ...]
+    interface: SkillInterface | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,6 +103,42 @@ class SkillPackageLimits:
     max_expanded_bytes: int = 200 * 1024 * 1024
     max_entries: int = 5_000
     max_manifest_bytes: int = 1024 * 1024
+
+
+def parse_skill_interface(content: bytes | None) -> SkillInterface | None:
+    """只提取展示字段，历史包和其他 Runtime 的可选配置允许缺失或无效。"""
+    if not content or len(content) > _MAX_INTERFACE_BYTES:
+        return None
+    try:
+        document = yaml.safe_load(content.decode("utf-8"))
+    except (UnicodeError, yaml.YAMLError, RecursionError):
+        return None
+    interface = document.get("interface") if isinstance(document, dict) else None
+    if not isinstance(interface, dict):
+        return None
+    fields: dict[str, str] = {}
+    for key, limit in (("display_name", 120), ("short_description", 2000), ("default_prompt", 8000)):
+        value = interface.get(key)
+        if isinstance(value, str) and 0 < len(value.strip()) <= limit and "\x00" not in value:
+            fields[key] = value.strip()
+    return SkillInterface(**fields) if fields else None
+
+
+def read_skill_interface(archive: bytes) -> SkillInterface | None:
+    """从历史规范包读取可选元数据，避免解压整个 Skill。"""
+    try:
+        with ZipFile(BytesIO(archive)) as package:
+            for entry in package.infolist():
+                parts = PurePosixPath(entry.filename).parts
+                if (
+                    len(parts) == 3
+                    and parts[1:] == ("agents", "openai.yaml")
+                    and entry.file_size <= _MAX_INTERFACE_BYTES
+                ):
+                    return parse_skill_interface(package.read(entry))
+    except (BadZipFile, EOFError, OSError, RuntimeError):
+        return None
+    return None
 
 
 class SkillPackageInspector:
@@ -138,6 +186,7 @@ class SkillPackageInspector:
             files=files,
             compatibility=self._evaluate_compatibility(warnings),
             warnings=warnings,
+            interface=parse_skill_interface(files_by_path.get("agents/openai.yaml")),
         )
 
     def _read_files(

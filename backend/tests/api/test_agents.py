@@ -18,8 +18,8 @@ from tests.support.settings import IsolatedAppSettings
 from weora.bootstrap.application import create_app
 from weora.modules.agents.application.service import AgentActor
 from weora.modules.agents.domain.errors import AgentRuntimeMaterialInvalidError
+from weora.modules.skills.infrastructure.models import SkillPackageModel
 from weora.shared.infrastructure.database import Base
-from weora.shared.object_storage import BytesObjectSource, ObjectKey
 from weora.shared.object_storage.testing import InMemoryObjectStorage
 
 
@@ -219,9 +219,7 @@ async def test_agent_version_keeps_published_skill_binding_after_draft_changes(
     assert update_draft.status_code == 200, update_draft.text
     assert update_draft.json()["skills"][0]["skill_version_id"] == skill_v2["id"]
 
-    old_version = await agents_client.get(
-        f"{agents_path}/{created['id']}/versions/0.1.0"
-    )
+    old_version = await agents_client.get(f"{agents_path}/{created['id']}/versions/0.1.0")
     assert old_version.status_code == 200
     assert old_version.json()["system_prompt"] == "你是企业会议纪要助手。"
     assert old_version.json()["skills"][0]["skill_version_id"] == skill_v1["id"]
@@ -382,16 +380,10 @@ async def test_runtime_context_rejects_skill_package_that_no_longer_matches_snap
         agent_id=UUID(created.json()["id"]),
         version="0.1.0",
     )
-    object_key = ObjectKey(version.skills[0].storage_key)
-    await agents_runtime_harness.storage.delete(object_key)
-    await agents_runtime_harness.storage.put(
-        object_key,
-        BytesObjectSource(
-            data=b"tampered package",
-            content_type="application/zip",
-            filename="tampered.skill",
-        ),
-    )
+    async with agents_runtime_harness.app.state.db_session_factory() as db, db.begin():
+        package = await db.get(SkillPackageModel, (workspace_id, version.skills[0].package_sha256))
+        assert package is not None
+        package.archive_bytes = b"tampered package"
 
     with pytest.raises(AgentRuntimeMaterialInvalidError):
         await agents_runtime_harness.app.state.agent_registry_service.build_runtime_context(

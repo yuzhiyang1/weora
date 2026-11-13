@@ -3,17 +3,53 @@
 import json
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 from uuid import uuid4
 
-from weora_cli.collab_client import Client, CollabError, pair, paired_client
+from weora_cli.cli_auth import _finish
+from weora_cli.collab_client import (
+    SERVICE,
+    Client,
+    CollabError,
+    config_path,
+    pair,
+    paired_client,
+    read_config,
+    write_json,
+)
 from weora_cli.collab_native import adapter, install_hook, profile
 from weora_cli.collaboration import _resolve, wake_pending
 
 
 class CollaborationTests(unittest.TestCase):
+    def test_switch_server_clears_previous_credential_without_contacting_old_server(self) -> None:
+        previous_base, new_base = "https://old.example.com", "https://new.example.com"
+        workspace, old_device, new_device = (str(uuid4()) for _ in range(3))
+        login_id = uuid4()
+        old_account = f"{previous_base}/{workspace}/{old_device}"
+        with (
+            tempfile.TemporaryDirectory() as folder,
+            patch.dict(os.environ, {"WEORA_COLLAB_CONFIG": str(Path(folder) / "collaboration.json")}),
+            patch("weora_cli.cli_auth.request_json", return_value={
+                "status": "authorized", "id": new_device, "workspace_id": workspace, "token": "new-token",
+            }),
+            patch.object(Client, "request") as device_request,
+            patch("weora_cli.cli_auth.keyring.get_password", return_value="old-token"),
+            patch("weora_cli.cli_auth.keyring.delete_password") as forget,
+            patch("weora_cli.cli_auth.keyring.set_password") as save,
+        ):
+            write_json(config_path(), {"base": previous_base, "workspace": workspace, "device_id": old_device})
+            _finish(login_id, {
+                "base": new_base, "verifier": "proof", "interval": 1, "deadline": time.time() + 30,
+            })
+            device_request.assert_not_called()
+            forget.assert_any_call(SERVICE, old_account)
+            save.assert_called_once_with(SERVICE, f"{new_base}/{workspace}/{new_device}", "new-token")
+            self.assertEqual(read_config(), {"base": new_base, "workspace": workspace, "device_id": new_device})
+
     def test_pairing_two_devices_in_one_workspace_keeps_both_credentials(self) -> None:
         workspace, first, second = (str(uuid4()) for _ in range(3))
         base = "http://127.0.0.1:5173"
