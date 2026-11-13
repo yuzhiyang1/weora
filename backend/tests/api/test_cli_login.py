@@ -111,9 +111,22 @@ async def test_browser_approval_binds_account_and_logout_revokes_device(
     assert repeated["id"] == accepted["id"] and repeated["token"] == accepted["token"]
     auth = {"Authorization": "Bearer " + accepted["token"]}
     me = f"/api/v1/workspaces/{workspace}/agent-collaboration/device-self"
+    distribution = f"/api/v1/workspaces/{workspace}/skill-distribution"
+    manifest = await client.get(distribution + "/manifest?runtime=codex", headers=auth)
+    assert manifest.status_code == 200, manifest.text
+    assert manifest.json()["device_id"] == accepted["id"]
+    assert manifest.json()["usage_enabled"] is True
     verified = await client.get(me, headers=auth)
     assert verified.json()["user_id"] == user_id
     assert "token" not in verified.json()
+    grant = f"{distribution}/devices/{accepted['id']}/grant"
+    # 同一登录请求的兑换重试不覆盖设备所有者的选择。
+    assert (await client.put(grant, headers=csrf(client), json={"usage_enabled": False})).status_code == 200
+    assert (await client.post(path + "/poll", json=payload)).json()["id"] == accepted["id"]
+    assert (await client.get(distribution + "/manifest?runtime=codex", headers=auth)).json()["usage_enabled"] is False
+    assert (await client.delete(grant, headers=csrf(client))).status_code == 204
+    assert (await client.post(path + "/poll", json=payload)).json()["id"] == accepted["id"]
+    assert (await client.get(distribution + "/manifest?runtime=codex", headers=auth)).status_code == 403
     assert (await client.delete(me, headers=auth)).status_code == 204
     assert (await client.delete(me, headers=auth)).status_code == 204
     assert (await client.get(me, headers=auth)).status_code == 401

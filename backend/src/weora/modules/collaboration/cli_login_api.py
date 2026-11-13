@@ -1,13 +1,15 @@
 """浏览器确认后，为 CLI 发放现有本地 Agent 设备凭据。"""
 
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from hmac import compare_digest
-from typing import Annotated, Literal
+from typing import Annotated, Literal, cast
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import StringConstraints
 from sqlalchemy import delete, func, select, text
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from weora.modules.collaboration.agent_mail_api import Input, Name, Read, Write, _db
 from weora.modules.collaboration.application.agent_mail import DEVICE_TTL
@@ -123,6 +125,11 @@ async def decide(
         db.add(device)
         await db.flush()
         row.device_id = device.id
+        # 同一次浏览器确认授权设备同步。轮询重试不能重新开启已被成员关闭的同步。
+        grant_skill_sync = cast(
+            Callable[[AsyncSession, UUID, UUID], Awaitable[None]], request.app.state.grant_cli_skill_sync
+        )
+        await grant_skill_sync(db, principal.workspace_id, device.id)
         return {"status": "approved"}
 
 

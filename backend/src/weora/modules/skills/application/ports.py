@@ -7,7 +7,7 @@ from types import TracebackType
 from typing import Protocol
 from uuid import UUID
 
-from weora.modules.skills.domain.package import SkillCompatibility, SkillFile, SkillWarning
+from weora.modules.skills.domain.package import SkillCompatibility, SkillFile, SkillInterface, SkillWarning
 
 
 @dataclass(frozen=True, slots=True)
@@ -23,6 +23,9 @@ class SkillDraftRecord:
     compatibility: tuple[SkillCompatibility, ...]
     warnings: tuple[SkillWarning, ...]
     updated_at: datetime
+    interface: SkillInterface | None = None
+    uploader_name: str | None = None
+    uploaded_by: UUID | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,6 +43,8 @@ class SkillRecord:
     created_at: datetime
     updated_at: datetime
     draft: SkillDraftRecord | None = None
+    uploader_name: str | None = None
+    interface: SkillInterface | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,6 +66,22 @@ class SkillVersionRecord:
     warnings: tuple[SkillWarning, ...]
     published_by: UUID
     published_at: datetime
+    interface: SkillInterface | None = None
+    uploader_name: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class SkillContribution:
+    """同名包的待审提案，记录提交时的发布版本和草稿修订。"""
+
+    id: UUID
+    skill_id: UUID
+    uploaded_by: UUID
+    uploader_name: str | None
+    package_sha256: str
+    package_name: str
+    created_at: datetime
+    base_revision: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,6 +129,21 @@ class SkillStore(Protocol):
     async def put_package(self, workspace_id: UUID, digest: str, archive: bytes) -> None: ...
 
     async def read_package(self, workspace_id: UUID, digest: str) -> bytes | None: ...
+
+    async def backfill_interface(
+        self,
+        workspace_id: UUID,
+        record: SkillDraftRecord | SkillVersionRecord,
+        interface: SkillInterface,
+    ) -> None: ...
+
+    async def lock_skill_by_slug(self, workspace_id: UUID, slug: str) -> UUID | None: ...
+
+    async def add_contribution(self, workspace_id: UUID, item: SkillContribution) -> None: ...
+
+    async def list_contributions(self, workspace_id: UUID, skill_id: UUID) -> list[SkillContribution]: ...
+
+    async def remove_contribution(self, workspace_id: UUID, skill_id: UUID, contribution_id: UUID) -> None: ...
 
     async def create_skill(
         self,

@@ -8,13 +8,17 @@ from fastapi.responses import Response
 
 from weora.modules.identity.api.dependencies import current_principal, write_principal
 from weora.modules.identity.application.ports import PrincipalRecord
+from weora.modules.identity.application.service import IdentityService
 from weora.modules.skills.api.schemas import (
     ErrorResponse,
     PublishSkillRequest,
+    SkillContributionDecision,
+    SkillContributionResponse,
     SkillDetailResponse,
     SkillDraftResponse,
     SkillEventListResponse,
     SkillEventResponse,
+    SkillFilePreviewResponse,
     SkillListResponse,
     SkillSummaryResponse,
     SkillVersionListResponse,
@@ -26,7 +30,9 @@ from weora.modules.skills.domain.errors import (
     SkillArchivedError,
     SkillArchiveInvalidError,
     SkillArchiveUnsafePathError,
+    SkillContributionStaleError,
     SkillCursorInvalidError,
+    SkillDraftChangedError,
     SkillDraftNotReadyError,
     SkillManifestInvalidError,
     SkillManifestMissingError,
@@ -46,6 +52,17 @@ from weora.shared.api.request_id import get_request_id
 
 router = APIRouter(prefix="/workspaces/{workspace_id}/skills", tags=["Skills"])
 _MAX_UPLOAD_READ_BYTES = 50 * 1024 * 1024 + 1
+PackageUpload = Annotated[UploadFile, File(description=".zip 或 .skill 格式的完整 Skill 目录")]
+ReadPrincipal = Annotated[PrincipalRecord, Depends(current_principal)]
+WritePrincipal = Annotated[PrincipalRecord, Depends(write_principal)]
+
+
+async def read_skill_upload(package: UploadFile) -> tuple[str, bytes]:
+    """CLI 和控制台共用文件类型、名称长度及读取上限。"""
+    package_name = package.filename or "skill.skill"
+    if len(package_name) > 255 or not package_name.lower().endswith((".zip", ".skill")):
+        _raise_http_error(SkillArchiveInvalidError())
+    return package_name, await package.read(_MAX_UPLOAD_READ_BYTES)
 
 
 def _service(request: Request) -> SkillRegistryService:
@@ -57,6 +74,7 @@ def _actor(principal: PrincipalRecord) -> SkillActor:
         user_id=principal.user_id,
         workspace_id=principal.workspace_id,
         role=principal.role,
+        display_name=principal.display_name,
     )
 
 
@@ -66,7 +84,16 @@ def _raise_http_error(error: SkillRegistryError) -> NoReturn:
         http_status = status.HTTP_404_NOT_FOUND
     elif isinstance(error, SkillPermissionDeniedError):
         http_status = status.HTTP_403_FORBIDDEN
-    elif isinstance(error, (SkillSlugConflictError, SkillVersionConflictError, SkillArchivedError)):
+    elif isinstance(
+        error,
+        (
+            SkillSlugConflictError,
+            SkillVersionConflictError,
+            SkillArchivedError,
+            SkillContributionStaleError,
+            SkillDraftChangedError,
+        ),
+    ):
         http_status = status.HTTP_409_CONFLICT
     elif isinstance(error, SkillStorageUnavailableError):
         http_status = status.HTTP_503_SERVICE_UNAVAILABLE
@@ -113,10 +140,7 @@ async def create_skill(
     principal: Annotated[PrincipalRecord, Depends(write_principal)],
 ) -> SkillDetailResponse:
     """上传、校验并创建一个带初始草稿的 Skill。"""
-    package_name = package.filename or "skill.skill"
-    if not package_name.lower().endswith((".zip", ".skill")):
-        _raise_http_error(SkillArchiveInvalidError())
-    archive_bytes = await package.read(_MAX_UPLOAD_READ_BYTES)
+    package_name, archive_bytes = await read_skill_upload(package)
     try:
         skill = await _service(request).create_skill(
             actor=_actor(principal),
@@ -128,6 +152,89 @@ async def create_skill(
     except SkillRegistryError as exc:
         _raise_http_error(exc)
     return SkillDetailResponse.from_record(skill)
+
+
+@router.get("/{skill_id}/files/preview", response_model=SkillFilePreviewResponse)
+async def preview_skill_file(
+    workspace_id: UUID,
+    skill_id: UUID,
+    request: Request,
+    principal: ReadPrincipal,
+    path: Annotated[str, Query(min_length=1, max_length=4096)],
+    version: Annotated[str | None, Query(min_length=1, max_length=64)] = None,
+    contribution_id: UUID | None = None,
+    draft_sha256: Annotated[str | None, Query(pattern="^[a-f0-9]{64}$")] = None,
+) -> SkillFilePreviewResponse:
+    """返回指定包中单个文件的文本，避免浏览器下载完整 ZIP。"""
+    if sum(bool(value) for value in (version, contribution_id, draft_sha256)) > 1:
+        _raise_http_error(SkillNotFoundError())
+    try:
+        text = await _service(request).preview_file(
+            _actor(principal),
+            workspace_id,
+            skill_id,
+            path,
+            version=version,
+            contribution_id=contribution_id,
+            draft_sha256=draft_sha256,
+        )
+    except SkillRegistryError as exc:
+        _raise_http_error(exc)
+    return SkillFilePreviewResponse(text=text)
+
+
+@router.get("/{skill_id}/contributions", response_model=list[SkillContributionResponse])
+async def list_contributions(
+    workspace_id: UUID,
+    skill_id: UUID,
+    request: Request,
+    principal: ReadPrincipal,
+) -> list[SkillContributionResponse]:
+    """管理员查看指定资产的待审队列。"""
+    try:
+        items = await _service(request).contributions(_actor(principal), workspace_id, skill_id)
+    except SkillRegistryError as exc:
+        _raise_http_error(exc)
+    return [SkillContributionResponse.from_record(item) for item in items]
+
+
+@router.get("/{skill_id}/contributions/{contribution_id}", response_model=SkillDraftResponse)
+async def get_contribution(
+    workspace_id: UUID,
+    skill_id: UUID,
+    contribution_id: UUID,
+    request: Request,
+    principal: ReadPrincipal,
+) -> SkillDraftResponse:
+    """复用草稿校验报告供管理员审阅。"""
+    try:
+        draft = await _service(request).contribution_draft(_actor(principal), workspace_id, skill_id, contribution_id)
+    except SkillRegistryError as exc:
+        _raise_http_error(exc)
+    return SkillDraftResponse.from_record(draft)
+
+
+@router.post("/{skill_id}/contributions/{contribution_id}/decision", status_code=status.HTTP_204_NO_CONTENT)
+async def decide_contribution(
+    workspace_id: UUID,
+    skill_id: UUID,
+    contribution_id: UUID,
+    payload: SkillContributionDecision,
+    request: Request,
+    principal: WritePrincipal,
+) -> None:
+    """接受为待发布草稿，或驳回候选包。"""
+    try:
+        await _service(request).review_contribution(
+            _actor(principal),
+            workspace_id,
+            skill_id,
+            contribution_id,
+            accept=payload.accept,
+            request_id=get_request_id() or "unknown",
+        )
+    except SkillRegistryError as exc:
+        _raise_http_error(exc)
 
 
 @router.get(
@@ -216,16 +323,14 @@ async def replace_skill_draft(
     principal: Annotated[PrincipalRecord, Depends(write_principal)],
 ) -> SkillDraftResponse:
     """校验并替换当前草稿，历史发布版本不发生变化。"""
-    package_name = package.filename or "skill.skill"
-    if not package_name.lower().endswith((".zip", ".skill")):
-        _raise_http_error(SkillArchiveInvalidError())
+    package_name, archive_bytes = await read_skill_upload(package)
     try:
         draft = await _service(request).replace_draft(
             actor=_actor(principal),
             workspace_id=workspace_id,
             skill_id=skill_id,
             package_name=package_name,
-            archive_bytes=await package.read(_MAX_UPLOAD_READ_BYTES),
+            archive_bytes=archive_bytes,
             request_id=get_request_id() or "unknown",
         )
     except SkillRegistryError as exc:
@@ -274,6 +379,7 @@ async def publish_skill(
             skill_id=skill_id,
             version=payload.version,
             changelog=payload.changelog,
+            draft_sha256=payload.draft_sha256,
             request_id=get_request_id() or "unknown",
         )
     except SkillRegistryError as exc:
@@ -425,4 +531,10 @@ async def list_skill_events(
         )
     except SkillRegistryError as exc:
         _raise_http_error(exc)
-    return SkillEventListResponse(items=[SkillEventResponse.from_record(item) for item in events])
+    if not events:
+        return SkillEventListResponse(items=[])
+    identity = cast(IdentityService, request.app.state.identity_service)
+    names = dict(await identity.workspace_member_names(principal))
+    return SkillEventListResponse(
+        items=[SkillEventResponse.from_record(item, names.get(item.actor_id)) for item in events]
+    )

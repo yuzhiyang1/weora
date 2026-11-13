@@ -86,6 +86,7 @@ from weora.modules.runs.infrastructure.watch import RunWatch
 from weora.modules.skills.api.distribution_routes import router as skill_distribution_router
 from weora.modules.skills.api.routes import router as skills_router
 from weora.modules.skills.application.service import SkillRegistryService
+from weora.modules.skills.infrastructure.distribution import grant_cli_skill_sync
 from weora.modules.skills.infrastructure.unit_of_work import SqlAlchemySkillsUnitOfWork
 from weora.shared.api.request_id import RequestIdMiddleware
 from weora.shared.infrastructure.database import create_database
@@ -183,6 +184,7 @@ def create_app(
         object_storage=object_storage,
     )
     app.state.skill_registry_service = skill_registry_service
+    app.state.grant_cli_skill_sync = grant_cli_skill_sync
     app.state.agent_registry_service = AgentRegistryService(
         uow_factory=lambda: SqlAlchemyAgentsUnitOfWork(session_factory),
         skill_catalog=SkillsModuleVersionCatalog(skill_registry_service),

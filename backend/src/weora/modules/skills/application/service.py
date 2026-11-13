@@ -4,12 +4,16 @@ import base64
 import binascii
 import hashlib
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+from io import BytesIO
+from pathlib import PurePosixPath
 from uuid import UUID, uuid4
+from zipfile import BadZipFile, ZipFile
 
 from weora.modules.skills.application.ports import (
     PublishedSkillVersionRecord,
+    SkillContribution,
     SkillDownload,
     SkillDraftRecord,
     SkillEventRecord,
@@ -21,18 +25,21 @@ from weora.modules.skills.application.ports import (
 )
 from weora.modules.skills.domain.errors import (
     SkillArchivedError,
+    SkillContributionStaleError,
     SkillCursorInvalidError,
+    SkillDraftChangedError,
     SkillDraftNotReadyError,
     SkillManifestInvalidError,
     SkillNotFoundError,
     SkillObjectMissingError,
     SkillPermissionDeniedError,
+    SkillSlugConflictError,
     SkillStorageUnavailableError,
     SkillVersionConflictError,
     SkillVersionInvalidError,
     WorkspaceAccessDeniedError,
 )
-from weora.modules.skills.domain.package import SkillPackageInspector
+from weora.modules.skills.domain.package import InspectedSkillPackage, SkillPackageInspector, read_skill_interface
 from weora.shared.object_storage import ObjectKey, ObjectStoragePort
 from weora.shared.object_storage.errors import ObjectNotFoundError
 
@@ -50,6 +57,7 @@ class SkillActor:
     user_id: UUID
     workspace_id: UUID
     role: str
+    display_name: str | None = None
 
 
 class SkillRegistryService:
@@ -81,9 +89,17 @@ class SkillRegistryService:
         self._require_workspace(actor, workspace_id)
         self._require_write_role(actor)
         inspected = self._package_inspector.inspect(archive_bytes)
-        now = datetime.now(UTC)
-        skill_id = uuid4()
-        draft = SkillDraftRecord(
+        return await self._create_draft_skill(actor, workspace_id, package_name, inspected, request_id)
+
+    @staticmethod
+    def _draft(
+        inspected: InspectedSkillPackage,
+        package_name: str,
+        uploader_name: str | None,
+        uploaded_by: UUID,
+    ) -> SkillDraftRecord:
+        """将校验结果和真实上传人固定为同一份草稿快照。"""
+        return SkillDraftRecord(
             package_name=package_name,
             storage_key="",
             package_size=len(inspected.archive),
@@ -92,10 +108,25 @@ class SkillRegistryService:
             files=inspected.files,
             compatibility=inspected.compatibility,
             warnings=inspected.warnings,
-            updated_at=now,
+            updated_at=datetime.now(UTC),
+            interface=inspected.interface,
+            uploader_name=uploader_name,
+            uploaded_by=uploaded_by,
         )
+
+    async def _create_draft_skill(
+        self,
+        actor: SkillActor,
+        workspace_id: UUID,
+        package_name: str,
+        inspected: InspectedSkillPackage,
+        request_id: str,
+    ) -> SkillRecord:
+        """为新 slug 创建初始草稿，唯一约束处理并发注册。"""
+        now = datetime.now(UTC)
+        draft = self._draft(inspected, package_name, actor.display_name, actor.user_id)
         skill = SkillRecord(
-            id=skill_id,
+            id=uuid4(),
             workspace_id=workspace_id,
             slug=inspected.slug,
             display_name=inspected.name,
@@ -106,6 +137,8 @@ class SkillRegistryService:
             created_at=now,
             updated_at=now,
             draft=draft,
+            uploader_name=actor.display_name,
+            interface=draft.interface,
         )
         async with self._uow_factory() as uow:
             await uow.store.put_package(workspace_id, inspected.package_sha256, inspected.archive)
@@ -116,7 +149,251 @@ class SkillRegistryService:
                 request_id=request_id,
             )
             await uow.commit()
+        if draft.interface:
+            return replace(
+                skill,
+                display_name=draft.interface.display_name or skill.display_name,
+                description=draft.interface.short_description or skill.description,
+            )
         return skill
+
+    async def contribute(
+        self,
+        actor: SkillActor,
+        workspace_id: UUID,
+        package_name: str,
+        archive_bytes: bytes,
+        request_id: str,
+    ) -> tuple[UUID, str, UUID | None]:
+        """新 slug 创建待发布草稿，同名包独立待审，重试同一修订返回原记录。"""
+        self._require_workspace(actor, workspace_id)
+        inspected = self._package_inspector.inspect(archive_bytes)
+        try:
+            skill = await self._create_draft_skill(actor, workspace_id, package_name, inspected, request_id)
+        except SkillSlugConflictError:
+            return await self._contribute_existing(actor, inspected, package_name, request_id)
+        return skill.id, skill.slug, None
+
+    @staticmethod
+    def _revision(skill: SkillRecord) -> str:
+        """元数据和下载等操作不使候选包失效，草稿或发布版本变化才需要重提。"""
+        draft_at = skill.draft.updated_at.isoformat() if skill.draft else ""
+        return f"{skill.latest_published_version or ''}/{draft_at}"
+
+    async def _contribute_existing(
+        self,
+        actor: SkillActor,
+        inspected: InspectedSkillPackage,
+        package_name: str,
+        request_id: str,
+    ) -> tuple[UUID, str, UUID | None]:
+        """持有资产锁期间去重、保存候选包及审计，不接触当前草稿。"""
+        workspace_id = actor.workspace_id
+        async with self._uow_factory() as uow:
+            skill_id = await uow.store.lock_skill_by_slug(workspace_id, inspected.slug)
+            if skill_id is None:
+                raise SkillNotFoundError
+            skill = await uow.store.get_skill(workspace_id=workspace_id, skill_id=skill_id)
+            if skill is None:
+                raise SkillNotFoundError
+            if skill.status == "archived":
+                raise SkillArchivedError
+            if (
+                skill.draft
+                and skill.draft.package_sha256 == inspected.package_sha256
+                and skill.draft.uploaded_by == actor.user_id
+            ):
+                return skill.id, skill.slug, None
+            revision = self._revision(skill)
+            for item in await uow.store.list_contributions(workspace_id, skill_id):
+                if (item.uploaded_by, item.package_sha256, item.base_revision) == (
+                    actor.user_id,
+                    inspected.package_sha256,
+                    revision,
+                ):
+                    return skill.id, skill.slug, item.id
+            item = SkillContribution(
+                uuid4(),
+                skill_id,
+                actor.user_id,
+                actor.display_name,
+                inspected.package_sha256,
+                package_name,
+                datetime.now(UTC),
+                revision,
+            )
+            await uow.store.put_package(workspace_id, inspected.package_sha256, inspected.archive)
+            await uow.store.add_contribution(workspace_id, item)
+            await uow.store.add_event(
+                workspace_id=workspace_id,
+                skill_id=skill_id,
+                event_type="SKILL_CONTRIBUTION_ADDED",
+                actor_id=actor.user_id,
+                request_id=request_id,
+                data={"contribution_id": str(item.id), "content_sha256": inspected.content_sha256},
+                occurred_at=item.created_at,
+            )
+            await uow.commit()
+            return skill.id, skill.slug, item.id
+
+    async def contributions(self, actor: SkillActor, workspace_id: UUID, skill_id: UUID) -> list[SkillContribution]:
+        """待审队列只对当前工作空间的管理员开放。"""
+        self._require_write_role(actor)
+        await self.get_skill(actor=actor, workspace_id=workspace_id, skill_id=skill_id)
+        async with self._uow_factory() as uow:
+            return await uow.store.list_contributions(workspace_id, skill_id)
+
+    @staticmethod
+    async def _contribution(
+        store: SkillStore,
+        workspace_id: UUID,
+        skill_id: UUID,
+        contribution_id: UUID,
+    ) -> SkillContribution:
+        """同一资产中定位待审提案，已处理或越界的提案统一视为不存在。"""
+        for item in await store.list_contributions(workspace_id, skill_id):
+            if item.id == contribution_id:
+                return item
+        raise SkillNotFoundError
+
+    async def _contribution_package(
+        self,
+        store: SkillStore,
+        workspace_id: UUID,
+        item: SkillContribution,
+    ) -> tuple[bytes, SkillDraftRecord]:
+        """读取候选包并复核内容，生成预览和接受共用的草稿数据。"""
+        archive = await store.read_package(workspace_id, item.package_sha256)
+        if archive is None or hashlib.sha256(archive).hexdigest() != item.package_sha256:
+            raise SkillObjectMissingError
+        inspected = self._package_inspector.inspect(archive)
+        draft = self._draft(inspected, item.package_name, item.uploader_name, item.uploaded_by)
+        return archive, replace(draft, package_sha256=item.package_sha256, package_size=len(archive))
+
+    async def contribution_draft(
+        self,
+        actor: SkillActor,
+        workspace_id: UUID,
+        skill_id: UUID,
+        contribution_id: UUID,
+    ) -> SkillDraftRecord:
+        """以与发布草稿相同的格式返回候选包文件、兼容性和校验警告。"""
+        self._require_workspace(actor, workspace_id)
+        self._require_write_role(actor)
+        async with self._uow_factory() as uow:
+            item = await self._contribution(uow.store, workspace_id, skill_id, contribution_id)
+            _, draft = await self._contribution_package(uow.store, workspace_id, item)
+        return replace(draft, updated_at=item.created_at)
+
+    async def preview_file(
+        self,
+        actor: SkillActor,
+        workspace_id: UUID,
+        skill_id: UUID,
+        path: str,
+        *,
+        version: str | None,
+        contribution_id: UUID | None,
+        draft_sha256: str | None,
+    ) -> str | None:
+        """预览已登记的 UTF-8 文件，草稿与候选包仅供管理员审阅。"""
+        self._require_workspace(actor, workspace_id)
+        if not version or contribution_id:
+            self._require_write_role(actor)
+        record: SkillDraftRecord | SkillVersionRecord | None
+        async with self._uow_factory() as uow:
+            if contribution_id:
+                item = await self._contribution(uow.store, workspace_id, skill_id, contribution_id)
+                archive, record = await self._contribution_package(uow.store, workspace_id, item)
+            else:
+                if version:
+                    record = await uow.store.get_version(workspace_id=workspace_id, skill_id=skill_id, version=version)
+                else:
+                    skill = await uow.store.get_skill(workspace_id=workspace_id, skill_id=skill_id)
+                    record = skill.draft if skill else None
+                if record is None:
+                    raise SkillNotFoundError
+                if draft_sha256 and record.package_sha256 != draft_sha256:
+                    raise SkillDraftChangedError
+                file = next((entry for entry in record.files if entry.path == path), None)
+                if file is None:
+                    raise SkillNotFoundError
+                if file.size > 1024 * 1024:
+                    return None
+                archive = await self._read_archive(uow.store, workspace_id, record)
+                await uow.commit()
+        return self._text_file(archive, record, path)
+
+    @staticmethod
+    def _text_file(archive: bytes, record: SkillDraftRecord | SkillVersionRecord, path: str) -> str | None:
+        """使用清单匹配单个条目，限制内存占用并返回纯文本供客户端安全渲染。"""
+        file = next((entry for entry in record.files if entry.path == path), None)
+        if file is None:
+            raise SkillNotFoundError
+        if file.size > 1024 * 1024:
+            return None
+        try:
+            with ZipFile(BytesIO(archive)) as package:
+                for entry in package.infolist():
+                    if entry.is_dir():
+                        continue
+                    parts = PurePosixPath(entry.filename).parts
+                    if "/".join(parts[1:]) != path:
+                        continue
+                    if entry.file_size != file.size:
+                        raise SkillObjectMissingError
+                    content = package.read(entry)
+                    if hashlib.sha256(content).hexdigest() != file.sha256:
+                        raise SkillObjectMissingError
+                    return None if b"\x00" in content else content.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            return None
+        except (BadZipFile, EOFError, OSError, RuntimeError) as exc:
+            raise SkillObjectMissingError from exc
+        raise SkillObjectMissingError
+
+    async def review_contribution(
+        self,
+        actor: SkillActor,
+        workspace_id: UUID,
+        skill_id: UUID,
+        contribution_id: UUID,
+        *,
+        accept: bool,
+        request_id: str,
+    ) -> None:
+        """锁资产并核对提交时修订，接受后进入发布流程，驳回直接移出队列。"""
+        self._require_workspace(actor, workspace_id)
+        self._require_write_role(actor)
+        async with self._uow_factory() as uow:
+            skill = await uow.store.get_skill(workspace_id=workspace_id, skill_id=skill_id, lock=True)
+            if skill is None:
+                raise SkillNotFoundError
+            item = await self._contribution(uow.store, workspace_id, skill_id, contribution_id)
+            if accept:
+                if skill.status == "archived":
+                    raise SkillArchivedError
+                if item.base_revision != self._revision(skill):
+                    raise SkillContributionStaleError
+                _, draft = await self._contribution_package(uow.store, workspace_id, item)
+                await uow.store.replace_draft(
+                    workspace_id=workspace_id,
+                    skill_id=skill_id,
+                    draft=draft,
+                    actor_id=actor.user_id,
+                    request_id=request_id,
+                )
+            await uow.store.remove_contribution(workspace_id, skill_id, contribution_id)
+            await uow.store.add_event(
+                workspace_id=workspace_id,
+                skill_id=skill_id,
+                event_type="SKILL_CONTRIBUTION_ACCEPTED" if accept else "SKILL_CONTRIBUTION_REJECTED",
+                actor_id=actor.user_id,
+                request_id=request_id,
+                data={"contribution_id": str(item.id), "uploaded_by": str(item.uploaded_by)},
+                occurred_at=datetime.now(UTC),
+            )
+            await uow.commit()
 
     async def list_skills(
         self,
@@ -204,17 +481,7 @@ class SkillRegistryService:
         self._require_workspace(actor, workspace_id)
         self._require_write_role(actor)
         inspected = self._package_inspector.inspect(archive_bytes)
-        draft = SkillDraftRecord(
-            package_name=package_name,
-            storage_key="",
-            package_size=len(inspected.archive),
-            package_sha256=inspected.package_sha256,
-            content_sha256=inspected.content_sha256,
-            files=inspected.files,
-            compatibility=inspected.compatibility,
-            warnings=inspected.warnings,
-            updated_at=datetime.now(UTC),
-        )
+        draft = self._draft(inspected, package_name, actor.display_name, actor.user_id)
         async with self._uow_factory() as uow:
             current = await uow.store.get_skill(workspace_id=workspace_id, skill_id=skill_id, lock=True)
             if current is None:
@@ -243,6 +510,7 @@ class SkillRegistryService:
         version: str,
         changelog: str,
         request_id: str,
+        draft_sha256: str | None = None,
     ) -> SkillVersionRecord:
         """锁定当前草稿并发布不可变版本。"""
         self._require_workspace(actor, workspace_id)
@@ -260,9 +528,11 @@ class SkillRegistryService:
             if await uow.store.get_version(workspace_id=workspace_id, skill_id=skill_id, version=version):
                 raise SkillVersionConflictError
             draft = skill.draft
+            if draft_sha256 and (draft is None or draft.package_sha256 != draft_sha256):
+                raise SkillDraftChangedError
             if draft is None or any(item.blocks_publish for item in draft.warnings):
                 raise SkillDraftNotReadyError
-            await self._read_archive(uow.store, workspace_id, draft)
+            archive = await self._read_archive(uow.store, workspace_id, draft)
             published = SkillVersionRecord(
                 id=uuid4(),
                 skill_id=skill_id,
@@ -279,6 +549,8 @@ class SkillRegistryService:
                 warnings=draft.warnings,
                 published_by=actor.user_id,
                 published_at=datetime.now(UTC),
+                interface=draft.interface or read_skill_interface(archive),
+                uploader_name=draft.uploader_name,
             )
             await uow.store.publish_version(
                 skill=skill,
@@ -368,7 +640,12 @@ class SkillRegistryService:
                 event_type="SKILL_DOWNLOAD_REQUESTED",
                 actor_id=actor.user_id,
                 request_id=request_id,
-                data={"version": record.version, "content_sha256": record.content_sha256},
+                # 记录下载时的显示名，成员改名或退出工作空间后仍可辨认。
+                data={
+                    "version": record.version,
+                    "content_sha256": record.content_sha256,
+                    "actor_name": actor.display_name,
+                },
                 occurred_at=datetime.now(UTC),
             )
             await uow.commit()
@@ -429,6 +706,8 @@ class SkillRegistryService:
             raise SkillObjectMissingError
         if legacy:
             await store.put_package(workspace_id, record.package_sha256, archive)
+            if record.interface is None and (interface := read_skill_interface(archive)):
+                await store.backfill_interface(workspace_id, record, interface)
         return archive
 
     async def set_archived(

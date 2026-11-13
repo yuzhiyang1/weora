@@ -549,6 +549,7 @@ describe("Weora application shell", () => {
       id: "skill-1",
       slug: "meeting-summary",
       display_name: "会议纪要助手",
+      uploader_name: "林晓",
       description: "把会议记录整理为结构化纪要",
       status: "active",
       latest_published_version: null,
@@ -596,6 +597,9 @@ describe("Weora application shell", () => {
         if (path.endsWith("/skills/skill-1/events")) {
           return jsonResponse({ items: [] });
         }
+        if (path.includes("/skills/skill-1/files/preview?")) {
+          return jsonResponse({ text: "---\nname: meeting-summary\n---\n\n# 纪要使用说明" });
+        }
         if (
           path.endsWith("/skills/skill-1/publish") &&
           init?.method === "POST"
@@ -627,8 +631,10 @@ describe("Weora application shell", () => {
     expect(
       await screen.findByRole("heading", { name: "会议纪要助手" }),
     ).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "纪要使用说明" })).toBeInTheDocument();
     expect(screen.getByText("包结构与安全校验已通过")).toBeInTheDocument();
-    expect(screen.getByText("SKILL.md")).toBeInTheDocument();
+    expect(screen.getByText("上传人 林晓")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "SKILL.md" })).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "发布版本" }));
 
     expect(
@@ -653,6 +659,7 @@ describe("Weora application shell", () => {
       body: JSON.stringify({
         version: "0.1.0",
         changelog: "完成首个团队版本",
+        draft_sha256: skill.draft.package_sha256,
       }),
     });
   });

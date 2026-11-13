@@ -4,18 +4,18 @@ import {
   Archive as IconArchive,
   Download as IconDownload,
   Pencil as IconEdit,
-  File as IconFile,
   RefreshCw as IconRefresh,
   Send as IconSend,
-  CircleCheck as IconTickCircle,
   Upload as IconUpload,
 } from "lucide-react";
 import {
   Banner,
   Button,
   Card,
+  Empty,
   Input,
   Modal,
+  Select,
   Skeleton,
   Table,
   TabPane,
@@ -45,15 +45,19 @@ import {
   type SkillDetail,
   type SkillDraft,
   type SkillEvent,
+  type SkillFileSource,
   type SkillVersion,
   updateSkill,
 } from "./api";
 import { SkillPackageDialog } from "./SkillPackageDialog";
+import { SkillFileBrowser } from "./SkillFileBrowser";
+import { PackageNotes } from "./SkillPackageNotes";
+import { SkillContributions } from "./SkillContributions";
 import { SkillUsagePanel } from "./SkillUsagePanel";
 import { formatDate, SkillLogo, StatusBadge } from "./SkillsPage";
 import { useDiscardChanges } from "../settings/useDiscardChanges";
 
-type DetailTab = "overview" | "versions" | "activity" | "usage";
+type DetailTab = "files" | "versions" | "activity" | "usage" | "contributions";
 
 export function SkillDetailPage() {
   const { principal } = useAuth();
@@ -81,7 +85,8 @@ function SkillDetailContent({
   canWrite: boolean;
 }) {
   const queryClient = useQueryClient();
-  const [tab, setTab] = useState<DetailTab>("overview");
+  const [tab, setTab] = useState<DetailTab>("files");
+  const [fileSelection, setFileSelection] = useState("");
   const [replaceOpen, setReplaceOpen] = useState(false);
   const [publishOpen, setPublishOpen] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
@@ -138,14 +143,18 @@ function SkillDetailContent({
         <div className="detail-title-block">
           <SkillLogo large />
           <div>
-            <span className="page-eyebrow">SKILL PACKAGE</span>
             <Typography.Title heading={1}>
               {skill.display_name}
             </Typography.Title>
+            {skill.display_name !== skill.slug && <code className="skill-detail-slug">{skill.slug}</code>}
             <Typography.Paragraph>{skill.description}</Typography.Paragraph>
             <div className="detail-inline-meta">
               <StatusBadge status={skill.status} />
-              <code>{skill.slug}</code>
+              <Tag color={skill.latest_published_version ? "blue" : "orange"}>
+                {skill.latest_published_version ? `v${skill.latest_published_version}` : "待发布"}
+              </Tag>
+              <span>上传人 {skill.uploader_name || "未知"}</span>
+              <time dateTime={skill.updated_at}>{formatDate(skill.updated_at)}</time>
             </div>
           </div>
         </div>
@@ -160,7 +169,6 @@ function SkillDetailContent({
               }
               loading={archiveMutation.isPending}
               onClick={() => archiveMutation.mutate(skill.status === "active")}
-              type={skill.status === "active" ? "danger" : "tertiary"}
             >
               {skill.status === "active" ? "归档" : "恢复"}
             </Button>
@@ -168,6 +176,7 @@ function SkillDetailContent({
               <Button
                 icon={<IconUpload />}
                 onClick={() => setReplaceOpen(true)}
+                theme={skill.draft ? "light" : "solid"}
               >
                 {skill.draft ? "替换草稿" : "上传新草稿"}
               </Button>
@@ -198,10 +207,17 @@ function SkillDetailContent({
       <Tabs
         activeKey={tab}
         className="detail-tabs"
-        onChange={(key) => setTab(key as DetailTab)}
+        onChange={(key) => {
+          setTab(key as DetailTab);
+          // 包下载走浏览器原生链接，打开活动页时重新读取刚写入的记录。
+          if (key === "activity") void eventsQuery.refetch();
+        }}
       >
-        <TabPane itemKey="overview" tab="概览">
-          <OverviewTab skill={skill} />
+        <TabPane itemKey="files" tab="文件">
+          <FilesTab workspaceId={workspaceId} skill={skill} versions={versionsQuery.data?.items ?? []}
+            loading={versionsQuery.isPending} error={versionsQuery.error} canWrite={canWrite}
+            selection={fileSelection} onSelectionChange={setFileSelection}
+            onRetry={() => void versionsQuery.refetch()} />
         </TabPane>
         <TabPane
           itemKey="versions"
@@ -230,6 +246,16 @@ function SkillDetailContent({
           {tab === "usage" && <SkillUsagePanel workspaceId={workspaceId} skillId={skillId}
             versions={versionsQuery.data?.items ?? []} canWrite={canWrite} />}
         </TabPane>
+        {canWrite && <TabPane itemKey="contributions" tab="待审核">
+          {tab === "contributions" && <SkillContributions workspaceId={workspaceId} skillId={skillId}
+            archived={skill.status === "archived"} hasDraft={!!skill.draft} onChanged={async (accept) => {
+              await invalidateSkillQueries(queryClient, workspaceId, skillId);
+              if (accept) {
+                setFileSelection("draft");
+                setTab("files");
+              }
+            }} />}
+        </TabPane>}
       </Tabs>
 
       <SkillPackageDialog
@@ -238,6 +264,8 @@ function SkillDetailContent({
           await replaceSkillDraft(workspaceId, skillId, file);
           await invalidateSkillQueries(queryClient, workspaceId, skillId);
           setReplaceOpen(false);
+          setFileSelection("draft");
+          setTab("files");
         }}
         open={replaceOpen}
         submitLabel="校验并替换"
@@ -271,124 +299,48 @@ function SkillDetailContent({
   );
 }
 
-function OverviewTab({ skill }: { skill: SkillDetail }) {
-  const draft = skill.draft;
-  return (
-    <div className="skill-overview-grid">
-      <div className="skill-overview-main">
-        <Card className="detail-card" title="Skill 信息">
-          <dl className="info-grid">
-            <div>
-              <dt>标识符</dt>
-              <dd>
-                <code>{skill.slug}</code>
-              </dd>
-            </div>
-            <div>
-              <dt>当前版本</dt>
-              <dd>
-                <Tag color={skill.latest_published_version ? "blue" : "grey"}>
-                  {skill.latest_published_version ?? "尚未发布"}
-                </Tag>
-              </dd>
-            </div>
-            <div>
-              <dt>创建时间</dt>
-              <dd>{formatDate(skill.created_at)}</dd>
-            </div>
-            <div>
-              <dt>更新时间</dt>
-              <dd>{formatDate(skill.updated_at)}</dd>
-            </div>
-          </dl>
-        </Card>
+/** 默认打开发布版本，管理员可切换到当前草稿查看待发布内容。 */
+function FilesTab({ workspaceId, skill, versions, loading, error, canWrite, selection, onSelectionChange, onRetry }: {
+  workspaceId: string;
+  skill: SkillDetail;
+  versions: SkillVersion[];
+  loading: boolean;
+  error: Error | null;
+  canWrite: boolean;
+  selection: string;
+  onSelectionChange: (value: string) => void;
+  onRetry: () => void;
+}) {
+  const draft = canWrite ? skill.draft : null;
+  const options = [
+    ...versions.map((version) => ({ label: `已发布 ${version.version}`, value: version.version })),
+    ...(draft ? [{ label: "当前草稿", value: "draft" }] : []),
+  ];
+  const selected = options.some((option) => option.value === selection)
+    ? selection : options[0]?.value;
+  const record = selected === "draft" ? draft : versions.find((item) => item.version === selected);
+  if (error) return <AssetLoadError title="版本暂时无法加载" description={errorMessage(error)} onRetry={onRetry} />;
+  if (loading) return <Skeleton active />;
+  if (!record || !selected) return <Card className="detail-card">
+    <Empty title="暂无可查看的文件" description="管理员发布版本后，团队成员即可浏览包内容。" />
+  </Card>;
 
-        <Card
-          className="detail-card"
-          title="当前草稿"
-          headerExtraContent={draft ? <Tag color="orange">待发布</Tag> : null}
-        >
-          {draft ? (
-            <>
-              <dl className="info-grid compact">
-                <div>
-                  <dt>包文件</dt>
-                  <dd>{draft.package_name}</dd>
-                </div>
-                <div>
-                  <dt>文件数</dt>
-                  <dd>{draft.files.length} 个</dd>
-                </div>
-                <div>
-                  <dt>包大小</dt>
-                  <dd>{formatBytes(draft.package_size)}</dd>
-                </div>
-              </dl>
-              {draft.warnings.length ? (
-                <div className="warning-list">
-                  {draft.warnings.map((warning) => (
-                    <Banner
-                      closeIcon={null}
-                      description={`${warning.message}${warning.path ? ` · ${warning.path}` : ""}`}
-                      key={`${warning.code}-${warning.path}`}
-                      title={warning.blocks_publish ? "阻断发布" : "需要确认"}
-                      type={warning.blocks_publish ? "danger" : "warning"}
-                    />
-                  ))}
-                </div>
-              ) : (
-                <div className="validation-success">
-                  <IconTickCircle />
-                  包结构与安全校验已通过
-                </div>
-              )}
-              <div className="file-list-heading">
-                <strong>文件清单</strong>
-                <span>{draft.files.length} 个文件</span>
-              </div>
-              <div className="file-list">
-                {draft.files.map((file) => (
-                  <div className="file-row" key={file.path}>
-                    <IconFile />
-                    <code>{file.path}</code>
-                    <span>{formatBytes(file.size)}</span>
-                  </div>
-                ))}
-              </div>
-            </>
-          ) : (
-            <div className="picker-empty">
-              当前没有未发布草稿。上传新包后可继续发布版本。
-            </div>
-          )}
-        </Card>
-      </div>
-
-      <Card className="detail-card distribution-card" title="分发信息">
-        <h3>兼容目标</h3>
-        {draft ? (
-          <div className="compatibility-list">
-            {draft.compatibility.map((item) => (
-              <div key={item.target}>
-                <Tag color={item.status === "compatible" ? "green" : "orange"}>
-                  {compatibilityLabel(item.target)}
-                </Tag>
-                <small>{item.message}</small>
-              </div>
-            ))}
-          </div>
-        ) : (
-          <div className="picker-empty">上传草稿后生成静态兼容报告。</div>
-        )}
-        <div className="checksum-block">
-          <h3>内容校验和（SHA256）</h3>
-          <code title={draft?.content_sha256}>
-            {draft ? draft.content_sha256 : "暂无草稿"}
-          </code>
-        </div>
-      </Card>
+  const source: SkillFileSource = selected === "draft"
+    ? { draft: record.package_sha256 } : { version: selected };
+  return <div className="skill-content-panel">
+    <div className="skill-package-bar">
+      <h2>包内容</h2>
+      {record.uploader_name && record.uploader_name !== skill.uploader_name &&
+        <span className="skill-uploader">此包上传人 {record.uploader_name}</span>}
+      <Select aria-label="包版本" value={selected} optionList={options}
+        onChange={(value) => onSelectionChange(String(value ?? ""))} />
+      {selected !== "draft" && <a className={buttonVariants({ variant: "outline", size: "sm" })}
+        href={skillDownloadUrl(workspaceId, skill.id, selected)}><IconDownload />下载包</a>}
     </div>
-  );
+    <SkillFileBrowser key={`${selected}:${record.package_sha256}`} workspaceId={workspaceId}
+      skillId={skill.id} source={source} files={record.files} />
+    <PackageNotes key={record.package_sha256} record={record} />
+  </div>;
 }
 
 function VersionsTab({
@@ -425,6 +377,8 @@ function VersionsTab({
       render: () => <Tag color="green">已发布</Tag>,
     },
     { key: "changelog", title: "变更说明", dataIndex: "changelog" },
+    { title: "上传人", dataIndex: "uploader_name", width: 116,
+      render: (value: string | null) => value || "未知" },
     {
       key: "published_at",
       title: "发布时间",
@@ -504,6 +458,8 @@ function ActivityTab({
               <div>
                 <strong>{eventLabel(event.event_type)}</strong>
                 <small>
+                  {event.event_type === "SKILL_DOWNLOAD_REQUESTED" &&
+                    `下载人 ${event.actor_name || "未知"} · `}
                   {formatDate(event.occurred_at)} · Request{" "}
                   {event.request_id.slice(0, 12)}
                 </small>
@@ -530,13 +486,15 @@ function PublishDialog({
   draft: SkillDraft;
   initialVersion: string;
   onClose: () => void;
-  onPublish: (input: { version: string; changelog: string }) => Promise<void>;
+  onPublish: (input: { version: string; changelog: string; draft_sha256: string }) => Promise<void>;
 }) {
   const [version, setVersion] = useState(initialVersion);
   const [changelog, setChangelog] = useState("");
+  // 对话框打开时固定预览的包摘要，后台刷新草稿时仍要求重新确认。
+  const [reviewedDraft] = useState(draft);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
-  const blocked = draft.warnings.some((item) => item.blocks_publish);
+  const blocked = reviewedDraft.warnings.some((item) => item.blocks_publish);
 
   async function submit(event: FormEvent) {
     event.preventDefault();
@@ -544,7 +502,9 @@ function PublishDialog({
     setSubmitting(true);
     setError(null);
     try {
-      await onPublish({ version: version.trim(), changelog: changelog.trim() });
+      await onPublish({
+        version: version.trim(), changelog: changelog.trim(), draft_sha256: reviewedDraft.package_sha256,
+      });
     } catch (nextError) {
       setError(errorMessage(nextError));
     } finally {
@@ -587,11 +547,11 @@ function PublishDialog({
         <div className="publish-summary">
           <span>
             <small>内容校验值</small>
-            <code>{shortHash(draft.content_sha256)}</code>
+            <code>{shortHash(reviewedDraft.content_sha256)}</code>
           </span>
           <span>
             <small>文件</small>
-            <strong>{draft.files.length} 个</strong>
+            <strong>{reviewedDraft.files.length} 个</strong>
           </span>
         </div>
         {blocked ? (
@@ -743,23 +703,13 @@ function nextPatchVersion(current: string | null): string {
   return match ? `${match[1]}.${match[2]}.${Number(match[3]) + 1}` : "0.1.0";
 }
 
-function compatibilityLabel(target: string): string {
-  return (
-    (
-      {
-        generic_agent_skill: "通用 Agent Skill",
-        codex: "Codex",
-        claude_code: "Claude Code",
-        dify_agent: "Dify Agent",
-      } as Record<string, string>
-    )[target] ?? target
-  );
-}
-
 function eventLabel(type: string): string {
   return (
     (
       {
+        SKILL_CONTRIBUTION_ADDED: "提交候选包",
+        SKILL_CONTRIBUTION_ACCEPTED: "接受候选包",
+        SKILL_CONTRIBUTION_REJECTED: "驳回候选包",
         SKILL_CREATED: "创建 Skill",
         SKILL_DRAFT_REPLACED: "替换草稿",
         SKILL_PUBLISHED: "发布版本",
@@ -780,10 +730,4 @@ function errorMessage(error: unknown): string {
 
 function shortHash(value: string): string {
   return `${value.slice(0, 10)}…${value.slice(-6)}`;
-}
-
-function formatBytes(value: number): string {
-  if (value < 1024) return `${value} B`;
-  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
-  return `${(value / 1024 / 1024).toFixed(1)} MB`;
 }

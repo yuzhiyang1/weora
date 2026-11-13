@@ -79,17 +79,23 @@ def request_json(
     token: str = "",
     key: str | None = None,
     timeout: float = 12,
+    body: bytes | None = None,
+    content_type: str | None = None,
 ) -> dict[str, JsonValue]:
+    """发送 JSON 或已有编码的请求体，统一凭据、重定向与错误处理。"""
     headers = {"Accept": "application/json"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
     if data is not None:
         headers["Content-Type"] = "application/json"
+        body = json.dumps(data, ensure_ascii=False).encode()
+    elif content_type:
+        headers["Content-Type"] = content_type
     if key:
         headers["Idempotency-Key"] = key
     request = Request(
         url,
-        data=json.dumps(data, ensure_ascii=False).encode() if data is not None else None,
+        data=body,
         headers=headers,
         method=method,
     )

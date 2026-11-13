@@ -57,6 +57,128 @@ async def sharing_client(request: pytest.FixtureRequest) -> AsyncIterator[tuple[
 
 
 @pytest.mark.anyio
+async def test_member_contributes_and_owner_reviews_without_overwriting_newer_draft(
+    sharing_client: tuple[AsyncClient, FastAPI],
+) -> None:
+    """覆盖设备授权、别名搜索、原文读取、同包重试、审核冲突和上传人快照。"""
+    owner, app = sharing_client
+    registered = await owner.post(
+        "/api/v1/auth/register",
+        json={
+            "display_name": "维护人",
+            "email": f"{uuid4().hex}@example.com",
+            "password": "a separate isolated test password",
+            "workspace_name": "候选包验收",
+        },
+    )
+    assert registered.status_code == 201, registered.text
+    workspace = registered.json()["workspace"]["id"]
+    root = f"/api/v1/workspaces/{workspace}"
+    owner_csrf = {"X-CSRF-Token": owner.cookies["weora_csrf"]}
+    invite = await owner.post(f"/api/v1/auth/workspaces/{workspace}/invitations", headers=owner_csrf, json={})
+    assert invite.status_code == 201, invite.text
+    upload_path = root + "/skill-distribution/contributions"
+    original = build_skill_package(
+        extra_files={
+            "agents/openai.yaml": 'interface:\n  display_name: "会议纪要助手"\n  short_description: "提取决策与待办"\n',
+        }
+    )
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as member:
+        joined = await member.post(
+            "/api/v1/auth/invitations/register",
+            json={
+                "token": invite.json()["token"],
+                "display_name": "林晓",
+                "email": f"{uuid4().hex}@example.com",
+                "password": "a separate isolated test password",
+            },
+        )
+        assert joined.status_code == 201, joined.text
+        assert joined.json()["workspace"]["role"] == "member"
+        member_csrf = {"X-CSRF-Token": member.cookies["weora_csrf"]}
+        device_id, auth = await device(member, root + "/agent-collaboration", "贡献者设备")
+        files = {"package": ("meeting-summary.zip", original)}
+        assert (await member.post(upload_path, headers=auth, files=files)).status_code == 403
+        assert (
+            await member.put(
+                f"{root}/skill-distribution/devices/{device_id}/grant",
+                headers=member_csrf,
+                json={},
+            )
+        ).status_code == 200
+        assert (
+            await member.post(upload_path.replace(workspace, str(uuid4())), headers=auth, files=files)
+        ).status_code == 401
+        first = await member.post(upload_path, headers=auth, files=files)
+        assert first.status_code == 201, first.text
+        assert first.json()["status"] == "draft"
+        assert (await member.post(upload_path, headers=auth, files=files)).json() == first.json()
+        skill_path = f"{root}/skills/{first.json()['skill_id']}"
+        assert (await member.get(skill_path + "/files/preview", params={"path": "SKILL.md"})).status_code == 403
+        summary = (await member.get(root + "/skills", params={"search": "会议纪要助手"})).json()["items"][0]
+        assert (summary["display_name"], summary["description"], summary["uploader_name"]) == (
+            "会议纪要助手",
+            "提取决策与待办",
+            "林晓",
+        )
+        publish = {"version": "1.0.0", "changelog": "首次发布"}
+        assert (await member.post(skill_path + "/publish", headers=member_csrf, json=publish)).status_code == 403
+        release = await owner.post(skill_path + "/publish", headers=owner_csrf, json=publish)
+        assert release.status_code == 201, release.text
+        assert release.json()["uploader_name"] == "林晓"
+        preview = await member.get(skill_path + "/files/preview", params={"version": "1.0.0", "path": "SKILL.md"})
+        assert preview.status_code == 200 and "# 使用说明" in preview.json()["text"]
+        assert (
+            await member.get(
+                skill_path + "/files/preview",
+                params={"version": "1.0.0", "path": "../SKILL.md"},
+            )
+        ).status_code == 404
+
+        replacement = {"package": ("meeting-summary.zip", build_skill_package(reference_content="# 第二版"))}
+        proposed = await member.post(upload_path, headers=auth, files=replacement)
+        assert proposed.status_code == 201, proposed.text
+        candidate_id = proposed.json()["contribution_id"]
+        candidate_path = f"{skill_path}/contributions/{candidate_id}"
+        assert (await member.get(candidate_path)).status_code == 403
+        assert (await member.post(upload_path, headers=auth, files=replacement)).json() == proposed.json()
+        assert (await owner.get(skill_path)).json()["draft"] is None
+        candidate = await owner.get(candidate_path)
+        assert candidate.status_code == 200 and candidate.json()["uploader_name"] == "林晓"
+        assert (await owner.post(skill_path + "/draft", headers=owner_csrf, files=files)).status_code == 200
+        stale = await owner.post(candidate_path + "/decision", headers=owner_csrf, json={"accept": True})
+        assert stale.status_code == 409 and stale.json()["detail"]["code"] == "SKILL_CONTRIBUTION_STALE"
+        assert (
+            await owner.post(candidate_path + "/decision", headers=owner_csrf, json={"accept": False})
+        ).status_code == 204
+        resubmitted = await member.post(upload_path, headers=auth, files=replacement)
+        assert resubmitted.status_code == 201, resubmitted.text
+        candidate_id = resubmitted.json()["contribution_id"]
+        accepted = await owner.post(
+            f"{skill_path}/contributions/{candidate_id}/decision",
+            headers=owner_csrf,
+            json={"accept": True},
+        )
+        assert accepted.status_code == 204, accepted.text
+        assert (await owner.get(skill_path)).json()["draft"]["uploader_name"] == "林晓"
+        stale_publish = await owner.post(
+            skill_path + "/publish",
+            headers=owner_csrf,
+            json={"version": "1.1.0", "changelog": "审核通过", "draft_sha256": "0" * 64},
+        )
+        assert stale_publish.status_code == 409
+        assert stale_publish.json()["detail"]["code"] == "SKILL_DRAFT_CHANGED"
+        released = await owner.post(
+            skill_path + "/publish",
+            headers=owner_csrf,
+            json={"version": "1.1.0", "changelog": "审核通过"},
+        )
+        assert released.status_code == 201 and released.json()["uploader_name"] == "林晓"
+        assert (await owner.get(skill_path + "/contributions")).json() == []
+
+
+@pytest.mark.anyio
 async def test_device_download_and_versioned_usage(sharing_client: tuple[AsyncClient, FastAPI]) -> None:
     client, app = sharing_client
     registration = await client.post(
@@ -210,6 +332,22 @@ async def test_device_download_and_versioned_usage(sharing_client: tuple[AsyncCl
             json={"usage_enabled": True},
         )
         assert peer_grant.status_code == 200
+        for response in (
+            await member.get(f"{root}/skills/{skill_id}/versions/1.0.0/download"),
+            await member.get(f"{distribution}/versions/{release['id']}/package", headers=peer_auth),
+        ):
+            assert response.status_code == 200
+        activities = (await client.get(f"{root}/skills/{skill_id}/events")).json()["items"]
+        downloads = [
+            item
+            for item in activities
+            if item["event_type"] == "SKILL_DOWNLOAD_REQUESTED" and item["actor_id"] == member_id
+        ]
+        assert len(downloads) == 2
+        assert all(item["actor_name"] == item["data"]["actor_name"] == "另一位使用者" for item in downloads)
+        # 已有的审计事件没有姓名快照，仍可通过当前工作空间解析。
+        created_event = next(item for item in activities if item["event_type"] == "SKILL_CREATED")
+        assert created_event["actor_name"] == "Skill test"
         foreign = await member.post(distribution + "/usage-events/batch", headers=peer_auth, json={"events": [event]})
         assert foreign.json()["items"][0]["status"] != "accepted"
         peer_install = install | {
@@ -267,7 +405,11 @@ async def test_legacy_download_backfills_verified_bytes(sharing_client: tuple[As
         path,
         headers=csrf,
         files={
-            "package": ("meeting-summary.skill", build_skill_package(), "application/zip"),
+            "package": (
+                "meeting-summary.skill",
+                build_skill_package(extra_files={"agents/openai.yaml": "interface:\n  display_name: 旧会议助手\n"}),
+                "application/zip",
+            ),
         },
     )
     assert created.status_code == 201
@@ -285,6 +427,7 @@ async def test_legacy_download_backfills_verified_bytes(sharing_client: tuple[As
         assert package and version
         original = package.archive_bytes
         version.storage_key = key.value
+        version.interface = None
         await db.delete(package)
     await storage.put(key, BytesObjectSource(b"tampered", content_type="application/zip"))
     download = f"{skill_path}/versions/1.0.0/download"
@@ -296,5 +439,6 @@ async def test_legacy_download_backfills_verified_bytes(sharing_client: tuple[As
     await storage.delete(key)
     await storage.put(key, BytesObjectSource(original, content_type="application/zip"))
     assert (await client.get(download)).content == original
+    assert (await client.get(skill_path)).json()["display_name"] == "旧会议助手"
     await storage.delete(key)
     assert (await client.get(download)).content == original

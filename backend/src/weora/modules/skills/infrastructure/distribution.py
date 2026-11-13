@@ -7,7 +7,7 @@ from hashlib import sha256
 from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import case, func, select
+from sqlalchemy import SQLColumnExpression, case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from weora.modules.skills.application.ports import SkillVersionRecord
@@ -35,6 +35,7 @@ class DeviceActor:
     workspace_id: UUID
     device_id: UUID
     user_id: UUID
+    display_name: str
 
 
 @dataclass(frozen=True)
@@ -121,6 +122,11 @@ async def find_release(
 async def archive_version(db: AsyncSession, actor: DeviceActor, version_id: UUID) -> SkillVersionRecord:
     _, release = await find_release(db, actor, version_id=version_id)
     return version_from_model(release)
+
+
+async def grant_cli_skill_sync(db: AsyncSession, workspace_id: UUID, device_id: UUID) -> None:
+    """浏览器确认时为新设备开启同步和使用统计，后续由设备所有者调整。"""
+    db.add(SkillDeviceGrant(device_id=device_id, workspace_id=workspace_id, usage_enabled=True))
 
 
 async def lock_grant(db: AsyncSession, actor: DeviceActor) -> SkillDeviceGrant:
@@ -298,6 +304,7 @@ async def usage_summary(
     groups: dict[str, dict[str, object]] = {}
     totals: dict[str, object] = {"uses": 0, "users": 0, "mentions": 0, "loads": 0, "last_used_at": None}
     for field, metric in ((turn.used_at, "uses"), (turn.mentioned_at, "mentions"), (turn.loaded_at, "loads")):
+        key: SQLColumnExpression[UUID] | SQLColumnExpression[str]
         if group_by == "user":
             key = turn.user_id
         elif group_by == "version":

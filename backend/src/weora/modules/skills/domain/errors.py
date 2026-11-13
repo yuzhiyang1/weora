@@ -92,6 +92,20 @@ class SkillArchivedError(SkillRegistryError):
     message = "已归档 Skill 不能执行该操作"
 
 
+class SkillContributionStaleError(SkillRegistryError):
+    """候选包提交后，原草稿或发布版本已经变化。"""
+
+    code = "SKILL_CONTRIBUTION_STALE"
+    message = "当前草稿或发布版本已变更，请让上传人重新提交候选包。"
+
+
+class SkillDraftChangedError(SkillRegistryError):
+    """预览或确认发布后，当前草稿已被其他操作替换。"""
+
+    code = "SKILL_DRAFT_CHANGED"
+    message = "当前草稿已变更，请刷新后重新查看和确认。"
+
+
 class SkillNotFoundError(SkillRegistryError):
     """当前工作空间中不存在目标 Skill 或版本。"""
 

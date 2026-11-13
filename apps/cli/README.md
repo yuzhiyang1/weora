@@ -123,3 +123,13 @@ backend/.venv/Scripts/mypy --config-file apps/cli/pyproject.toml apps/cli/src ap
 ```
 
 架构与后续接入方式见 [CLI 与团队上下文接入方案](../../docs/architecture/weora-cli-and-team-context.md)。
+
+## 上传团队 Skill
+
+登录并授权设备后，在任意目录运行以下命令。参数可以是包含 `SKILL.md` 的目录，也可以是现有的 `.zip` 或 `.skill` 包。`upload` 是 `push` 的别名。
+
+```powershell
+weora skill push ./my-skill
+```
+
+首次提交会创建待发布草稿。同名包进入该 Skill 的「待审核」列表。管理员可预览文件、查看校验结果、接受为草稿或驳回，接受后在控制台发布版本。包内 `agents/openai.yaml` 的展示名称和简介可在控制台搜索，CLI 安装仍使用 `SKILL.md` 的标识符。

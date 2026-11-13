@@ -17,7 +17,7 @@ from weora.modules.collaboration.infrastructure import agent_sessions
 from weora.modules.collaboration.infrastructure.agent_mail import AgentDevice
 from weora.modules.identity.api.dependencies import current_principal, write_principal
 from weora.modules.identity.application.ports import PrincipalRecord
-from weora.modules.skills.api.routes import _raise_http_error, _service
+from weora.modules.skills.api.routes import PackageUpload, _actor, _raise_http_error, _service, read_skill_upload
 from weora.modules.skills.application.service import SkillActor
 from weora.modules.skills.domain.errors import SkillRegistryError
 from weora.modules.skills.infrastructure import distribution
@@ -92,7 +92,7 @@ async def device(
     async with factory(request)() as db, db.begin():
         try:
             bound, principal = await agent_sessions.authenticate(db, workspace_id, authorization)
-            actor = distribution.DeviceActor(workspace_id, bound.id, principal.user_id)
+            actor = distribution.DeviceActor(workspace_id, bound.id, principal.user_id, principal.display_name)
             await distribution.lock_grant(db, actor)
             yield db, actor
         except AgentMailError as exc:
@@ -101,6 +101,34 @@ async def device(
             raise error_response(exc) from exc
         except SkillRegistryError as exc:
             _raise_http_error(exc)
+
+
+@router.post("/skill-distribution/contributions", status_code=201)
+async def upload_contribution(
+    workspace_id: UUID, request: Request, package: PackageUpload, authorization: Bearer = None,
+) -> dict[str, object]:
+    """已授权设备可代表在职成员提交完整包，身份始终由服务端验证。"""
+    async with factory(request)() as db:
+        try:
+            bound, principal = await agent_sessions.authenticate(db, workspace_id, authorization)
+            await distribution.lock_grant(
+                db, distribution.DeviceActor(workspace_id, bound.id, principal.user_id, principal.display_name)
+            )
+        except AgentMailError as exc:
+            raise HTTPException(exc.status, detail={"code": exc.code, "message": str(exc)}) from exc
+        except distribution.DistributionError as exc:
+            raise error_response(exc) from exc
+    package_name, archive = await read_skill_upload(package)
+    try:
+        skill_id, slug, contribution_id = await _service(request).contribute(
+            _actor(principal), workspace_id, package_name, archive, get_request_id() or "unknown",
+        )
+    except SkillRegistryError as exc:
+        _raise_http_error(exc)
+    return {
+        "skill_id": skill_id, "slug": slug, "contribution_id": contribution_id,
+        "status": "pending_review" if contribution_id else "draft",
+    }
 
 
 @router.put("/skill-distribution/devices/{device_id}/grant")
@@ -208,7 +236,7 @@ async def download_package(
     async with device(request, workspace_id, authorization) as (db, actor):
         record = await distribution.archive_version(db, actor, version_id)
         download = await _service(request).download_record(
-            SkillActor(actor.user_id, workspace_id, "member"),
+            SkillActor(actor.user_id, workspace_id, "member", actor.display_name),
             record,
             get_request_id() or "unknown",
         )

@@ -82,7 +82,7 @@ function LocalAgentsSettings({ workspace }: { workspace: string }) {
                 <div className="agent-collab-actions">
                   <Tag>{device.revoked_at ? "已撤销" : inactive ? "已过期" : device.paired ? "已配对" : "等待配对"}</Tag>
                   {!inactive && device.paired && grants.data && <>
-                    {grant && <Tag>{grant.usage_enabled ? "同步并统计" : "仅同步"}</Tag>}
+                    {grant && <Tag>{grant.usage_enabled ? "共享并统计" : "共享已授权"}</Tag>}
                     <Button size="small" onClick={() => {
                       changeSkillGrant.reset();
                       setSkillDevice(device);
@@ -192,16 +192,16 @@ function LocalAgentsSettings({ workspace }: { workspace: string }) {
           onCancel={() => { if (!changeSkillGrant.isPending) setSkillDevice(undefined); }}
           maskClosable={!changeSkillGrant.isPending} closeOnEsc={!changeSkillGrant.isPending}>
           <div className="agent-collab-stack">
-            <p>授权后，这台设备可以安装和同步工作空间已发布的 Skill。</p>
+            <p>授权后，这台设备可以向当前工作空间提交 Skill，并同步已发布版本。</p>
             <p>开启统计后，设备会报告使用的 Skill 版本、时间和点名或加载信号。提示词、工具输出和本机路径留在设备上。</p>
             <SettingsResult error={changeSkillGrant.error} />
             <div className="agent-collab-actions">
               {selectedGrant && <Button disabled={changeSkillGrant.isPending}
-                onClick={() => changeSkillGrant.mutate({ id: skillDevice.id, usage: null })}>关闭同步</Button>}
+                onClick={() => changeSkillGrant.mutate({ id: skillDevice.id, usage: null })}>撤销授权</Button>}
               <Button disabled={changeSkillGrant.isPending}
-                onClick={() => changeSkillGrant.mutate({ id: skillDevice.id, usage: false })}>仅同步</Button>
+                onClick={() => changeSkillGrant.mutate({ id: skillDevice.id, usage: false })}>授权共享</Button>
               <Button type="primary" loading={changeSkillGrant.isPending}
-                onClick={() => changeSkillGrant.mutate({ id: skillDevice.id, usage: true })}>同步并统计</Button>
+                onClick={() => changeSkillGrant.mutate({ id: skillDevice.id, usage: true })}>授权共享并统计</Button>
             </div>
           </div>
         </Modal>

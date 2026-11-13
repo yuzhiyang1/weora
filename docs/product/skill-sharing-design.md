@@ -1,6 +1,6 @@
 # Weora Skill 共享落地设计
 
-当前代码已实现 PostgreSQL 包存储、工作空间分发、21 个工具安装入口、启动同步及结构化用量。角色、项目、标签策略和候选包评审仍是设计目标。TeamAI 未验证的 Trae 和 Kiro 事件按现行官方契约补齐；工具矩阵中的源码与文档证据不等于 Weora 实机验收。
+当前代码已实现 PostgreSQL 包存储、工作空间分发、21 个工具安装入口、启动同步、结构化用量及成员候选包审核。角色、项目和标签策略仍是设计目标。TeamAI 未验证的 Trae 和 Kiro 事件按现行官方契约补齐；工具矩阵中的源码与文档证据不等于 Weora 实机验收。
 
 状态：设计稿 · 2026-11-12。Skill 共享首版覆盖 TeamAI README 的 21 个公开工具。成员完成工作空间绑定后，CLI 将适用的团队 Skill 安装到工具原生目录。工具启动新会话时自动同步，成员也可以固定版本、手动更新或回退。开启使用统计后，控制台可按成员、版本和日期查询。
 
@@ -86,7 +86,7 @@ TeamAI CLI 仓库采用 MIT 许可证。复制或改写源码时保留上游版�
 ```powershell
 weora skill bind --runtime codex --project .
 weora skill pull --runtime codex --project .
-weora skill push ./release-check --project .
+weora skill push ./release-check
 weora skill install release-check@1.2.0 --runtime codex --project .
 weora skill status --runtime codex --project .
 weora skill follow release-check --runtime codex --project .
@@ -98,7 +98,7 @@ weora skill usage flush --project .
 
 需要通过 Weora 启动的工具使用 `weora skill launch --runtime <id> --project . -- <宿主参数>`。CLI 用已探测的宿主入口启动，透传参数与退出状态。同步遇到网络失败时继续用当前已安装版本启动。
 
-第一次绑定时，CLI 展示配对的服务、工作空间、工具、配置实例和实际目标路径，安装同步入口并执行初次 `pull`。用户范围通过 `--scope user` 指定。项目范围使用当前 worktree 根，Codex 项目优先使用验证过的 `.agents/skills/<slug>/`。凭据按绑定的服务和工作空间从钥匙串读取。对未跟踪的项目目标写入精确的本地 Git 排除规则，避免误提交。 [OpenAI Docs · Codex Skill 目录](https://developers.openai.com/codex/skills#where-codex-loads-local-skills)
+浏览器确认 CLI 登录时为新设备开启当前工作空间的 Skill 同步和使用统计，设备所有者可关闭统计。首次 `bind` 绑定并安装 Skill，同时配置后续启动同步的 Hook。用户范围通过 `--scope user` 指定。项目范围使用当前 worktree 根，Codex 项目优先使用验证过的 `.agents/skills/<slug>/`。凭据按绑定的服务和工作空间从钥匙串读取。对未跟踪的项目目标写入精确的本地 Git 排除规则，避免误提交。 [OpenAI Docs · Codex Skill 目录](https://developers.openai.com/codex/skills#where-codex-loads-local-skills)
 
 | 动作 | 行为 |
 | --- | --- |
@@ -140,14 +140,14 @@ Codex 文档定义了两个轮次 Hook 的 `session_id`、`turn_id` 和工具输
 
 ## 5. 服务端接口与统计
 
-保留现有控制台 Skill API。设备接口前缀为 `/api/v1/workspaces/{workspace_id}/skill-distribution`。复用设备配对和活动成员校验，通过独立的设备鉴权入口签发和检查权限。旧协作设备默认保持原协作授权，用户在控制台为该设备开通 Skill 能力后再使用下面的接口。设备凭据限定服务源和工作空间。
+保留现有控制台 Skill API。设备接口前缀为 `/api/v1/workspaces/{workspace_id}/skill-distribution`。每次请求检查设备凭据、活动成员身份和 Skill 授权。浏览器确认 CLI 登录时授予同步权限。手工配对的设备仍由成员在控制台开通同步。设备凭据限定服务源和工作空间。
 
 | 方法与路径 | 请求与结果 | 权限 |
 | --- | --- | --- |
 | `GET /manifest?runtime=...&scope=...&project_id=...` | 返回完整分发清单和修订标识。每项包含 Skill UUID、slug、目标版本 UUID、摘要和兼容性。项目范围需要已绑定项目，用户范围按成员策略解析。支持条件请求，完整清单用于对账和清理 | `skills:read` |
 | `GET /resolve?slug=...&version=...&runtime=...` | 返回有权访问的精确版本 UUID、大小、包摘要、文件清单及兼容性。省略版本时解析当前分发目标 | `skills:read` |
 | `GET /versions/{version_id}/package` | 下载固定 ZIP，返回 `Content-Length` 和 `X-Content-SHA256`。复查权限、归档和版本所属工作空间 | `skills:read` |
-| `POST /contributions` | 提交完整 Skill 包作为候选草稿，返回提案 ID 和校验结果。评审和发布复用控制台权限及 Registry 流程 | `skills:contribute` |
+| `POST /contributions` | 以 multipart 提交完整 Skill 包。新标识符返回待发布草稿，同名包返回待审核提案 ID。控制台可查看校验结果、接受为草稿或驳回 | 当前工作空间的活动成员及已授权 Skill 的设备 |
 | `POST /installation-receipts` | 接收安装、更新、回退和卸载回执，返回确认状态。相同操作重复发送返回原确认 | `skills:installations:write` |
 | `POST /usage-events/batch` | 接收点名或加载证据，每项包含安装代次、运行时、会话轮次标识、信号类型和观测时间。按项确认 | `skills:usage:write` 且工作空间启用统计 |
 

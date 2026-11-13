@@ -128,6 +128,7 @@ async def test_owner_uploads_skill_and_finds_it_in_workspace_list(
                 "status": "active",
                 "latest_published_version": None,
                 "updated_at": created["updated_at"],
+                "uploader_name": "余则成",
             }
         ],
         "next_cursor": None,

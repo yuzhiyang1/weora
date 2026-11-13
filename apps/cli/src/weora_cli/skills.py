@@ -30,6 +30,7 @@ from weora_cli.collab_client import (
 from weora_cli.commands import JsonValue
 from weora_cli.skill_adapters import TOOLS, USER_ONLY, destination, install_hook, launch, skill_roots, tool_home
 from weora_cli.skill_local import change_files, conflict, database, inventory, now, queue, recover, temporary_package
+from weora_cli.skill_upload import push
 
 _SLUG = re.compile(r"[a-z0-9][a-z0-9-]{0,63}\Z")
 _DEVICE_REVOKED = {"SKILL_DEVICE_NOT_AUTHORIZED", "AGENT_DEVICE_UNAUTHORIZED"}
@@ -539,6 +540,8 @@ def _binding_scope(args: argparse.Namespace) -> tuple[str, str]:
 
 def arguments(parser: argparse.ArgumentParser) -> None:
     actions = parser.add_subparsers(dest="action", required=True)
+    upload = actions.add_parser("push", aliases=["upload"], help="向当前工作空间提交 Skill 包。")
+    upload.add_argument("path", help="包含 SKILL.md 的目录，或 .zip、.skill 文件")
     for action in ("bind", "pull", "install", "update", "follow", "uninstall", "status", "install-hook", "launch"):
         command = actions.add_parser(action)
         command.add_argument("--runtime", choices=TOOLS, required=True)
@@ -562,6 +565,8 @@ def arguments(parser: argparse.ArgumentParser) -> None:
 
 
 def execute(args: argparse.Namespace) -> JsonValue:
+    if args.action in {"push", "upload"}:
+        return push(args.path)
     if args.action == "install-hook":
         return install_hook(args.runtime)
     scope, root = _binding_scope(args)

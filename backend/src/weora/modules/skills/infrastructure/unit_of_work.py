@@ -5,14 +5,17 @@ from datetime import UTC, datetime
 from types import TracebackType
 from uuid import UUID, uuid4
 
-from sqlalchemy import and_, delete, or_, select
+from sqlalchemy import and_, delete, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as postgres_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import InstrumentedAttribute
+from sqlalchemy.sql.elements import ColumnElement
 
 from weora.modules.skills.application.ports import (
     PublishedSkillVersionRecord,
+    SkillContribution,
     SkillDraftRecord,
     SkillEventRecord,
     SkillRecord,
@@ -20,8 +23,9 @@ from weora.modules.skills.application.ports import (
     SkillVersionRecord,
 )
 from weora.modules.skills.domain.errors import SkillRegistryError, SkillSlugConflictError, SkillVersionConflictError
-from weora.modules.skills.domain.package import SkillCompatibility, SkillFile, SkillWarning
+from weora.modules.skills.domain.package import SkillCompatibility, SkillFile, SkillInterface, SkillWarning
 from weora.modules.skills.infrastructure.models import (
+    SkillContributionModel,
     SkillDraftModel,
     SkillEventModel,
     SkillModel,
@@ -34,6 +38,27 @@ from weora.shared.infrastructure.database import SessionFactory
 def _as_utc(value: datetime) -> datetime:
     """SQLite 测试会丢失时区信息，统一恢复为 UTC 输出契约。"""
     return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
+def _current_interface(
+    version: str | None,
+    released: dict[str, str | None] | None,
+    draft: dict[str, str | None] | None,
+) -> SkillInterface | None:
+    """资产列表优先使用已发布版本，待审内容只在对应包内展示。"""
+    metadata = released if version else draft
+    return SkillInterface(**metadata) if metadata else None
+
+
+def _matches_interface(
+    column: InstrumentedAttribute[dict[str, str | None] | None],
+    search: str,
+) -> ColumnElement[bool]:
+    """支持按包内别名或简介查找 Skill。"""
+    return or_(
+        column["display_name"].as_string().contains(search, autoescape=True),
+        column["short_description"].as_string().contains(search, autoescape=True),
+    )
 
 
 def _draft_from_model(model: SkillDraftModel | None) -> SkillDraftRecord | None:
@@ -50,6 +75,9 @@ def _draft_from_model(model: SkillDraftModel | None) -> SkillDraftRecord | None:
         compatibility=tuple(SkillCompatibility(**item) for item in model.compatibility_report),
         warnings=tuple(SkillWarning(**item) for item in model.warnings),
         updated_at=_as_utc(model.updated_at),
+        interface=SkillInterface(**model.interface) if model.interface else None,
+        uploader_name=model.uploader_name,
+        uploaded_by=model.updated_by,
     )
 
 
@@ -71,6 +99,8 @@ def version_from_model(model: SkillVersionModel) -> SkillVersionRecord:
         warnings=tuple(SkillWarning(**item) for item in model.warnings),
         published_by=model.published_by,
         published_at=_as_utc(model.published_at),
+        interface=SkillInterface(**model.interface) if model.interface else None,
+        uploader_name=model.uploader_name,
     )
 
 
@@ -79,20 +109,27 @@ def _skill_from_model(
     *,
     draft: SkillDraftRecord | None = None,
     latest_version: str | None = None,
+    interface: SkillInterface | None = None,
 ) -> SkillRecord:
     """集中恢复 Skill 聚合，避免查询接口产生字段差异。"""
     return SkillRecord(
         id=model.id,
         workspace_id=model.workspace_id,
         slug=model.slug,
-        display_name=model.display_name,
-        description=model.description,
+        display_name=(interface.display_name or model.display_name)
+        if interface and not model.metadata_edited
+        else model.display_name,
+        description=(interface.short_description or model.description)
+        if interface and not model.metadata_edited
+        else model.description,
         status=model.status,
         latest_published_version=latest_version,
         created_by=model.created_by,
         created_at=_as_utc(model.created_at),
         updated_at=_as_utc(model.updated_at),
         draft=draft,
+        uploader_name=model.uploader_name,
+        interface=interface,
     )
 
 
@@ -108,8 +145,10 @@ def _draft_model(skill_id: UUID, draft: SkillDraftRecord, actor_id: UUID) -> Ski
         manifest=[asdict(item) for item in draft.files],
         compatibility_report=[asdict(item) for item in draft.compatibility],
         warnings=[asdict(item) for item in draft.warnings],
-        updated_by=actor_id,
+        updated_by=draft.uploaded_by or actor_id,
         updated_at=draft.updated_at,
+        interface=asdict(draft.interface) if draft.interface else None,
+        uploader_name=draft.uploader_name,
     )
 
 
@@ -134,10 +173,86 @@ class SqlAlchemySkillStore:
         )
 
     async def read_package(self, workspace_id: UUID, digest: str) -> bytes | None:
-        return await self._session.scalar(
-            select(SkillPackageModel.archive_bytes).where(
-                SkillPackageModel.workspace_id == workspace_id,
-                SkillPackageModel.package_sha256 == digest,
+        return (
+            await self._session.scalars(
+                select(SkillPackageModel.archive_bytes).where(
+                    SkillPackageModel.workspace_id == workspace_id,
+                    SkillPackageModel.package_sha256 == digest,
+                )
+            )
+        ).one_or_none()
+
+    async def lock_skill_by_slug(self, workspace_id: UUID, slug: str) -> UUID | None:
+        """串行处理同名包的提交、接受及草稿更新。"""
+        return (
+            await self._session.scalars(
+                select(SkillModel.id)
+                .where(SkillModel.workspace_id == workspace_id, SkillModel.slug == slug)
+                .with_for_update()
+            )
+        ).one_or_none()
+
+    async def backfill_interface(
+        self,
+        workspace_id: UUID,
+        record: SkillDraftRecord | SkillVersionRecord,
+        interface: SkillInterface,
+    ) -> None:
+        """仅补缺失的展示快照，草稿替换后不会写到另一包。"""
+        if isinstance(record, SkillVersionRecord):
+            await self._session.execute(
+                update(SkillVersionModel)
+                .where(
+                    SkillVersionModel.workspace_id == workspace_id,
+                    SkillVersionModel.id == record.id,
+                    SkillVersionModel.interface.is_(None),
+                )
+                .values(interface=asdict(interface))
+            )
+        else:
+            workspace_skills = select(SkillModel.id).where(SkillModel.workspace_id == workspace_id)
+            await self._session.execute(
+                update(SkillDraftModel)
+                .where(
+                    SkillDraftModel.skill_id.in_(workspace_skills),
+                    SkillDraftModel.package_sha256 == record.package_sha256,
+                    SkillDraftModel.interface.is_(None),
+                )
+                .values(interface=asdict(interface))
+            )
+
+    async def add_contribution(self, workspace_id: UUID, item: SkillContribution) -> None:
+        """保存候选包引用，与上传审计一同提交。"""
+        self._session.add(SkillContributionModel(workspace_id=workspace_id, **asdict(item)))
+
+    async def list_contributions(self, workspace_id: UUID, skill_id: UUID) -> list[SkillContribution]:
+        """返回当前资产待审包，最新提交优先。"""
+        rows = await self._session.scalars(
+            select(SkillContributionModel)
+            .where(SkillContributionModel.workspace_id == workspace_id, SkillContributionModel.skill_id == skill_id)
+            .order_by(SkillContributionModel.created_at.desc(), SkillContributionModel.id.desc())
+        )
+        return [
+            SkillContribution(
+                row.id,
+                row.skill_id,
+                row.uploaded_by,
+                row.uploader_name,
+                row.package_sha256,
+                row.package_name,
+                _as_utc(row.created_at),
+                row.base_revision,
+            )
+            for row in rows
+        ]
+
+    async def remove_contribution(self, workspace_id: UUID, skill_id: UUID, contribution_id: UUID) -> None:
+        """接受或驳回时移出待审队列，结果由活动记录追溯。"""
+        await self._session.execute(
+            delete(SkillContributionModel).where(
+                SkillContributionModel.workspace_id == workspace_id,
+                SkillContributionModel.skill_id == skill_id,
+                SkillContributionModel.id == contribution_id,
             )
         )
 
@@ -160,6 +275,7 @@ class SqlAlchemySkillStore:
                 status=skill.status,
                 latest_published_version_id=None,
                 created_by=skill.created_by,
+                uploader_name=skill.uploader_name,
                 created_at=skill.created_at,
                 updated_at=skill.updated_at,
             )
@@ -191,17 +307,25 @@ class SqlAlchemySkillStore:
         cursor_updated_at: datetime | None,
         cursor_id: UUID | None,
     ) -> list[SkillRecord]:
-        statement = select(SkillModel, SkillVersionModel.version).outerjoin(
-            SkillVersionModel,
-            SkillVersionModel.id == SkillModel.latest_published_version_id,
+        statement = (
+            select(SkillModel, SkillVersionModel.version, SkillVersionModel.interface, SkillDraftModel.interface)
+            .outerjoin(
+                SkillVersionModel,
+                SkillVersionModel.id == SkillModel.latest_published_version_id,
+            )
+            .outerjoin(SkillDraftModel, SkillDraftModel.skill_id == SkillModel.id)
         )
         conditions = [SkillModel.workspace_id == workspace_id]
         if search:
+            # 搜索与展示使用同一版本的别名及简介。
+            published = SkillModel.latest_published_version_id.is_not(None)
             conditions.append(
                 or_(
                     SkillModel.display_name.contains(search, autoescape=True),
                     SkillModel.slug.contains(search, autoescape=True),
                     SkillModel.description.contains(search, autoescape=True),
+                    and_(published, _matches_interface(SkillVersionModel.interface, search)),
+                    and_(~published, _matches_interface(SkillDraftModel.interface, search)),
                 )
             )
         if status:
@@ -220,7 +344,10 @@ class SqlAlchemySkillStore:
             statement.where(*conditions).order_by(SkillModel.updated_at.desc(), SkillModel.id.desc()).limit(limit)
         )
         rows = (await self._session.execute(statement)).all()
-        return [_skill_from_model(model, latest_version=latest_version) for model, latest_version in rows]
+        return [
+            _skill_from_model(model, latest_version=version, interface=_current_interface(version, released, draft))
+            for model, version, released, draft in rows
+        ]
 
     async def get_skill(
         self,
@@ -239,7 +366,7 @@ class SqlAlchemySkillStore:
             if locked is None:
                 return None
         statement = (
-            select(SkillModel, SkillDraftModel, SkillVersionModel.version)
+            select(SkillModel, SkillDraftModel, SkillVersionModel.version, SkillVersionModel.interface)
             .outerjoin(SkillDraftModel, SkillDraftModel.skill_id == SkillModel.id)
             .outerjoin(SkillVersionModel, SkillVersionModel.id == SkillModel.latest_published_version_id)
             .where(SkillModel.workspace_id == workspace_id, SkillModel.id == skill_id)
@@ -247,11 +374,12 @@ class SqlAlchemySkillStore:
         row = (await self._session.execute(statement)).one_or_none()
         if row is None:
             return None
-        skill, draft, latest_version = row
+        skill, draft, latest_version, released = row
         return _skill_from_model(
             skill,
             draft=_draft_from_model(draft),
             latest_version=latest_version,
+            interface=_current_interface(latest_version, released, draft.interface if draft else None),
         )
 
     async def update_metadata(
@@ -275,6 +403,7 @@ class SqlAlchemySkillStore:
             return None
         skill.display_name = display_name
         skill.description = description
+        skill.metadata_edited = True
         skill.updated_at = occurred_at
         await self.add_event(
             workspace_id=workspace_id,
@@ -354,6 +483,8 @@ class SqlAlchemySkillStore:
                 warnings=[asdict(item) for item in version.warnings],
                 published_by=version.published_by,
                 published_at=version.published_at,
+                interface=asdict(version.interface) if version.interface else None,
+                uploader_name=version.uploader_name,
             )
         )
         model.latest_published_version_id = version.id

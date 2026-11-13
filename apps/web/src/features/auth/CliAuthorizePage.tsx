@@ -76,6 +76,9 @@ function CliAuthorization({ loginId }: { loginId: string }) {
                 <div><dt className="text-sm text-muted">设备</dt><dd>{readyLogin.device_name}</dd></div>
                 <div><dt className="text-sm text-muted">登录身份</dt><dd>{principal.user.display_name} · {principal.workspace.name}</dd></div>
               </dl>
+              <p className="text-sm text-muted">
+                确认后，这台设备可向当前工作空间提交 Skill 并同步已发布版本。使用统计默认开启，可在「设置 → 本地 Agent」关闭。
+              </p>
               <div className="flex flex-wrap gap-2">
                 <Button
                   type="primary"
