@@ -95,6 +95,8 @@ async def test_real_main_observe_auto_worker_and_result(
     settings = AppSettings()
     coordinator.runs._execution_profile = execution_profile(settings)
     worker = next(item for item in state.effects if item.kind == "worker")
+    ack = next(item for item in state.effects if item.kind == "reply")
+    assert await coordinator.deliver(workspace_id, scope_id, ack)
     await coordinator.launch(workspace_id, scope_id, worker)
     state = await coordinator.store.snapshot(workspace_id, scope_id)
     ticket = state.tickets[0]

@@ -15,7 +15,7 @@ from weora.modules.coordination.domain import CoordinationError, Json, Report, S
 from weora.modules.coordination.engine import Engine, key
 from weora.modules.coordination.records import records
 from weora.modules.coordination.service import CoordinationService
-from weora.modules.coordination.tools import ID, TEXT, object_schema
+from weora.modules.coordination.tools import ID, TEXT, USER_REPLY_STYLE, object_schema
 from weora.modules.coordination.worker_children import ChildContext, WorkerChildren
 from weora.modules.coordination.worker_reads import worker_facts
 from weora.modules.coordination.worker_sessions import WorkerBinding, WorkerSession
@@ -110,7 +110,13 @@ WORKER_TOOLS = ACTIVITY_TOOLS + (
     ),
 )
 
-WORKER_PROMPT = """\n你是主 Agent 分配的 Weora Worker，负责本任务，不接管其他任务。
+# 这些要求决定何时可以交付。措辞和排版由模型根据问题选择。
+WORKER_DELIVERY_GUIDANCE = """现有证据已能回答全部或一部分问题时，用 ready 把能确认的结论写进 summary，
+同时说明尚未核实的范围。对当前结论没有影响的资料缺口，不需要先向用户追问。
+用户要方案时，按已知约束交付可评审的方案；暂未决定的选型、参数或实现细节可以作为待定项随方案交付。
+只有缺少继续所必需的事实、决定或权限时，才请求用户处理。若已确认部分结论，也在发给用户的 human_action 里说清楚。"""
+
+WORKER_PROMPT = f"""\n你是主 Agent 分配的 Weora Worker，负责本任务，不接管其他任务。
 先读取本任务输入；原始用户输入、后续人类纠偏、平台事实备注和上下文分别对待。
 不相关的新任务调用 trigger_handback，不能自行接单；订阅仅提供上下文，不扩大权限。
 peer_evidence=true 是同话题其他成员的复现线索。页面名写错、补充操作步骤或证据时，在原任务里只读核实；
@@ -119,10 +125,15 @@ peer_evidence=true 是同话题其他成员的复现线索。页面名写错、�
 即使原发起人回复，也只有明确确认才可按新目标提出计划；执行仍须通过原有工具授权和审批。
 使用 orchestrator_report 及时报告 progress、ready、blocked、failed、waiting，回答用户的问题时填写 answers。
 每轮（包括续接）结束前必须调用 orchestrator_report，历史报告只属于历史 Run。
+ready 的 summary 可能直接发回原话题，只写可向原话题受众公开的内容。
+{WORKER_DELIVERY_GUIDANCE}
+{USER_REPLY_STYLE}
 仅回复普通文本不会完成 Ticket；不要因为上轮报告过 ready 就省略本轮报告。
 输入有 chars/next_offset 时是不完整预览，使用 orchestrator_read(resource=input,id,offset) 读必要正文；
 原讨论主题可用 resource=root 分段读取，不能把缺失的正文当成不存在的要求。
 需要人类时填写 human_action；ready 不得同时提出问题。完成报告须由平台验证现有交付证据后才生效。
+如果任务需要核对代码而尚未绑定仓库，报告 blocked。直接说明尚未绑定仓库、已经核对了哪些资料，以及需要绑定的仓库或分支。
+请用项目名或仓库名说明下一步，避免让发起人查找内部编号。
 浏览器属于本用户的同一 Task，后续 Run 会复用登录态和页面。续接先 snapshot/read 核对现状，不能重放开始考试等写操作。
 登录先 browser.credentials 获取凭据引用，再 fill_credential 填入指定字段；填充后取新快照，不用明文 type 传密码。
 没有授权凭据、遇到验证码或需要人类判断时，用 browser.request_human 并报告 blocked、人类操作路径和继续方式。

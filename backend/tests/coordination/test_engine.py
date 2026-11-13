@@ -47,14 +47,6 @@ def message(identity: str = "m1", *, addressed: bool = False, actor: str = "user
     )
 
 
-def test_feishu_long_reply_requires_agent_to_shorten_it() -> None:
-    engine, state = setup()
-    engine.receive(message())
-    with pytest.raises(CoordinationError, match="REPLY_TOO_LONG"):
-        engine.reply("m1", "answer", "说明" * 121)
-    assert state.replies == []
-
-
 def result() -> dict[str, object]:
     return {
         "decision": "accept",
@@ -80,6 +72,16 @@ def accept(engine: Engine, state: State, *, addressed: bool = False) -> str:
     decision = engine.decide(evaluation.id, result(), route=addressed)
     assert decision.ticket_id
     return decision.ticket_id
+
+
+def test_feishu_ack_stays_short_and_answer_keeps_details() -> None:
+    engine, state = setup()
+    engine.receive(message())
+    text = "说明" * 121
+    with pytest.raises(CoordinationError, match="REPLY_TOO_LONG"):
+        engine.reply("m1", "ack", text)
+    assert engine.reply("m1", "answer", text).text == text
+    assert len(state.replies) == 1
 
 
 def test_accepted_ticket_freezes_worker_version() -> None:
@@ -198,8 +200,9 @@ def test_numbered_followup_cannot_borrow_another_initiators_task() -> None:
     assert engine.receive(request)
     assert engine.pass_due() == []
     assert len(ticket.inputs) == 1
-    assert state.replies[0].ticket_id is None
-    assert "找不到可续接的任务 #ABCDEF01" in state.replies[0].text
+    reply = state.replies[-1]
+    assert reply.ticket_id is None
+    assert "找不到可续接的任务 #ABCDEF01" in reply.text
     with pytest.raises(CoordinationError, match="TASK_REFERENCE_ALREADY_HANDLED"):
         engine.route(request.id, result())
 
@@ -395,14 +398,84 @@ def test_ready_requires_platform_validation_and_stale_assignment_is_rejected() -
 def test_ack_once_and_reply_cannot_change_channel_or_fabricate_answer() -> None:
     engine, state = setup()
     identity = accept(engine, state)
-    original = engine.reply("m1", "ack", "收到", ticket_id=identity)
-    assert engine.reply("m1", "ack", "不覆盖原文", ticket_id=identity).text == "收到"
+    original = state.replies[0]
+    assert engine.reply("m1", "ack", "不覆盖原文", ticket_id=identity).text == original.text
     assert len(state.replies) == 1
     assert state.replies[0].id == original.id
     with pytest.raises(CoordinationError, match="RESULT_NOT_READY"):
         engine.reply("m1", "result", "已完成", ticket_id=identity)
     with pytest.raises(CoordinationError, match="ANSWER_NOT_REPORTED"):
         engine.reply("m1", "answer", "未经 Worker 确认", ticket_id=identity)
+
+
+def test_feishu_notifies_once_per_failed_run_even_when_retry_has_same_error() -> None:
+    engine, state = setup()
+    identity = accept(engine, state)
+    ticket = engine.ticket(identity)
+    first = ticket.assignments[-1]
+    first.run_id = "first-run"
+    report = Report("failed", "模型调用失败", NOW, human_action="模型调用失败，请重试。")
+    engine.report(identity, first.id, report)
+    engine.report(identity, first.id, report)
+    notifications = [reply for reply in state.replies if reply.purpose == "attention"]
+    assert len(notifications) == 1
+    notifications[0].state, notifications[0].remote_message_id = "sent", "om_failure_1"
+    effect = next(effect for effect in state.effects if effect.kind == "worker")
+    generation = effect.generation
+    engine.receive(message("retry", addressed=True))
+    assert effect.generation == generation
+    engine.retry(identity, "retry")
+    assert effect.generation == generation + 1
+    second = ticket.assignments[-1]
+    second.run_id = "second-run"
+    engine.report(identity, second.id, report)
+    notifications = [reply for reply in state.replies if reply.purpose == "attention"]
+    assert len(notifications) == 2
+    assert all(reply.trigger_id == "m1" and reply.text == report.human_action for reply in notifications)
+    assert notifications[-1].state == "pending"
+
+
+def test_feishu_blocked_report_notifies_original_thread_without_main_rewrite() -> None:
+    engine, state = setup()
+    identity = accept(engine, state)
+    ticket = engine.ticket(identity)
+    assignment = ticket.assignments[-1]
+    assignment.run_id = "blocked-run"
+    reason = "当前任务没有绑定仓库，无法核对代码。请绑定后重新发起。"
+    report = Report("blocked", "已核对需求，未读取代码。", NOW, human_action=reason)
+    engine.report(identity, assignment.id, report)
+    engine.report(identity, assignment.id, replace(report, at=later(NOW, 1), verified=True))
+
+    notices = [reply for reply in state.replies if reply.purpose == "attention"]
+    assert len(notices) == 1 and notices[0].trigger_id == ticket.origin_id
+    assert notices[0].text == reason and ticket.outcome is None
+    assert any(effect.data.get("reply_id") == notices[0].id for effect in state.effects)
+
+
+def test_verified_retry_result_is_relayed_if_main_does_not_reply() -> None:
+    engine, state = setup()
+    identity = accept(engine, state)
+    ticket = engine.ticket(identity)
+    old = ticket.assignments[-1]
+    old.run_id = "failed-run"
+    engine.mark_input(identity, old.id, ticket.inputs[0].id, read=True)
+    engine.report(identity, old.id, Report("failed", "调用失败", NOW, human_action="请重试。"))
+    engine.receive(message("retry", addressed=True))
+    engine.retry(identity, "retry")
+    assignment = ticket.assignments[-1]
+    assignment.run_id = "retry-run"
+    engine.mark_input(identity, assignment.id, ticket.inputs[-1].id, read=True)
+    engine.report(identity, assignment.id, Report("ready", "三条自查项已整理。", NOW, verified=True))
+
+    engine.relay_retried_results("https://console.example")
+    assert not any(reply.purpose == "result" for reply in state.replies)
+    engine.now = lambda: later(NOW, 21)
+    engine.relay_retried_results("https://console.example")
+    engine.relay_retried_results("https://console.example")
+    results = [reply for reply in state.replies if reply.purpose == "result"]
+    assert len(results) == 1 and results[0].trigger_id == "m1"
+    assert "三条自查项已整理。" in results[0].text
+    assert "https://console.example/runs/retry-run" in results[0].text
 
 
 @pytest.mark.parametrize("mode", ["off", "observe", "auto"])

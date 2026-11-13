@@ -14,7 +14,7 @@ from pydantic import TypeAdapter
 from weora.modules.agents.application.service import AgentActor, AgentRegistryService
 from weora.modules.agents.domain.errors import AgentRegistryError
 from weora.modules.collaboration.application.tasks import TaskRecord
-from weora.modules.context.domain import ContextActor, ContextError, ContextRunScope, Json
+from weora.modules.context.domain import ContextActor, ContextError, ContextRunScope, Json, ReplyNotSent
 from weora.modules.context.service import ContextService, timestamp
 from weora.modules.coordination.domain import (
     Config,
@@ -44,6 +44,26 @@ from weora.modules.runs.application.execution import RuntimeSession, TextRuntime
 from weora.modules.runs.application.ports import ExecutionProfile, RunActor
 from weora.modules.runs.application.service import RunService
 
+FEISHU_REPLY_ERRORS = {
+    "PROVIDER_UNAVAILABLE": "飞书接口暂时不可用",
+    "RATE_LIMITED": "飞书接口限流",
+    "TOKEN_EXPIRED": "飞书应用访问凭证已失效",
+    "CREDENTIALS_UNAVAILABLE": "无法获取飞书应用访问凭证",
+    "PERMISSION_DENIED": "机器人没有权限、未入群或无法访问原话题",
+    "REPLY_ACCESS_REVOKED": "原话题访问授权已失效",
+}
+
+RUN_FAILURE_REASONS = {
+    "MODEL_FAILED": "模型调用失败",
+    "MODEL_UNKNOWN": "模型服务无法识别当前模型",
+    "MODEL_TIMEOUT": "模型响应超时",
+    "MODEL_KEY_REQUIRED": "模型访问凭证缺失",
+    "MODEL_CONFIGURATION_MISMATCH": "模型配置不一致",
+    "RUN_TIMEOUT": "任务执行超时",
+    "RUNTIME_NOT_CONFIGURED": "执行环境未配置",
+    "RUNTIME_PROCESS_FAILED": "执行进程异常退出",
+}
+
 
 class CoordinationService:
     def __init__(
@@ -55,10 +75,12 @@ class CoordinationService:
         projects: ProjectService | None = None,
         delivery: DeliveryService | None = None,
         code_events: CodeEventReader | None = None,
+        console_url: str | None = None,
     ) -> None:
         self.store, self.context, self.runs, self.agents = store, context, runs, agents
         self.projects = projects
         self.delivery, self.code_events = delivery, code_events
+        self.console_url = console_url
         self.repository_intake: RepositoryIntake | None = None
         self.worker_dispatch = WorkerDispatcher(store, context, runs)
 
@@ -201,6 +223,8 @@ class CoordinationService:
         def prepare(engine: Engine, state: State) -> None:
             # 领域规则决定何时评估；运输层不需要了解游标、暂停或代次格式。
             engine.pass_due()
+            engine.relay_retried_results(self.console_url)
+            engine.advance_console_inputs()
             checkpoints = {name: value for name, value in state.checkpoints.items() if name.startswith("poll:")}
             now = engine.now()
             compensation_due = not checkpoints or any(
@@ -494,7 +518,9 @@ class CoordinationService:
         await self.store.transact(actor.workspace_id, config.id, receive)
         return {"coordination_scope_id": config.id, "trigger_id": trigger.id}
 
-    async def _authorize_trigger(self, workspace_id: UUID, config: Config, trigger: Trigger) -> None:
+    async def _authorize_trigger(
+        self, workspace_id: UUID, config: Config, trigger: Trigger, *, unbound_history: bool = False,
+    ) -> None:
         if self._expired(trigger):
             raise CoordinationError("CONTEXT_EXPIRED")
         if config.source_kind == "code_hosting":
@@ -506,13 +532,19 @@ class CoordinationService:
             ContextActor(UUID(trigger.actor_id), workspace_id), UUID(config.source_id), trigger.actor_open_id
         )
         route = await self.context.store.get(workspace_id, "route", config.route_key or "")
+        old_grant = trigger.origin.get("project_grant_id")
+        # 新增仓库授权时，之前无仓库的对话仍可回看；它从未持有需要撤销的仓库权限。
+        keep_history = (
+            unbound_history and old_grant is None and route is not None and route.get("project_grant_id") is not None
+            and trigger.origin.get("route_key") == config.route_key
+        )
         if (
             not route
             or route.get("source_id") != config.source_id
             or str(route.get("agent_id")) != config.worker_agent_id
             or route.get("agent_version") != config.worker_agent_version
-            or route.get("project_grant_id") != config.project_grant_id
-            or trigger.origin.get("project_grant_id") != config.project_grant_id
+            or (route.get("project_grant_id") != config.project_grant_id and not keep_history)
+            or (old_grant != config.project_grant_id and not keep_history)
         ):
             raise CoordinationError("ROUTE_REVOKED")
 
@@ -540,7 +572,7 @@ class CoordinationService:
             )
             if actor_key not in permissions:
                 try:
-                    await self._authorize_trigger(workspace_id, state.config, trigger)
+                    await self._authorize_trigger(workspace_id, state.config, trigger, unbound_history=True)
                     permissions[actor_key] = True
                 except (ContextError, CoordinationError):
                     permissions[actor_key] = False
@@ -988,7 +1020,9 @@ class CoordinationService:
         """在平台租约内恢复主会话；资产与会话生命周期由独立应用组件处理。"""
         await MainSessionRunner(self).run(workspace_id, scope_id, effect, runtime_factory, profile)
 
-    async def launch(self, workspace_id: UUID, scope_id: str, effect: Effect) -> None:
+    async def launch(
+        self, workspace_id: UUID, scope_id: str, effect: Effect, *, runtime_available: bool = True,
+    ) -> None:
         """复核来源后派发 Worker；跨模块幂等与租约绑定由 WorkerDispatcher 统一管理。"""
         state = await self.authorized_state(workspace_id, scope_id)
         if state.config.source_kind == "code_hosting":
@@ -999,6 +1033,7 @@ class CoordinationService:
             scope_id,
             state,
             effect,
+            runtime_available=runtime_available,
             external_link=self.link_native_inputs,
         )
 
@@ -1036,7 +1071,9 @@ class CoordinationService:
             raise CoordinationError("CODE_SOURCE_ACCESS_REVOKED")
         return config
 
-    async def authorize_runtime_origin(self, actor: RunActor, origin: Json) -> Config:
+    async def authorize_runtime_origin(
+        self, actor: RunActor, origin: Json, *, unbound_history: bool = False,
+    ) -> Config:
         """原生 Run 来源闸门：只接受本范围实际保存、属于当前用户的仓库触发，不接受模型自报授权。"""
         state = await self.store.snapshot(actor.workspace_id, str(origin.get("coordination_scope_id", "")))
         trigger = records(state).triggers.get(str(origin.get("message_id", "")))
@@ -1049,7 +1086,7 @@ class CoordinationService:
             or trigger.origin.get("project_grant_id") != origin.get("project_grant_id")
         ):
             raise CoordinationError("CODE_SOURCE_ACCESS_REVOKED")
-        await self._authorize_trigger(actor.workspace_id, state.config, trigger)
+        await self._authorize_trigger(actor.workspace_id, state.config, trigger, unbound_history=unbound_history)
         ticket = records(state).tickets.get(str(origin.get("coordination_ticket_id", "")))
         if not ticket or ticket.mandate.actor_id != str(actor.user_id):
             raise CoordinationError("MANDATE_REVOKED")
@@ -1058,7 +1095,7 @@ class CoordinationService:
             source = records(state).triggers.get(identity)
             if not source or not source.authorized:
                 raise CoordinationError("SOURCE_REVOKED")
-            await self._authorize_trigger(actor.workspace_id, state.config, source)
+            await self._authorize_trigger(actor.workspace_id, state.config, source, unbound_history=unbound_history)
         return state.config
 
     async def reconcile(self, workspace_id: UUID, scope_id: str) -> None:
@@ -1110,13 +1147,14 @@ class CoordinationService:
             summary = detail.run.output_text or f"运行状态 {status}，请在 Weora Console 处理该运行。"
             if len(summary) > 16000:
                 summary = summary[:15800] + f"\n（摘要已截断，完整结果见 Weora Run {assignment.run_id}。）"
+            failure_code = detail.run.failure_code or status
             report = Report(
                 "waiting" if status == "SUCCEEDED" else "failed" if status in {"FAILED", "CANCELLED"} else "blocked",
                 summary,
                 datetime.now(UTC).isoformat(),
                 human_action=(
-                    f"执行未完成（{detail.run.failure_code or status}）。"
-                    "请在原话题 @Weora 回复重试；平台将先核对已有工具事实，不自动重放业务写入。"
+                    f"{RUN_FAILURE_REASONS.get(failure_code, '任务执行失败')}（{failure_code}）。"
+                    "请在原话题 @机器人回复重试。平台会先核对已执行的操作。"
                     if status == "FAILED" else None if status in {"SUCCEEDED", "CANCELLED"}
                     else f"任务需要人类处理：{status}。运行：{assignment.run_id}"
                 ),
@@ -1136,11 +1174,19 @@ class CoordinationService:
                 revision: str = report_id,
                 ticket_id: str = ticket.id,
                 assignment_id: str = assignment.id,
+                expected_run: str | None = assignment.run_id,
                 snapshot: Report = report,
             ) -> None:
                 # 模型回合成功不是目标完成；只有明确 ready 且原生验收通过才结束 Ticket。
                 if current.checkpoints.get(revision_key) != revision:
-                    run_id = engine.ticket(ticket_id).assignments[-1].run_id
+                    active = engine.ticket(ticket_id)
+                    current_assignment = active.assignments[-1]
+                    if (
+                        active.ended_by == "human" or current_assignment.ended_at
+                        or current_assignment.id != assignment_id or current_assignment.run_id != expected_run
+                    ):
+                        return
+                    run_id = current_assignment.run_id
                     session_ids = {engine.ticket(ticket_id).session_id} | {
                         key("subagent-session", str(run_id), item.id)
                         for item in current.activities
@@ -1247,13 +1293,14 @@ class CoordinationService:
                 current.config.source_kind == "feishu" and saved.purpose == "ack"
                 and ticket and ticket.origin_id == saved.trigger_id
             ):
-                if not ticket.task_id:
-                    if ticket.ended_at:
-                        return None
-                    raise DeferredEffect("TASK_NUMBER_PENDING")
-                # 回执与看板展示同一编号；在发送事务里写入正文，保留实际投递内容供对账。
-                number = f"任务 #{ticket.task_id[:8].upper()}｜"
-                saved.text = f"{number}{saved.text[:240 - len(number)]}"
+                if ticket.ended_at:
+                    saved.state = "withdrawn"
+                    records(current).replies.save(saved)
+                    return None
+                # 已有原生任务号时附上；新任务只有在首回确认后才创建。
+                if ticket.task_id:
+                    number = f"\n\n任务 #{ticket.task_id[:8].upper()}"
+                    saved.text = f"{saved.text[:240 - len(number)]}{number}"
             saved.state = "unknown"
             saved.sending_owner = effect.owner
             return saved.text
@@ -1264,10 +1311,21 @@ class CoordinationService:
         if code_identity and self.repository_intake:
             remote_id = await self.repository_intake.reply(code_identity, trigger, text, reply.id)
         else:
-            remote_id = await self.context.reader.reply(
-                connection, str(trigger.origin["message_id"]), text,
-                str(uuid5(NAMESPACE_URL, f"{workspace_id}:{scope_id}:{reply.id}")), image_keys=tuple(image_keys),
-            )
+            try:
+                remote_id = await self.context.reader.reply(
+                    connection, str(trigger.origin["message_id"]), text,
+                    str(uuid5(NAMESPACE_URL, f"{workspace_id}:{scope_id}:{reply.id}")), image_keys=tuple(image_keys),
+                )
+            except ReplyNotSent:
+                def reset(_: Engine, current: State) -> None:
+                    if effect.owner is not None:
+                        current.require_effect_lease(effect, datetime.now(UTC).isoformat())
+                    saved = records(current).replies.get(reply.id)
+                    if saved and saved.state == "unknown" and saved.sending_owner == effect.owner:
+                        saved.state, saved.sending_owner = "pending", None
+
+                await self.store.transact(workspace_id, scope_id, reset)
+                raise
 
         def sent(_: Engine, current: State) -> None:
             saved = records(current).replies.get(reply.id)
@@ -1281,13 +1339,13 @@ class CoordinationService:
         await self.store.transact(workspace_id, scope_id, sent)
         return True
 
-    async def effect_failed(self, workspace_id: UUID, scope_id: str, effect: Effect) -> None:
+    async def effect_failed(self, workspace_id: UUID, scope_id: str, effect: Effect, *, code: str) -> None:
         """失败也进入管理事实；渠道未知绝不能用 Worker 重试偷偷变成第二次发送。"""
 
         def failed(engine: Engine, current: State) -> None:
             if effect.kind == "reply":
                 reply = records(current).replies.get(str(effect.data["reply_id"]))
-                if reply and reply.ticket_id:
+                if reply and reply.ticket_id and reply.state in {"pending", "unknown"}:
                     ticket = records(current).tickets.get(reply.ticket_id)
                     if ticket:
                         unknown = reply.state == "unknown"
@@ -1296,15 +1354,38 @@ class CoordinationService:
                             "ticket.delivery_failed",
                             effect.id,
                             {"ticket_id": ticket.id, "reply_id": reply.id,
-                             "code": "CHANNEL_RECONCILIATION_REQUIRED" if unknown else "DELIVERY_PREPARATION_FAILED"},
+                             "code": code, "delivery_state": ticket.delivery_error},
                         )
+                        if (
+                            current.config.source_kind == "feishu" and reply.purpose == "ack"
+                            and reply.trigger_id == ticket.origin_id and not ticket.ended_at
+                            and ticket.assignments and not any(item.run_id for item in ticket.assignments)
+                            and not ticket.assignments[-1].report
+                        ):
+                            reason = FEISHU_REPLY_ERRORS.get(code, "飞书未能确认首回发送")
+                            next_step = (
+                                "请管理员核对原话题是否收到首回。"
+                                if unknown else "请管理员检查飞书连接，恢复后可在原话题 @机器人重试。"
+                            )
+                            prefix = "接单回复发送结果未知" if unknown else "接单回复发送失败"
+                            summary = f"{prefix}，Worker 未启动。{reason}（{code}）。{next_step}"
+                            engine.report(ticket.id, ticket.assignments[-1].id, Report("failed", summary, engine.now()))
             elif effect.kind == "worker":
                 ticket = records(current).tickets.get(str(effect.data["ticket_id"]))
-                if ticket and ticket.assignments and not ticket.assignments[-1].ended_at:
+                if (
+                    ticket and ticket.assignments and not ticket.ended_by
+                    and ticket.assignments[-1].id == effect.data["assignment_id"]
+                    and not ticket.assignments[-1].ended_at
+                ):
+                    reason = RUN_FAILURE_REASONS.get(code, "任务未能启动")
+                    message = f"{reason}（{code}）。请在原话题 @机器人回复重试。"
                     engine.report(
                         ticket.id,
                         ticket.assignments[-1].id,
-                        Report("failed", "执行安排失败，请查看协调器状态并明确重试。", engine.now()),
+                        Report(
+                            "failed", message, engine.now(),
+                            human_action=message if current.config.source_kind == "feishu" else None,
+                        ),
                     )
 
         await self.store.transact(workspace_id, scope_id, failed)

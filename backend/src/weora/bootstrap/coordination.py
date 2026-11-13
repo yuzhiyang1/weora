@@ -105,9 +105,7 @@ async def execute(workspace_id: UUID, scope_id: str, effect_id: str) -> bool:
 
                 await coordinator.main(workspace_id, scope_id, effect, runtime, active_profile)
             elif effect.kind == "worker":
-                if profile is None:
-                    raise RuntimeFailure("RUNTIME_NOT_CONFIGURED")
-                await coordinator.launch(workspace_id, scope_id, effect)
+                await coordinator.launch(workspace_id, scope_id, effect, runtime_available=profile is not None)
             elif effect.kind == "poll":
                 from weora.modules.coordination.polling import compensate
 
@@ -197,7 +195,7 @@ async def execute(workspace_id: UUID, scope_id: str, effect_id: str) -> bool:
                         )
                         return False
             # 外部写未知禁止自动重放；主会话失败等候人工重排，不把 SDK 原文写入日志。
-            await coordinator.effect_failed(workspace_id, scope_id, effect)
+            await coordinator.effect_failed(workspace_id, scope_id, effect, code=code)
             await coordinator.store.settle(workspace_id, scope_id, effect, error=code, unknown=unknown_reply)
             return False
         finally:

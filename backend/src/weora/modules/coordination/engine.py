@@ -11,6 +11,7 @@ from datetime import datetime, timedelta
 from typing import Literal
 from uuid import UUID
 
+from weora.modules.context.replies import TASK_ACCEPTANCE_REPLY, brief_reply
 from weora.modules.coordination.domain import (
     Assignment,
     Clock,
@@ -117,6 +118,12 @@ class Engine:
             thread = self._thread(thread_id)
             thread.last_at = max(thread.last_at, trigger.at)
             for identity in thread.subscriptions:
+                mandate = self.ticket(identity).mandate
+                if self.config.source_kind == "feishu" and mandate.route_key and (
+                    mandate.project_grant_id != self.config.project_grant_id
+                ):
+                    # 旧会话保留给发起人回看，新消息必须重新在新授权下接单。
+                    continue
                 context_only = identity in thread.context_only
                 subscribed[identity] = subscribed.get(identity, True) and context_only
             self.r.threads.save(thread)
@@ -219,7 +226,7 @@ class Engine:
         return True
 
     def _queue(self, trigger: Trigger) -> None:
-        if trigger.peer_evidence:
+        if trigger.peer_evidence or trigger.console_mode:
             return
         thread = self._thread(trigger.threads[0])
         if trigger.id not in thread.pending:
@@ -246,12 +253,14 @@ class Engine:
         if context_only:
             trigger.context_only.append(ticket.id)
         ticket.updated_at = self.now()
-        if trigger.human and not context_only and ticket.ended_by == "executor" and (
+        if not trigger.console_mode and trigger.human and not context_only and ticket.ended_by == "executor" and (
             not item.peer_evidence or not (ticket.attention or self.waits_for_person(ticket))
         ):
             ticket.ended_at = ticket.ended_by = ticket.outcome = None
             ticket.assignments.append(Assignment(key("assignment", ticket.id, trigger.id), self.now()))
         self.r.tickets.save(ticket)
+        if trigger.console_mode:
+            return
         self._wake(
             ticket,
             human=trigger.human
@@ -260,11 +269,14 @@ class Engine:
             and (trigger.id not in ticket.origin_ids or ticket.mandate.strength == "explicit"),
         )
 
-    def _wake(self, ticket: Ticket, *, human: bool = False) -> None:
+    def _wake(self, ticket: Ticket, *, human: bool = False, continuation: str | None = None) -> None:
         if self.config.paused or ticket.ended_by == "human" or not ticket.assignments:
             return
         assignment = ticket.assignments[-1]
         if assignment.ended_at:
+            return
+        if self.config.source_kind == "feishu" and assignment.report and assignment.report.state == "failed":
+            # 跟进交给主会话识别是否明确重试；不能同时唤醒失败安排和新安排。
             return
         if ticket.attention and not human:
             return
@@ -281,9 +293,46 @@ class Engine:
                 "assignment_id": assignment.id,
                 "input_count": len(ticket.inputs),
                 "status_request": ticket.status_requests,
+                **({"continuation": continuation} if continuation else {}),
             },
             priority=1 if human else 0,
         )
+
+    def attach_console_input(self, ticket: Ticket, trigger: Trigger) -> None:
+        """把已鉴权的控制台指令直接交给指定任务，跳过群消息自动接单。"""
+        if ticket.ended_by == "human" or not revalidate(self.config, ticket.mandate, authorized=True):
+            raise CoordinationError("MANDATE_REVOKED")
+        self.r.triggers.save(trigger)
+        self._input(ticket, trigger)
+        if trigger.console_mode == "retry":
+            self.retry(ticket.id, trigger.id)
+
+    def advance_console_inputs(self) -> None:
+        """待续接输入等本轮验收和结果入箱，再启动同一任务的下一轮。"""
+        if not self.config.enabled or self.config.paused:
+            return
+        for ticket in self.r.tickets.list():
+            if ticket.ended_by == "human" or not ticket.assignments:
+                continue
+            assignment = ticket.assignments[-1]
+            report = assignment.report
+            if not report or report.state not in {"waiting", "ready"} or not report.verified:
+                continue
+            pending = next((
+                trigger for item in ticket.inputs
+                if item.id in ticket.undelivered and item.run_id is None
+                and (trigger := self.r.triggers.get(item.trigger_id or "")) and trigger.authorized
+                and trigger.console_mode == "continue"
+            ), None)
+            if not pending:
+                continue
+            if ticket.outcome == "ready":
+                if not self.r.replies.exists(key("result", ticket.id, assignment.id)):
+                    continue
+                ticket.ended_at = ticket.ended_by = ticket.outcome = None
+                ticket.assignments.append(Assignment(key("assignment", ticket.id, pending.id), self.now()))
+                self.r.tickets.save(ticket)
+            self._wake(ticket, human=True, continuation=pending.id)
 
     @staticmethod
     def waits_for_person(ticket: Ticket) -> bool:
@@ -588,6 +637,10 @@ class Engine:
                     self.r.triggers.save(item)
             self.r.tickets.save(ticket)
             acknowledgement = result.get("acknowledgement")
+            if self.config.source_kind == "feishu" and trigger.human:
+                acknowledgement = acknowledgement.strip() if isinstance(acknowledgement, str) else ""
+                if not acknowledgement or len(acknowledgement) > 240:
+                    acknowledgement = TASK_ACCEPTANCE_REPLY
             if isinstance(acknowledgement, str) and acknowledgement.strip():
                 self.reply(trigger.id, "ack", acknowledgement, ticket_id=ticket.id)
             self.record_notice("ticket.accepted", ticket_id, {"ticket_id": ticket_id})
@@ -806,6 +859,8 @@ class Engine:
         ticket, trigger = self.ticket(ticket_id), self.r.triggers.get(trigger_id)
         if not trigger or not any(item.trigger_id == trigger_id for item in ticket.inputs):
             raise CoordinationError("INPUT_NOT_REACHED")
+        if trigger.console_mode:
+            raise CoordinationError("CONSOLE_INPUT_TASK_BOUND")
         if ticket_id in trigger.handbacks:
             raise CoordinationError("ALREADY_HANDED_BACK")
         if not reason.strip():
@@ -891,8 +946,25 @@ class Engine:
             raise CoordinationError("NEW_HUMAN_RETRY_REQUIRED")
         if not ticket.delivery_error and (not previous.report or previous.report.state not in {"blocked", "failed"}):
             raise CoordinationError("NOT_RETRYABLE")
+        if self.config.source_kind == "feishu" and not any(item.run_id for item in ticket.assignments):
+            ack = self.r.replies.get(key("ack", ticket.origin_id))
+            if ack and ack.state != "sent" and (
+                ack.state != "pending" or not self.r.effects.retry_blocked_reply(ack.id, self.now())
+            ):
+                raise CoordinationError("FEISHU_ACK_NOT_RETRYABLE")
         previous.ended_at, previous.end_reason = self.now(), "retried"
-        ticket.assignments.append(Assignment(key("assignment", ticket.id, trigger.id), self.now()))
+        if self.config.source_kind == "feishu" and previous.report and previous.report.state == "failed":
+            # 重试接管后，旧失败通知仍可追溯，但不应继续阻塞新 Worker。
+            notice = self.r.replies.get(key("attention", ticket.attention_id)) if ticket.attention_id else None
+            if notice and notice.state == "pending":
+                notice.state = "withdrawn"
+                self.r.effects.cancel("reply", notice.id)
+            ticket.attention = ticket.attention_id = ticket.attention_trigger_id = None
+        ticket.assignments.append(
+            Assignment(
+                key("assignment", ticket.id, trigger.id), self.now(), refresh_model=self.config.source_kind == "feishu",
+            )
+        )
         ticket.ended_at = ticket.ended_by = ticket.outcome = None
         ticket.delivery_error = None
         # 只重投未读输入，未知写入由 Runs 的恢复/审批机制处理，不能在这里复制写命令。
@@ -940,13 +1012,25 @@ class Engine:
         ticket.updated_at = self.now()
         previous_attention_id = ticket.attention_id
         ask_author = question_from_peer or self.peer_evidence_only(ticket)
-        attention_target = ticket.origin_id if ask_author else report.question_trigger_id or ticket.origin_id
+        notify_feishu_attention = self.config.source_kind == "feishu" and report.state in {
+            "blocked", "waiting", "failed",
+        }
+        notify_origin = ask_author or notify_feishu_attention
+        attention_target = ticket.origin_id if notify_origin else report.question_trigger_id or ticket.origin_id
+        notify_feishu_failure = self.config.source_kind == "feishu" and report.state == "failed"
+        # 同一次失败对账只通知一次；重试后的新 Run 即使报同一个错，也要再告诉用户。
+        failure_attention_id = (
+            key("feishu-failure", assignment.id, assignment.run_id or "dispatch")
+            if notify_feishu_failure else None
+        )
         if report.human_action and (
-            report.human_action != ticket.attention or (ask_author and attention_target != ticket.attention_trigger_id)
+            report.human_action != ticket.attention
+            or (notify_origin and attention_target != ticket.attention_trigger_id)
+            or (failure_attention_id is not None and failure_attention_id != ticket.attention_id)
         ):
             ticket.attention, ticket.attention_id = (
                 report.human_action,
-                key(assignment.id, report.at, report.human_action),
+                failure_attention_id or key(assignment.id, report.at, report.human_action),
             )
             ticket.attention_trigger_id = attention_target
         elif report.state == "ready" or (report.human_action_supplied and report.human_action is None):
@@ -975,10 +1059,10 @@ class Engine:
             ticket.ended_at, ticket.ended_by, ticket.outcome = self.now(), "executor", result
             self._release_untaken(ticket)
         self.r.tickets.save(ticket)
-        if report.human_action and ask_author:
+        if report.human_action and notify_origin:
             origin = self.r.triggers.get(ticket.origin_id)
             if origin and origin.authorized and ticket.attention_trigger_id == origin.id:
-                # 向原发起人的消息请求确认，不能把补充人当作批准人。
+                # 平台按已保存的阻塞说明回原话题，主会话转述失败也不会丢失请求。
                 self.reply(origin.id, "attention", report.human_action, ticket_id=ticket.id)
         self.record_notice(
             "ticket.report",
@@ -997,6 +1081,12 @@ class Engine:
         waiting = set(ticket.undelivered)
         ticket.undelivered.clear()
         for item in ticket.inputs:
+            console = self.r.triggers.get(item.trigger_id or "")
+            if console and console.console_mode:
+                # 控制台消息始终属于本任务，不能退回群消息评估或生成另一任务。
+                if console.console_mode == "continue" and not item.run_id and ticket.ended_by != "human":
+                    ticket.undelivered.append(item.id)
+                continue
             if item.peer_evidence:
                 trigger = self.r.triggers.get(item.trigger_id) if item.trigger_id else None
                 if (
@@ -1029,7 +1119,9 @@ class Engine:
             ):
                 self._queue(trigger)
 
-    def mark_input(self, ticket_id: str, assignment_id: str, input_id: str, *, read: bool = False) -> None:
+    def mark_input(
+        self, ticket_id: str, assignment_id: str, input_id: str, *, read: bool = False, run_id: str | None = None,
+    ) -> None:
         """记录当前安排的投递或已读回执；禁止把旧安排的输入重新记账到新安排。"""
         ticket = self.ticket(ticket_id)
         if not ticket.assignments or ticket.assignments[-1].id != assignment_id or ticket.ended_by == "human":
@@ -1040,6 +1132,8 @@ class Engine:
         if item.delivered_to and item.delivered_to != assignment_id:
             raise CoordinationError("STALE_ASSIGNMENT")
         item.delivered_to, item.delivered_at = assignment_id, item.delivered_at or self.now()
+        if run_id and (trigger := self.r.triggers.get(item.trigger_id or "")) and trigger.console_mode:
+            item.run_id = run_id
         item.status = "read" if read else "delivered"
         if read:
             item.read_at = item.read_at or self.now()
@@ -1059,7 +1153,7 @@ class Engine:
             raise CoordinationError("REPLY_INVALID")
         if artifact_ids and (purpose != "result" or len(artifact_ids) > 2):
             raise CoordinationError("REPLY_INVALID")
-        if self.config.source_kind == "feishu" and purpose in {"ack", "result", "answer"} and len(text) > 240:
+        if self.config.source_kind == "feishu" and purpose == "ack" and len(text) > 240:
             raise CoordinationError("REPLY_TOO_LONG")
         try:
             artifact_ids = tuple(str(UUID(value)) for value in artifact_ids)
@@ -1133,5 +1227,44 @@ class Engine:
         if purpose == "ack" and ticket and ticket.id not in trigger.acknowledged:
             trigger.acknowledged.append(ticket.id)
             self.r.triggers.save(trigger)
-        self.r.effects.enqueue("reply", identity, {"reply_id": identity})
+        # 首回优先派发；Worker 还须在派发事务中核对飞书回执，队列优先级本身不保证顺序。
+        first_reply = (
+            self.config.source_kind == "feishu"
+            and purpose == "ack"
+            and ticket is not None
+            and ticket.origin_id == trigger_id
+        )
+        self.r.effects.enqueue("reply", identity, {"reply_id": identity}, priority=2 if first_reply else 0)
         return reply
+
+    def relay_retried_results(self, console_url: str | None) -> None:
+        """主会话漏发时，兜底回传已经验收的飞书重试结果，不重复投递。"""
+        if self.config.source_kind != "feishu" or self.config.paused or not self.config.enabled:
+            return
+        now = self.now()
+        for ticket in self.r.tickets.list():
+            if ticket.outcome != "ready" or not ticket.ended_at or later(ticket.ended_at, 20) > now:
+                continue
+            assignment = ticket.assignments[-1]
+            report = assignment.report
+            origin = self.r.triggers.get(ticket.origin_id)
+            if (
+                not assignment.run_id or not report
+                or report.state != "ready" or not report.verified or not origin or not origin.authorized
+                or self.r.replies.exists(key("result", ticket.id, assignment.id))
+            ):
+                continue
+            if not assignment.refresh_model and not any(
+                (trigger := self.r.triggers.get(item.trigger_id or "")) and trigger.console_mode
+                and (item.run_id == assignment.run_id or item.id in ticket.undelivered)
+                for item in ticket.inputs
+            ):
+                continue
+            link = f"\n\n完整结果：{console_url.rstrip('/')}/runs/{assignment.run_id}" if console_url else ""
+            if len(link) >= 150:
+                link = ""
+            suffix = link or "\n\n完整结果见 Weora 运行详情。"
+            summary = brief_reply(report.summary).split("\n\n详细过程见 Weora 运行记录。", 1)[0]
+            limit = 240 - len(suffix)
+            text = summary if len(summary) <= limit else summary[:limit - 1].rstrip() + "…"
+            self.reply(origin.id, "result", text + suffix, ticket_id=ticket.id)

@@ -38,6 +38,11 @@ class Gate:
 def gate(config: Config, trigger: Trigger, *, participating: bool = False) -> Gate:
     if not config.enabled or not trigger.authorized or trigger.filtered:
         return Gate(False, reason=trigger.filtered or "source_or_actor_revoked")
+    if config.source_kind == "feishu" and trigger.origin.get("route_key") and (
+        trigger.origin.get("route_key") != config.route_key
+        or trigger.origin.get("project_grant_id") != config.project_grant_id
+    ):
+        return Gate(False, reason="route_grant_changed")
     listed = trigger.actor_open_id in config.allowed_actors
     if not trigger.human:
         allowed = trigger.actor_open_id in config.allowed_bots

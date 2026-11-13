@@ -337,6 +337,7 @@ def create_app(
             app.state.project_service,
             app.state.delivery_service,
             app.state.code_event_reader,
+            console_url=resolved_settings.console_public_url,
         )
         if context
         else None
@@ -363,7 +364,9 @@ def create_app(
                 return
             try:
                 await coordinator.authorize_runtime_origin(
-                    RunActor(scope.actor.user_id, scope.actor.workspace_id), origin
+                    RunActor(scope.actor.user_id, scope.actor.workspace_id), origin,
+                    unbound_history=detail.run.status in {"SUCCEEDED", "FAILED", "CANCELLED"}
+                    and detail.task.project_context is None,
                 )
             except (CoordinationError, ProjectError, DeliveryError) as error:
                 raise ContextError(error.code) from None

@@ -20,6 +20,7 @@ from weora.modules.agents.application.service import AgentRegistryService
 from weora.modules.collaboration.application.tasks import TaskRecord
 from weora.modules.context.channels import FeishuChannels
 from weora.modules.context.domain import ContextActor, ContextError, Json
+from weora.modules.context.replies import TASK_ACCEPTANCE_REPLY
 from weora.modules.context.service import ContextService
 from weora.modules.context.store import SqlContextStore
 from weora.modules.coordination.domain import CoordinationError
@@ -128,7 +129,7 @@ async def _generate_title() -> bool:
                 profile, runtime_id=PI_RUNTIME, max_tokens=min(profile.max_tokens or 128, 128),
                 timeout_seconds=budget, execution_timeout_seconds=budget,
             )
-            # 标题用轻量文本执行器，沿用冻结的模型和凭据，不启动任务选用的 Agent 执行器。
+            # 标题沿用冻结模型和凭据，由轻量文本内核概括原始请求。
             return await harness_factory(settings, profile, api_key)(None, None).run(payload, profile)
 
         return await generate_next_title(lambda: SqlAlchemyRunsUnitOfWork(sessions), generate)
@@ -548,6 +549,22 @@ async def _pump_context(app: FastAPI) -> None:
                     and detail.task.audience == "group"
                     and not (detail.task.origin_metadata or {}).get("coordination_scope_id")
                 ):
+                    ack_key = f"run-ack:{detail.run.id}"
+                    if (
+                        item.get("send_acceptance_reply")
+                        and detail.run.status != "CANCELLED"
+                        and not await context.store.get(workspace_id, "delivery", ack_key)
+                    ):
+                        try:
+                            scope = await app.state.context_scope_factory(
+                                ContextActor(actor.user_id, workspace_id), detail.run.id
+                            )
+                            await channels.enqueue_delivery(
+                                scope, str(item["id"]), TASK_ACCEPTANCE_REPLY, ack_key
+                            )
+                        except ContextError:
+                            # 首回失败不影响执行或已有的结果回报。
+                            pass
                     text: str | None = None
                     business_key = f"run-result:{detail.run.id}"
                     if detail.run.status == "SUCCEEDED" and detail.run.output_text:
@@ -569,7 +586,9 @@ async def _pump_context(app: FastAPI) -> None:
                             await channels.enqueue_delivery(scope, str(item["id"]), text, business_key)
                         except ContextError:
                             continue
-        for item in await context.store.list(workspace_id, "delivery"):
+        deliveries = await context.store.list(workspace_id, "delivery")
+        # 同一次扫描先尝试首回，短任务的结果可能已经同时入队。
+        for item in sorted(deliveries, key=lambda row: not str(row["business_key"]).startswith("run-ack:")):
             if item.get("status") == "PENDING":
                 try:
                     scope = await app.state.context_scope_factory(

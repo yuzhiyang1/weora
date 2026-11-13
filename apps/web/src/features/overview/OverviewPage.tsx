@@ -18,7 +18,7 @@ import { Card, Chip, Skeleton } from "@heroui/react";
 import { listAgents } from "../agents/api";
 import { useAuth } from "../auth/AuthProvider";
 import { listProjects } from "../projects/api";
-import { listRuns } from "../runs/api";
+import { listRuns, runTaskTitle } from "../runs/api";
 import { RunStatusTag } from "../runs/RunStatusTag";
 import { listSkills } from "../skills/api";
 import { formatDate } from "../skills/SkillsPage";
@@ -172,7 +172,7 @@ export function OverviewPage() {
                   to={`/runs/${run.id}`}
                   key={run.id}
                 >
-                  <strong>{run.agent_name}</strong>
+                  <strong>{runTaskTitle(run)}</strong>
                   <RunStatusTag status={run.status} />
                   {mobileTaskAction}
                 </Link>
@@ -234,9 +234,9 @@ export function OverviewPage() {
                       <Bot size={17} />
                     </span>
                     <span>
-                      <strong>{run.agent_name}</strong>
+                      <strong>{runTaskTitle(run)}</strong>
                       <small>
-                        版本 {run.agent_version} · {formatDate(run.created_at)}
+                        {run.agent_name} · 版本 {run.agent_version} · {formatDate(run.created_at)}
                       </small>
                     </span>
                     <RunStatusTag status={run.status} />

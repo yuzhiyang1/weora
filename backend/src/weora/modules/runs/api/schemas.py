@@ -34,7 +34,7 @@ class ContinueTaskRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
     instruction: str = Field(min_length=1, max_length=16000)
-    mode: Literal["continue", "steer"] = "continue"
+    mode: Literal["continue", "steer", "retry"] = "continue"
 
     @field_validator("instruction")
     @classmethod
@@ -84,6 +84,8 @@ class RunDetailResponse(RunSummaryResponse):
     cancellation_requested_at: datetime | None = None
     execution_profile: ExecutionProfileResponse | None = None
     recovery_read_only: bool = False
+    # 协调任务仍需发起人处理的原因，和本轮执行状态分别保存。
+    task_blocked_attention: str | None = None
     context_cutoff: datetime
     project_context: dict[str, object] | None = None
 

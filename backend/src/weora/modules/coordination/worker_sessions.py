@@ -64,7 +64,7 @@ class WorkerSession:
         return session
 
     async def open(self, model_id: str, runtime_id: str = PI_RUNTIME) -> RuntimeSession:
-        """原子接管持久日志；只改领取代次，保留已确认历史和冻结的模型选择。"""
+        """原子接管持久日志；保留历史，记录本次 Run 已冻结的模型。"""
 
         def acquire(_: Engine, state: State) -> Session:
             self.check(state)
@@ -76,7 +76,7 @@ class WorkerSession:
                 raise RuntimeFailure("HARNESS_SESSION_MISMATCH")
             session.runtime_id = runtime_id
             session.owner, session.generation = self.binding.owner, session.generation + 1
-            session.model_id = session.model_id or model_id
+            session.model_id = model_id
             records(state).sessions.save(session)
             return session
 
@@ -117,6 +117,14 @@ class WorkerSession:
             trigger = records(state).triggers.get(item.trigger_id) if item.trigger_id else None
             if trigger and not trigger.authorized:
                 continue
+            if trigger and trigger.console_mode:
+                run_id = str(self.binding.lease.run.id)
+                if trigger.console_mode == "steer" and (
+                    trigger.console_target != run_id or trigger.console_fence != self.binding.lease.fencing_token
+                ):
+                    continue
+                if trigger.console_mode == "continue" and trigger.console_target == run_id:
+                    continue
             needs_author = Engine.waits_for_person(ticket) or ticket.attention
             if needs_author and (not item.human or item.context_only or item.peer_evidence):
                 continue
@@ -146,7 +154,9 @@ class WorkerSession:
 
         def save(engine: Engine, state: State) -> None:
             self._stored(state)
-            engine.mark_input(self.binding.ticket_id, self.binding.assignment_id, identity)
+            engine.mark_input(
+                self.binding.ticket_id, self.binding.assignment_id, identity, run_id=str(self.binding.lease.run.id),
+            )
 
         await self.service.store.transact(
             self.workspace_id,
@@ -177,7 +187,10 @@ class WorkerSession:
                     continue
                 previous = next((item for item in ticket.inputs if item.id == identity), None)
                 if not previous or not previous.read_at:
-                    engine.mark_input(ticket.id, self.binding.assignment_id, identity, read=True)
+                    engine.mark_input(
+                        ticket.id, self.binding.assignment_id, identity,
+                        read=True, run_id=str(self.binding.lease.run.id),
+                    )
 
         await self.service.store.transact(self.workspace_id, self.binding.scope_id, save)
         if self.port:

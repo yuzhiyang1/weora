@@ -61,6 +61,16 @@ class Effects:
             return
         self.state.effects.append(Effect(effect_id, kind, identity, data, priority))
 
+    def retry_blocked_reply(self, identity: str, now: str) -> bool:
+        """明确未发送时才重开失败回复，保持原幂等键并重置退避。"""
+        effect = next((item for item in self.state.effects if item.id == key("reply", identity)), None)
+        if not effect or effect.state != "blocked":
+            return False
+        effect.state, effect.error, effect.attempts = "pending", None, 0
+        effect.queued_at = effect.available_at = now
+        effect.generation += 1
+        return True
+
     def cancel(self, kind: EffectKind, identity: str) -> None:
         """撤销尚未发送或执行的副作用，并使旧 generation 的完成记录失效。"""
         effect = next((item for item in self.state.effects if item.id == key(kind, identity)), None)

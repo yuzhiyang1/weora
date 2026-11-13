@@ -10,6 +10,7 @@ from typing import cast
 from uuid import UUID
 
 from weora.modules.context.domain import ContextActor, Json
+from weora.modules.context.replies import TASK_ACCEPTANCE_REPLY
 from weora.modules.context.service import ContextService
 from weora.modules.coordination.domain import CoordinationError, DeferredEffect, Effect, State
 from weora.modules.coordination.engine import Engine, key, later
@@ -31,6 +32,7 @@ class WorkerDispatcher:
         state: State,
         effect: Effect,
         *,
+        runtime_available: bool = True,
         external_link: Callable[[ContextActor, Json, UUID], Awaitable[None]] | None = None,
     ) -> None:
         """派发一轮已授权执行，并以固定请求补偿跨模块提交窗口。
@@ -45,6 +47,8 @@ class WorkerDispatcher:
             return
         assignment = ticket.assignments[-1]
         if assignment.id != effect.data["assignment_id"]:
+            return
+        if state.config.source_kind == "feishu" and assignment.report and assignment.report.state == "failed":
             return
         if Engine.waits_for_person(ticket):
             return
@@ -64,6 +68,9 @@ class WorkerDispatcher:
             for item in ticket.inputs
             if not item.read_at
             and not item.context_only
+            and not (
+                (trigger := records(state).triggers.get(item.trigger_id or "")) and trigger.console_mode == "steer"
+            )
             and (not item.peer_evidence or not ticket.attention)
             and (item.id in ticket.undelivered or item.delivered_to == assignment.id)
         ][:8]
@@ -76,6 +83,9 @@ class WorkerDispatcher:
                 "WAITING_CONTEXT",
                 "RECOVERY_REQUIRED",
             }:
+                return
+            if state.config.source_kind == "feishu" and detail and detail.run.status in {"FAILED", "CANCELLED"}:
+                # 原生 Run 可能先结束、协调报告稍后才到；这一窗口也只允许明确重试产生的新安排。
                 return
             # 持久会话的下一轮仍走同一 Task，新 Run 不继承旧批准。
             if not pending and not assignment.status_only:
@@ -103,8 +113,25 @@ class WorkerDispatcher:
             if not source or not revalidate(current.config, active.mandate, authorized=source.authorized):
                 raise CoordinationError("MANDATE_REVOKED")
 
-        def reserve(engine: Engine, current: State) -> None:
+        def reserve(engine: Engine, current: State) -> bool | None:
             require_launch(engine, current)
+            if anchor_id is None and current.config.source_kind == "feishu" and origin.human:
+                active = engine.ticket(ticket.id)
+                ack = records(current).replies.get(key("ack", active.origin_id))
+                if ack is None:
+                    # 升级前已经接单、但尚未派发的任务也必须补齐首回。
+                    engine.reply(active.origin_id, "ack", TASK_ACCEPTANCE_REPLY, ticket_id=active.id)
+                    return False
+                if ack.state != "sent" or not ack.remote_message_id:
+                    if any(
+                        item.id == key("reply", ack.id) and item.state in {"blocked", "unknown", "cancelled"}
+                        for item in current.effects
+                    ):
+                        # 已终止的回复不会自动恢复。明确重试会重新安排 Worker，无须持续轮询。
+                        return None
+                    return False
+            if not runtime_available:
+                raise CoordinationError("RUNTIME_NOT_CONFIGURED")
             reservations = cast(Json, current.checkpoints.setdefault("worker_slots", {}))
             now = engine.now()
             leased_effects = {item.id for item in current.effects if item.is_owned_by(item.owner, now)}
@@ -127,11 +154,29 @@ class WorkerDispatcher:
             if len(active_tickets | reserved) >= limit:
                 raise DeferredEffect("WORKER_CAPACITY_WAIT")
             reservations[ticket.id] = {"owner": effect.id, "until": later(now, 30)}
+            return True
 
-        await self.store.transact(workspace_id, scope_id, reserve)
+        reserved = await self.store.transact(workspace_id, scope_id, reserve)
+        if reserved is None:
+            return
+        if not reserved:
+            raise DeferredEffect("WAITING_FOR_FEISHU_ACK")
 
         # 一次冻结本轮输入与来源，包括优先级；提交后新消息不得改变原生请求摘要。
         instruction = "任务范围预览（完整范围用 orchestrator_read）：\n" + ticket.mandate.scope[:4000]
+        refresh_retry = assignment.refresh_model and assignment.run_id is None
+        console_followup = any(
+            (trigger := records(state).triggers.get(item.trigger_id or "")) and trigger.console_mode
+            for item in pending
+        )
+        if refresh_retry:
+            instruction += (
+                "\n发起人已明确重试，上一轮失败记录只供参考。本轮执行原任务并交付实际结果，"
+                "不要只报告状态。完成后用 orchestrator_report 提交 ready 与可转发的结果；"
+                "若仍不能完成，报告实际原因。既有授权和验收规则仍适用。"
+            )
+        elif console_followup:
+            instruction += "\n处理发起人在控制台补充的指令。完成后提交可回传的结果，沿用原任务的授权和审批规则。"
         if state.config.source_kind == "code_hosting" and origin.origin.get("root_text"):
             root = str(origin.origin["root_text"])
             instruction += (
@@ -158,13 +203,14 @@ class WorkerDispatcher:
                 ],
                 ensure_ascii=False,
             )
-        if assignment.status_only:
+        status_only = assignment.status_only and not console_followup
+        if status_only:
             instruction = "只报告当前任务状态，不实施新修改，不调用写工具。原任务：" + ticket.mandate.scope[:4000]
         frozen_origin = dict(origin.origin, coordination_ticket_id=ticket.id, coordination_assignment_id=assignment.id)
         # 正文只进入有统一清理路径的 Task 指令；来源元数据保留地址与授权引用。
         frozen_origin.pop("root_text", None)
         frozen_origin["coordination_priority"] = effect.priority
-        if assignment.status_only:
+        if status_only:
             frozen_origin["coordination_status_only"] = True
         batch_id = key(anchor_id or "initial", str(ticket.status_requests), *(item.id for item in pending))
         # Runs 的幂等键上限为 128；拼接多个摘要在 SQLite 可写、PostgreSQL 会拒绝。
@@ -180,6 +226,9 @@ class WorkerDispatcher:
 
         def freeze_launch(engine: Engine, current: State) -> Json:
             require_launch(engine, current)
+            if refresh_retry:
+                # 即使协调 Worker 崩溃重放，也要保持本轮选中的路由模型覆盖项。
+                draft["retry_model_id"] = current.config.worker_model_id
             # Native Run 已创建而回写前崩溃时，后来的消息不能改变重试指纹或生成第二个 Task。
             return cast(Json, current.checkpoints.setdefault(launch_key, draft))
 
@@ -191,6 +240,8 @@ class WorkerDispatcher:
             # 兼容此前冻结但因长度限制尚未写入 PostgreSQL 的 launch；每次恢复得到同一个键。
             request_key = f"coord:{key(request_key)}"
         pending = [item for item in ticket.inputs if item.id in cast(list[str], launch["input_ids"])]
+        refresh_model = "retry_model_id" in launch
+        retry_model_id = cast(str | None, launch.get("retry_model_id"))
 
         # 原生 Task/Run 只能通过 Runs 应用接口写入；这里不接触其 ORM 或重放业务工具。
         if anchor_id:
@@ -201,6 +252,8 @@ class WorkerDispatcher:
                 idempotency_key=request_key,
                 request_id=request_key,
                 origin_metadata=launch_origin,
+                refresh_model=refresh_model,
+                retry_model_id=retry_model_id,
             )
             if not item.run_id:
                 raise DeferredEffect("TASK_INPUT_WAIT")
@@ -217,7 +270,7 @@ class WorkerDispatcher:
                 origin_metadata=launch_origin,
                 project_id=UUID(state.config.project_id) if state.config.project_id else None,
                 repository_ids=tuple(UUID(item) for item in state.config.repository_ids),
-                model_id=ticket.mandate.worker_model_id,
+                model_id=retry_model_id if refresh_model else ticket.mandate.worker_model_id,
                 task_title=str(launch.get("title", ticket.title)),
             )
             run_id, task_id = str(detail.run.id), str(detail.task.id)
@@ -255,12 +308,11 @@ class WorkerDispatcher:
             active.assignments[-1].status_only = False
             cast(Json, current.checkpoints.get("worker_slots", {})).pop(ticket.id, None)
             current.checkpoints[f"inputs:{run_id}"] = [item.id for item in pending]
-            current_records = records(current)
-            current_records.tickets.save(active)
-            if anchor_id is None and current.config.source_kind == "feishu" and not active.ended_at:
-                # 首次绑定真实 Task 后，给显式 @ 请求补齐接单回执；已有回执按原消息去重。
-                current_origin = current_records.triggers.get(origin.id)
-                if current_origin and current_origin.authorized and current_origin.addressed:
-                    engine.reply(origin.id, "ack", "已接单。", ticket_id=active.id)
+            pending_ids = {item.id for item in pending}
+            for item in active.inputs:
+                trigger = records(current).triggers.get(item.trigger_id or "")
+                if item.id in pending_ids and trigger and trigger.console_mode:
+                    item.run_id = run_id
+            records(current).tickets.save(active)
 
         await self.store.transact(workspace_id, scope_id, bind)

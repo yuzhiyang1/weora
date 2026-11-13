@@ -35,10 +35,7 @@ async def test_outbox_reserves_send_once_and_rejects_expired_owner(contextual: C
     coordinator, scope_id = await configure(h)
     workspace_id = h.context_actor.workspace_id
     await receive(h, coordinator)
-    ticket_id = await decide(h, coordinator, scope_id)
-    # 飞书接单回执需要先绑定原生任务编号，之后才进入发送租约竞争。
-    state = await coordinator.store.snapshot(workspace_id, scope_id)
-    await coordinator.launch(workspace_id, scope_id, next(item for item in state.effects if item.kind == "worker"))
+    ticket_id = await decide(h, coordinator, scope_id, confirm=False)
     answer = await coordinator.tool(
         workspace_id,
         scope_id,

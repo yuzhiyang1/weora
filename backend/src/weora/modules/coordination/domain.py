@@ -108,6 +108,10 @@ class Trigger:
     expires_at: str | None = None
     # 同一飞书话题的其他成员提供的证据，不能再进入新任务评估。
     peer_evidence: bool = False
+    # 控制台输入仍属于原话题。实时指令只对提交时的运行租约有效。
+    console_mode: Literal["continue", "steer", "retry"] | None = None
+    console_target: str | None = None
+    console_fence: int | None = None
 
 
 @dataclass
@@ -202,6 +206,8 @@ class Assignment:
     status_only: bool = False
     # 报告时已接收的输入数；后来的有效人类输入解除自动消息挂起，不依赖外部时间戳。
     report_input_count: int | None = None
+    # 明确重试的第一轮读取当前模型；普通续接继续沿用运行快照。
+    refresh_model: bool = False
 
 
 @dataclass
@@ -219,6 +225,8 @@ class Input:
     status: str = "pending"
     # 可交给原 Worker 核实，但不能解除人工等待或代表原发起人授权。
     peer_evidence: bool = False
+    # 记录实际接收指令的 Run，避免回执随同一安排的后续 Run 漂移。
+    run_id: str | None = None
 
 
 @dataclass
@@ -389,6 +397,7 @@ class Repository[T](Protocol):
 
 class EffectQueue(Protocol):
     def enqueue(self, kind: EffectKind, key: str, data: Json, *, priority: int = 0) -> None: ...
+    def retry_blocked_reply(self, identity: str, now: str) -> bool: ...
     def cancel(self, kind: EffectKind, key: str) -> None: ...
 
 
