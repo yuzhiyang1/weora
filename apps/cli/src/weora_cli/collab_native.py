@@ -37,6 +37,10 @@ def profile(runtime: str) -> str:
 
 def install_hook(runtime: str, *, auto: bool) -> dict[str, JsonValue]:
     """追加当前用户的 Weora hook，保留客户端已经安装的其他处理器。"""
+    if runtime in {"opencode", "pi", "cursor"}:
+        from weora_cli.collab_install import install
+
+        return install(runtime, auto=auto)
     if runtime not in NATIVE:
         raise CollabError("UNKNOWN_HOOK_FORMAT", "该运行时可通过 register 接入，需要按其原生格式配置 hook。")
     path = _home(runtime) / ("hooks.json" if runtime == "codex" else "settings.json")

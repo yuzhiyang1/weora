@@ -9,8 +9,10 @@ from unittest.mock import Mock, patch
 from uuid import uuid4
 
 from weora_cli.collab_client import Client, CollabError, pair, paired_client
+from weora_cli.collab_kimi import KimiAcp
 from weora_cli.collab_native import adapter, install_hook, profile
-from weora_cli.collaboration import _resolve, wake_pending
+from weora_cli.collaboration import _cursor_hook, _resolve, wake_pending
+from weora_cli.commands import JsonValue
 
 
 class CollaborationTests(unittest.TestCase):
@@ -102,6 +104,61 @@ class CollaborationTests(unittest.TestCase):
         self.assertIn(session, hint)
         self.assertIn(message, hint)
         self.assertNotIn(item["body"], hint)
+
+    def test_session_bridge_cannot_reserve_a_neighbor_session(self) -> None:
+        client = Mock(spec=Client)
+        ours, neighbor, message, other_message = (str(uuid4()) for _ in range(4))
+        rows = [
+            {"session_id": neighbor, "message_id": other_message, "delivery": "channel", "wake": True},
+            {"session_id": ours, "message_id": message, "delivery": "channel", "wake": True},
+        ]
+        client.request.side_effect = [{"items": rows}, {"reserved": True}, {}]
+        deliver = Mock(return_value="accepted")
+        with patch("builtins.print"):
+            wake_pending(client, resume=False, seen=set(), session=ours, local_wake=deliver)
+        reserve = client.request.call_args_list[1]
+        self.assertEqual(reserve.args, ("POST", f"/sessions/{ours}/messages/{message}/wake"))
+        self.assertNotIn(other_message, deliver.call_args.args[0])
+
+    def test_cursor_stop_uses_only_current_conversation_and_does_not_repeat(self) -> None:
+        client = Mock(spec=Client)
+        ours, neighbor, message, other_message = (str(uuid4()) for _ in range(4))
+        client.request.side_effect = [
+            {"id": ours},
+            {
+                "items": [
+                    {"session_id": neighbor, "message_id": other_message},
+                    {"session_id": ours, "message_id": message},
+                ]
+            },
+        ]
+        event: dict[str, JsonValue] = {
+            "conversation_id": "cursor-original",
+            "hook_event_name": "stop",
+            "status": "completed",
+            "loop_count": 0,
+        }
+        with patch("weora_cli.collaboration.paired_client", return_value=client):
+            result = _cursor_hook(event)
+            self.assertEqual(_cursor_hook(event | {"loop_count": 1}), {})
+        self.assertIn(message, str(result.get("followup_message")))
+        self.assertNotIn(other_message, str(result))
+        self.assertEqual(client.request.call_count, 2)
+
+    def test_kimi_permission_applies_to_the_bound_inbox_tools_only(self) -> None:
+        # ACP 的权限判断不应对字符串相似的工具或持久批准放行。
+        acp = KimiAcp.__new__(KimiAcp)
+        acp.inbox_tools = {"weora_kimi_test_claim"}
+        options: list[JsonValue] = [
+            {"kind": "allow_always", "optionId": "always"},
+            {"kind": "allow_once", "optionId": "once"},
+        ]
+        allowed = acp._permission({"toolCall": {"title": "weora_kimi_test_claim"}, "options": options})
+        self.assertEqual(allowed, {"outcome": "selected", "optionId": "once"})
+        for name in ("Shell", "weora_kimi_other_claim", "weora_kimi_test_send"):
+            self.assertEqual(
+                acp._permission({"toolCall": {"title": name}, "options": options}), {"outcome": "cancelled"}
+            )
 
     @unittest.skipUnless(os.name == "nt", "Windows 原生 inbox 使用 named pipe")
     def test_claude_windows_inbox_requires_exact_session_and_peer_token(self) -> None:

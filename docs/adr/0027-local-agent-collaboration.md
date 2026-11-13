@@ -25,6 +25,8 @@ Python 连接器通过 HTTPS 与 WSS 连到现有 Weora 服务。短期一次性
 
 Weora 采用中心化平台授权和 PostgreSQL 收件箱。Reason Network 自己的组网、团队邀请、P2P 传输和 SQLite 存储无需部署。设备对同一操作系统账户内的进程使用本机信任边界。仓库元数据与收到的正文均视为外部数据。
 
+新增客户端沿用[同一提交的投递分级](https://github.com/reason-machines/reason-network/blob/5442c8b551a6897b596c7695e51b0329551aaa6c/DESIGN.md#L321)。OpenCode 参考其[服务插件](https://github.com/reason-machines/reason-network/blob/5442c8b551a6897b596c7695e51b0329551aaa6c/src/opencode-plugin.ts)，Pi 参考其[会话扩展](https://github.com/reason-machines/reason-network/blob/5442c8b551a6897b596c7695e51b0329551aaa6c/src/pi-extension.ts)。Weora 插件用 stdio 订阅一条已绑定会话的收件引用，不需要开放本机端口。Cursor 使用会话 Hook，DeepSeek Harness 使用 MCP 主动领取。Kimi Code 使用[官方 ACP](https://moonshotai.github.io/kimi-code/en/reference/kimi-acp.html)启动或加载由连接器持有的会话，由会话内的 MCP 工具领取和回复。仅通过 ACP 恢复持久化记录无法确认另一进程已打开的会话收到提示。
+
 ## 入口
 
 Web 从「设置 → 本地 Agent」配对及管理直聊权限，协作任务详情展示任务会话、消息和证据。CLI 安装、配对、hook 和命令见 [Weora CLI](../../apps/cli/README.md)。

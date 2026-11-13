@@ -5,8 +5,11 @@ import json
 import subprocess
 import sys
 import time
+from collections.abc import Callable
+from contextlib import suppress
 from getpass import getpass
 from pathlib import Path
+from threading import Event
 from urllib.parse import urlencode
 from uuid import UUID, uuid4
 
@@ -14,7 +17,7 @@ from websockets.exceptions import WebSocketException
 from websockets.sync.client import connect
 
 from weora_cli.collab_client import Client, CollabError, as_object, items, pair, paired_client
-from weora_cli.collab_native import adapter, install_hook, profile
+from weora_cli.collab_native import Wake, adapter, install_hook, profile
 from weora_cli.commands import JsonValue
 
 
@@ -40,6 +43,29 @@ def arguments(parser: argparse.ArgumentParser) -> None:
     hook = commands.add_parser("hook", help="读取原生 hook 的 stdin，登记并提示当前会话")
     hook.add_argument("--runtime", required=True)
     hook.add_argument("--auto", action="store_true")
+
+    # 桥接命令由已打开的原生会话启动。收件引用走本机 stdio，不监听端口。
+    for action, description in (
+        ("session-bridge", "给本机插件订阅指定会话的收件提示"),
+        ("mcp", "用 MCP 提供绑定会话的查找、发送、领取和回复"),
+        ("kimi-acp", "启动或恢复由 Weora 连接的 Kimi ACP 会话"),
+        ("opencode-server", "连接 OpenCode 1.x 本机服务上已存在的会话"),
+    ):
+        local = commands.add_parser(action, help=description)
+        local.add_argument("--name", required=True)
+        if action == "kimi-acp":
+            local.add_argument("--session", help="恢复指定 Kimi 会话，而不是创建新会话")
+        elif action == "opencode-server":
+            local.add_argument("--url", required=True)
+            local.add_argument("--native-id", required=True)
+        elif action == "session-bridge":
+            local.add_argument("--runtime", required=True)
+            local.add_argument("--native-id", required=True)
+        else:
+            local.add_argument("--runtime", required=True)
+            binding = local.add_mutually_exclusive_group(required=True)
+            binding.add_argument("--native-id")
+            binding.add_argument("--binding-file", type=Path)
 
     connector = commands.add_parser("connect", help="保持本机在线并定向唤醒会话")
     connector.add_argument("--resume-codex", action="store_true", help="允许恢复尚未加载的 Codex 会话")
@@ -124,9 +150,10 @@ def _register(
     auto: bool,
     *,
     preserve_name: bool = False,
+    local_channel: bool = False,
 ) -> dict[str, JsonValue]:
     profile_id = profile(runtime)
-    delivery = adapter(runtime, profile_id, native)[0] if auto else "manual"
+    delivery = "channel" if local_channel else adapter(runtime, profile_id, native)[0] if auto else "manual"
     return client.request(
         "PUT",
         "/sessions",
@@ -162,6 +189,8 @@ def hook_output(args: argparse.Namespace) -> dict[str, JsonValue]:
     """无副作用地忽略不可用的接入；不会把接入失败升级成原生会话错误。"""
     try:
         event = as_object(json.load(sys.stdin))
+        if args.runtime == "cursor":
+            return _cursor_hook(event)
         native, cwd_text, name = (event.get("session_id"), event.get("cwd"), event.get("hook_event_name"))
         if name not in ("SessionStart", "UserPromptSubmit") or not isinstance(native, str):
             return {}
@@ -196,6 +225,32 @@ def hook_output(args: argparse.Namespace) -> dict[str, JsonValue]:
         return {}
 
 
+def _cursor_hook(event: dict[str, JsonValue]) -> dict[str, JsonValue]:
+    """Cursor 仅在原生 hook 触发时读取当前会话的收件提示。"""
+    name, native = event.get("hook_event_name"), event.get("conversation_id")
+    if name not in {"sessionStart", "postToolUse", "stop"} or not isinstance(native, str):
+        return {}
+    # 限制 Stop 续轮。同一封信没有被领取时不让 Cursor 反复启动模型。
+    if name == "stop" and (event.get("loop_count") != 0 or event.get("status") != "completed"):
+        return {}
+    roots = event.get("workspace_roots")
+    cwd = Path(str(roots[0])) if isinstance(roots, list) and roots else Path.cwd()
+    client = paired_client(timeout=2)
+    row = _register(client, "cursor", native, f"{cwd.name}-cursor"[:100], cwd.name[:120], "", False, preserve_name=True)
+    session_id = _id(row["id"])
+    message = next(
+        (item for item in items(client.request("GET", "/pending")) if item.get("session_id") == session_id),
+        None,
+    )
+    hint = _hint(session_id, _id(message["message_id"])) if message else None
+    if name == "stop":
+        return {"followup_message": hint} if hint else {}
+    context = f"Weora 会话 ID 为 {session_id}。用户要求跨会话协作时运行 weora collab sessions 查找对方。"
+    if hint:
+        context += " " + hint
+    return {"additional_context": context}
+
+
 def _hint(session_id: str, message_id: str) -> str:
     return (
         f"Weora 收件提示。用 weora collab claim --session {session_id} --message {message_id} 领取消息。"
@@ -205,13 +260,25 @@ def _hint(session_id: str, message_id: str) -> str:
     )
 
 
-def wake_pending(client: Client, *, resume: bool, seen: set[str], ids: set[str] | None = None) -> None:
+def wake_pending(
+    client: Client,
+    *,
+    resume: bool,
+    seen: set[str],
+    ids: set[str] | None = None,
+    session: str | None = None,
+    local_wake: Wake | None = None,
+) -> None:
     visited: set[str] = set()
     pending = items(client.request("GET", "/pending"))
     seen.intersection_update(_id(row["message_id"]) for row in pending)
     for item in pending:
         session_id, message_id = _id(item["session_id"]), _id(item["message_id"])
-        if session_id in visited or (ids is not None and message_id not in ids):
+        if (
+            (session is not None and session_id != session)
+            or session_id in visited
+            or (ids is not None and message_id not in ids)
+        ):
             continue
         if message_id not in seen:
             # 连接器日志只包含收件引用。主动领取的会话也会收到本地提醒。
@@ -223,7 +290,11 @@ def wake_pending(client: Client, *, resume: bool, seen: set[str], ids: set[str] 
             seen.add(message_id)
         if not item.get("wake"):
             continue
-        kind, handoff = adapter(str(item["runtime"]), str(item["profile"]), str(item["native_id"]), resume=resume)
+        handoff: Wake | None
+        if local_wake is not None:
+            kind, handoff = "channel", local_wake
+        else:
+            kind, handoff = adapter(str(item["runtime"]), str(item["profile"]), str(item["native_id"]), resume=resume)
         if handoff is None or kind != item["delivery"]:
             continue
         path = f"/sessions/{session_id}/messages/{message_id}/wake"
@@ -232,19 +303,37 @@ def wake_pending(client: Client, *, resume: bool, seen: set[str], ids: set[str] 
             client.request("PUT", path, {"state": handoff(_hint(session_id, message_id))})
 
 
-def connect_forever(client: Client, *, resume: bool) -> None:
+def connect_forever(
+    client: Client,
+    *,
+    resume: bool,
+    session: str | None = None,
+    local_wake: Wake | None = None,
+    stop: Event | None = None,
+) -> None:
+    if (session is None) != (local_wake is None):
+        raise ValueError("本机投递必须绑定一个确切的 Weora 会话")
     headers = {"Authorization": f"Bearer {client.token}"}
     delay = 1
     seen: set[str] = set()
-    while True:
+    while stop is None or not stop.is_set():
         try:
             with connect(client.socket_url, additional_headers=headers, open_timeout=8, max_size=65536) as stream:
-                while True:
+                while stop is None or not stop.is_set():
                     event = as_object(json.loads(stream.recv(timeout=25)))
+                    if stop is not None and stop.is_set():
+                        return
                     message_ids = event.get("message_ids")
                     if event.get("type") == "pending" and isinstance(message_ids, list):
                         if message_ids:
-                            wake_pending(client, resume=resume, seen=seen, ids={_id(value) for value in message_ids})
+                            wake_pending(
+                                client,
+                                resume=resume,
+                                seen=seen,
+                                ids={_id(value) for value in message_ids},
+                                session=session,
+                                local_wake=local_wake,
+                            )
                         else:
                             seen.clear()
                     delay = 1
@@ -252,12 +341,41 @@ def connect_forever(client: Client, *, resume: bool) -> None:
             # TLS 代理暂不支持 WSS 时仍能补取。认证撤销应终止本机连接器。
             try:
                 client.request("POST", "/presence")
-                wake_pending(client, resume=resume, seen=seen)
+                wake_pending(client, resume=resume, seen=seen, session=session, local_wake=local_wake)
             except CollabError as error:
                 if error.code == "AGENT_DEVICE_UNAUTHORIZED":
                     raise
             time.sleep(delay)
             delay = min(20, delay * 2)
+
+
+def open_local_session(
+    client: Client,
+    runtime: str,
+    native: str,
+    name: str,
+    wake: Wake,
+    *,
+    stop: Event | None = None,
+    on_registered: Callable[[str], None] | None = None,
+) -> None:
+    """登记由本机进程持有的原生通道，只为这一条会话竞争投递租约。"""
+    cwd = Path.cwd()
+    repo = Path(_git(cwd, "rev-parse", "--show-toplevel") or cwd).name
+    branch = _git(cwd, "branch", "--show-current")
+    row = _register(
+        client, runtime, native, name[:100], repo[:120], branch[:120], False, preserve_name=True, local_channel=True
+    )
+    session = _id(row["id"])
+    print(json.dumps({"event": "registered", "session_id": session}), flush=True)
+    try:
+        if on_registered:
+            on_registered(session)
+        connect_forever(client, resume=False, session=session, local_wake=wake, stop=stop)
+    finally:
+        # 正常退出时恢复为手动领取。进程被强制关闭时，服务端仍保留原消息。
+        with suppress(CollabError):
+            _register(client, runtime, native, name[:100], repo[:120], branch[:120], False, preserve_name=True)
 
 
 def execute(args: argparse.Namespace) -> JsonValue:
@@ -267,7 +385,27 @@ def execute(args: argparse.Namespace) -> JsonValue:
         return pair(args.url, args.workspace, code)
     if action == "install-hook":
         return install_hook(args.runtime, auto=args.auto)
+    if action == "mcp":
+        from weora_cli.collab_mcp import serve
+
+        serve(args.runtime, args.native_id, args.name, args.binding_file)
+        return {}
     client = paired_client()
+    if action == "session-bridge":
+        from weora_cli.collab_bridge import run
+
+        run(client, args.runtime, args.native_id, args.name)
+        return {}
+    if action == "kimi-acp":
+        from weora_cli.collab_kimi import run_kimi
+
+        run_kimi(client, args.name, args.session)
+        return {}
+    if action == "opencode-server":
+        from weora_cli.collab_opencode import run_opencode
+
+        run_opencode(client, args.url, args.native_id, args.name)
+        return {}
     if action == "register":
         return _register(client, args.runtime, args.native_id, args.name, args.repo, args.branch, args.auto)
     if action == "connect":
