@@ -296,9 +296,9 @@ class SkillRegistryService:
         contribution_id: UUID | None,
         draft_sha256: str | None,
     ) -> str | None:
-        """预览已登记的 UTF-8 文件，草稿与候选包仅供管理员审阅。"""
+        """预览已登记的 UTF-8 文件，待审候选包仍由管理员查看。"""
         self._require_workspace(actor, workspace_id)
-        if not version or contribution_id:
+        if contribution_id:
             self._require_write_role(actor)
         record: SkillDraftRecord | SkillVersionRecord | None
         async with self._uow_factory() as uow:
@@ -313,6 +313,9 @@ class SkillRegistryService:
                     record = skill.draft if skill else None
                 if record is None:
                     raise SkillNotFoundError
+                # 成员发布前可以核对草稿，但不能预览因敏感内容被阻断的草稿。
+                if not version and any(item.blocks_publish for item in record.warnings):
+                    self._require_write_role(actor)
                 if draft_sha256 and record.package_sha256 != draft_sha256:
                     raise SkillDraftChangedError
                 file = next((entry for entry in record.files if entry.path == path), None)
@@ -512,9 +515,8 @@ class SkillRegistryService:
         request_id: str,
         draft_sha256: str | None = None,
     ) -> SkillVersionRecord:
-        """锁定当前草稿并发布不可变版本。"""
+        """允许当前工作空间成员发布草稿，并记录实际发布人。"""
         self._require_workspace(actor, workspace_id)
-        self._require_write_role(actor)
         version = version.strip()
         changelog = changelog.strip()
         if not _SEMVER_PATTERN.fullmatch(version) or len(version) > 64 or not changelog:
@@ -555,7 +557,7 @@ class SkillRegistryService:
             await uow.store.publish_version(
                 skill=skill,
                 version=published,
-                actor_id=actor.user_id,
+                actor_name=actor.display_name,
                 request_id=request_id,
             )
             await uow.commit()

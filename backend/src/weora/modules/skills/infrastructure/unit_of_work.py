@@ -452,7 +452,7 @@ class SqlAlchemySkillStore:
         *,
         skill: SkillRecord,
         version: SkillVersionRecord,
-        actor_id: UUID,
+        actor_name: str | None,
         request_id: str,
     ) -> None:
         model = await self._session.scalar(
@@ -493,11 +493,13 @@ class SqlAlchemySkillStore:
             workspace_id=skill.workspace_id,
             skill_id=skill.id,
             event_type="SKILL_PUBLISHED",
-            actor_id=actor_id,
+            actor_id=version.published_by,
             request_id=request_id,
+            # 保留发布当时的显示名，成员改名或离开后仍可辨认。
             data={
                 "version": version.version,
                 "content_sha256": version.content_sha256,
+                "actor_name": actor_name,
             },
             occurred_at=version.published_at,
         )

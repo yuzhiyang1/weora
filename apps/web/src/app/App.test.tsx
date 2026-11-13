@@ -541,7 +541,7 @@ describe("Weora application shell", () => {
     });
   });
 
-  it("shows a validated Skill draft and submits the publish form", async () => {
+  it("allows a workspace member to review and publish a Skill draft", async () => {
     document.cookie = "weora_csrf=test-csrf-token; Path=/";
     window.history.replaceState({}, "", "/skills/skill-1");
     const user = userEvent.setup();
@@ -583,7 +583,9 @@ describe("Weora application shell", () => {
       .spyOn(globalThis, "fetch")
       .mockImplementation(async (input, init) => {
         const path = String(input);
-        if (path.endsWith("/auth/me")) return jsonResponse(principal);
+        if (path.endsWith("/auth/me")) {
+          return jsonResponse({ ...principal, workspace: { ...principal.workspace, role: "member" } });
+        }
         if (path.endsWith("/health/live")) {
           return jsonResponse({
             status: "ok",
@@ -635,6 +637,8 @@ describe("Weora application shell", () => {
     expect(screen.getByText("包结构与安全校验已通过")).toBeInTheDocument();
     expect(screen.getByText("上传人 林晓")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "SKILL.md" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "替换草稿" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: "待审核" })).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "发布版本" }));
 
     expect(

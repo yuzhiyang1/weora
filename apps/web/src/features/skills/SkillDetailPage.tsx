@@ -136,6 +136,8 @@ function SkillDetailContent({
   }
 
   const skill = detailQuery.data;
+  // 发布面向所有成员；编辑、草稿替换和审核仍使用原有管理权限。
+  const publishableDraft = skill.status === "active" ? skill.draft : null;
   return (
     <section className="detail-page asset-mobile-detail page-enter">
       {backLink}
@@ -158,30 +160,32 @@ function SkillDetailContent({
             </div>
           </div>
         </div>
-        {canWrite ? (
+        {canWrite || publishableDraft ? (
           <div className="detail-actions">
-            <Button icon={<IconEdit />} onClick={() => setEditOpen(true)}>
-              编辑信息
-            </Button>
-            <Button
-              icon={
-                skill.status === "active" ? <IconArchive /> : <IconRefresh />
-              }
-              loading={archiveMutation.isPending}
-              onClick={() => archiveMutation.mutate(skill.status === "active")}
-            >
-              {skill.status === "active" ? "归档" : "恢复"}
-            </Button>
-            {skill.status === "active" ? (
-              <Button
-                icon={<IconUpload />}
-                onClick={() => setReplaceOpen(true)}
-                theme={skill.draft ? "light" : "solid"}
-              >
-                {skill.draft ? "替换草稿" : "上传新草稿"}
-              </Button>
-            ) : null}
-            {skill.status === "active" && skill.draft ? (
+            {canWrite && (
+              <>
+                <Button icon={<IconEdit />} onClick={() => setEditOpen(true)}>
+                  编辑信息
+                </Button>
+                <Button
+                  icon={skill.status === "active" ? <IconArchive /> : <IconRefresh />}
+                  loading={archiveMutation.isPending}
+                  onClick={() => archiveMutation.mutate(skill.status === "active")}
+                >
+                  {skill.status === "active" ? "归档" : "恢复"}
+                </Button>
+                {skill.status === "active" && (
+                  <Button
+                    icon={<IconUpload />}
+                    onClick={() => setReplaceOpen(true)}
+                    theme={skill.draft ? "light" : "solid"}
+                  >
+                    {skill.draft ? "替换草稿" : "上传新草稿"}
+                  </Button>
+                )}
+              </>
+            )}
+            {publishableDraft && (
               <Button
                 aria-label="发布版本"
                 icon={<IconSend />}
@@ -191,7 +195,7 @@ function SkillDetailContent({
               >
                 发布版本
               </Button>
-            ) : null}
+            )}
           </div>
         ) : null}
       </header>
@@ -271,9 +275,9 @@ function SkillDetailContent({
         submitLabel="校验并替换"
         title={skill.draft ? "替换当前草稿" : "上传新草稿"}
       />
-      {canWrite && publishOpen && skill.draft ? (
+      {publishOpen && publishableDraft ? (
         <PublishDialog
-          draft={skill.draft}
+          draft={publishableDraft}
           initialVersion={nextPatchVersion(skill.latest_published_version)}
           onClose={() => setPublishOpen(false)}
           onPublish={async (input) => {
@@ -299,7 +303,7 @@ function SkillDetailContent({
   );
 }
 
-/** 默认打开发布版本，管理员可切换到当前草稿查看待发布内容。 */
+/** 默认打开已发布版本；成员可切换到草稿核对内容，阻断草稿仅管理员可预览。 */
 function FilesTab({ workspaceId, skill, versions, loading, error, canWrite, selection, onSelectionChange, onRetry }: {
   workspaceId: string;
   skill: SkillDetail;
@@ -311,7 +315,8 @@ function FilesTab({ workspaceId, skill, versions, loading, error, canWrite, sele
   onSelectionChange: (value: string) => void;
   onRetry: () => void;
 }) {
-  const draft = canWrite ? skill.draft : null;
+  const draft = canWrite || !skill.draft?.warnings.some((warning) => warning.blocks_publish)
+    ? skill.draft : null;
   const options = [
     ...versions.map((version) => ({ label: `已发布 ${version.version}`, value: version.version })),
     ...(draft ? [{ label: "当前草稿", value: "draft" }] : []),
@@ -322,7 +327,7 @@ function FilesTab({ workspaceId, skill, versions, loading, error, canWrite, sele
   if (error) return <AssetLoadError title="版本暂时无法加载" description={errorMessage(error)} onRetry={onRetry} />;
   if (loading) return <Skeleton active />;
   if (!record || !selected) return <Card className="detail-card">
-    <Empty title="暂无可查看的文件" description="管理员发布版本后，团队成员即可浏览包内容。" />
+    <Empty title="暂无可查看的文件" description="有可预览的草稿或已发布版本后，可在此浏览包内容。" />
   </Card>;
 
   const source: SkillFileSource = selected === "draft"
@@ -460,6 +465,8 @@ function ActivityTab({
                 <small>
                   {event.event_type === "SKILL_DOWNLOAD_REQUESTED" &&
                     `下载人 ${event.actor_name || "未知"} · `}
+                  {event.event_type === "SKILL_PUBLISHED" &&
+                    `发布人 ${event.actor_name || "未知"} · `}
                   {formatDate(event.occurred_at)} · Request{" "}
                   {event.request_id.slice(0, 12)}
                 </small>
