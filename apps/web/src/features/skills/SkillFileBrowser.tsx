@@ -40,6 +40,8 @@ type FileTreeProps = {
 /** 文件夹可独立展开，当前文件在所有层级使用同一选中状态。 */
 function FileTree({ node, selected, onSelect }: FileTreeProps) {
   return <ul className="skill-file-tree">
+    {[...node.directories].map(([name, child]) =>
+      <FileFolder key={name} name={name} node={child} selected={selected} onSelect={onSelect} />)}
     {node.files.map((file) => <li key={file.path}>
       <Button aria-current={file.path === selected}
         className="skill-file-button" icon={<FileText />} size="small"
@@ -47,8 +49,6 @@ function FileTree({ node, selected, onSelect }: FileTreeProps) {
         <span title={file.path}>{file.path.split("/").at(-1)}</span>
       </Button>
     </li>)}
-    {[...node.directories].map(([name, child]) =>
-      <FileFolder key={name} name={name} node={child} selected={selected} onSelect={onSelect} />)}
   </ul>;
 }
 
