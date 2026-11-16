@@ -52,6 +52,21 @@ async def test_omp_runs_without_coordination_session(omp: HarnessFactory) -> Non
 
 
 @pytest.mark.anyio
+async def test_omp_recovers_from_misspelled_tool_name(omp: HarnessFactory) -> None:
+    """拼错的调用由 OMP 拒绝，纠正后的工具才交给父进程。"""
+    calls: list[str] = []
+
+    async def invoke(_: str, name: str, __: dict[str, object]) -> dict[str, object]:
+        calls.append(name)
+        return {"ok": True}
+
+    tool = ToolSpec("repo.file.find", "查找文件", {"type": "object", "properties": {}})
+    payload = RuntimeInput("只读核对", "工具名纠错检查", (tool,))
+    assert await omp(None, invoke).run(payload, PROFILE) == "工具完成"
+    assert calls == ["repo.file.find"]
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize("decision", ["approve", "reject"])
 async def test_omp_approval_revokes_old_lease_and_resumes_checkpoint(
     runs: RunsHarness, omp: HarnessFactory, decision: str
@@ -140,3 +155,24 @@ async def test_omp_cancellation_waits_for_process_exit(omp: HarnessFactory, monk
     with pytest.raises(asyncio.CancelledError):
         await task
     assert len(launched) == 1 and launched[0].returncode is not None
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("partial", [False, True])
+async def test_omp_budget_allows_final_result_or_partial_continuation(omp: HarnessFactory, partial: bool) -> None:
+    """真实 OMP 循环达到预算后可正常结束，或提交部分报告；不得伪报目标全部完成。"""
+    calls: list[str] = []
+
+    async def invoke(_: str, name: str, args: dict[str, object]) -> dict[str, object]:
+        calls.append(name)
+        if name == "orchestrator_report":
+            assert args["state"] == "partial"
+        return {"ok": True}
+
+    tools = tuple(ToolSpec(name, name, {"type": "object"}) for name in ("probe.read", "orchestrator_report"))
+    result = await omp(None, invoke).run(
+        RuntimeInput("保持原目标", "预算续接检查" if partial else "预算边界检查", tools), PROFILE,
+    )
+    assert calls.count("probe.read") == 64
+    assert calls.count("orchestrator_report") == int(partial)
+    assert result == ("已读 A，仍须检查 B" if partial else "目标全部完成")

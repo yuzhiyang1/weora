@@ -42,10 +42,13 @@ async def test_assessment_pins_configured_repository_and_always_discards(runs: R
         await service.assessment_read(
             actor, UUID(str(p["id"])), (UUID(str(selected["id"])),), UUID(str(other["id"])), "README.md"
         )
-    with pytest.raises(ProjectError, match="不支持目录"):
-        await service.assessment_read(
-            actor, UUID(str(p["id"])), (UUID(str(selected["id"])),), UUID(str(selected["id"])), "", directory=True
-        )
+    # 读取器现已具备目录接口；继续验证固定提交与评估临时克隆清理，不沿用旧能力缺失断言。
+    directory = await service.assessment_read(
+        actor, UUID(str(p["id"])), (UUID(str(selected["id"])),), UUID(str(selected["id"])), "",
+        directory=True, revision=str(value["revision"]),
+    )
+    assert directory["entries"] == [{"name": "README.md", "kind": "blob"}]
+    assert reader.cloned[-1] == (UUID(str(selected["id"])), "a" * 40)
     assert len(reader.discarded) == 3
 
 

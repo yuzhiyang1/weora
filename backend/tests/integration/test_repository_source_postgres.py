@@ -13,15 +13,16 @@ from tests.coordination.test_repository_discussions import (
     test_owned_external_pull_keeps_ci_cursor_full_note_and_waits_for_human as subscription_scenario,
 )
 from tests.coordination.test_repository_source import (
-    test_repository_intake_is_not_feishu_and_continues_same_native_task as native_source_scenario,
+    test_repository_intake_preserves_managed_delivery_on_same_task as native_source_scenario,
 )
 from tests.integration.test_approval_recovery_postgres import PostgresHarness
 from tests.integration.test_approval_recovery_postgres import postgres_runs as postgres_runs
+from weora.modules.runs.application.harness import OMP_RPC_RUNTIME, PI_RPC_RUNTIME
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
 
 
-@pytest.mark.parametrize("scenario", ["native_task", "ci", "blocked_ci"])
+@pytest.mark.parametrize("scenario", [PI_RPC_RUNTIME, OMP_RPC_RUNTIME, "ci", "blocked_ci"])
 async def test_repository_source_keeps_native_origin_and_subscriptions(
     postgres_runs: PostgresHarness, monkeypatch: pytest.MonkeyPatch, scenario: str
 ) -> None:
@@ -30,8 +31,8 @@ async def test_repository_source_keeps_native_origin_and_subscriptions(
     context = fixture(postgres_runs.runs)
     harness = await anext(context)
     try:
-        if scenario == "native_task":
-            await native_source_scenario(harness)
+        if scenario in (PI_RPC_RUNTIME, OMP_RPC_RUNTIME):
+            await native_source_scenario(harness, scenario)
         else:
             await subscription_scenario(harness, monkeypatch, scenario == "blocked_ci")
     finally:

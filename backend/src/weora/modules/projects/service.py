@@ -13,6 +13,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from weora.modules.projects.domain import (
+    DEFAULT_REPOSITORY_ARCHIVE_BYTES,
     ProjectActor,
     ProjectError,
     ProjectMembers,
@@ -20,6 +21,7 @@ from weora.modules.projects.domain import (
     RepositoryArchive,
     RepositoryArchiveExporter,
     RepositoryDirectoryReader,
+    RepositoryPagedReader,
     RepositoryReader,
     RepositorySearchReader,
     RepositorySource,
@@ -766,6 +768,7 @@ class ProjectService:
     async def read_file(
         self, actor: ProjectActor, run_id: UUID, snapshot: dict[str, object], repository_id: UUID, path: str,
         *, operation: Literal["read", "list", "find", "search"] = "read", term: str = "",
+        start_line: int | None = None, max_lines: int | None = None, start_column: int = 0,
     ) -> dict[str, object]:
         """仓库浏览和读取使用同一份运行快照及实时授权。"""
         if snapshot.get("read_protocol") != "git-objects-v1":
@@ -800,7 +803,15 @@ class ProjectService:
             cache_id, revision = row.cache_id, row.revision
         reader = self.reader
         if operation == "read":
-            result = await reader.read(cache_id, revision, path)
+            if start_line is not None or max_lines is not None or start_column:
+                if not isinstance(reader, RepositoryPagedReader):
+                    raise ProjectError("REPOSITORY_PAGING_UNAVAILABLE", "当前仓库适配器不支持分段读取")
+                result = await reader.read_page(
+                    cache_id, revision, path, start_line=1 if start_line is None else start_line,
+                    max_lines=200 if max_lines is None else max_lines, start_column=start_column,
+                )
+            else:
+                result = await reader.read(cache_id, revision, path)
         elif operation == "list" and isinstance(reader, RepositoryDirectoryReader):
             result = await reader.directory(cache_id, revision, path)
         elif operation == "find" and isinstance(reader, RepositorySearchReader):
@@ -812,6 +823,26 @@ class ProjectService:
         if not await self.authorize_snapshot(actor, snapshot):
             raise ProjectError("PROJECT_ACCESS_REVOKED", "读取期间授权已变化")
         return result | {"ok": True, "repository_id": str(repository_id), "revision": revision}
+
+    async def prepare_archive(
+        self, actor: ProjectActor, run_id: UUID, snapshot: dict[str, object], repository_id: UUID,
+        *, max_bytes: int = DEFAULT_REPOSITORY_ARCHIVE_BYTES,
+    ) -> RepositoryArchive:
+        """首次启动即固定提交并取归档，续接仍使用同一 Run 的仓库绑定。"""
+        if snapshot.get("read_protocol") != "git-objects-v1" or not await self.authorize_snapshot(actor, snapshot):
+            raise ProjectError("PROJECT_ACCESS_REVOKED", "项目或仓库授权已变化")
+        selected = cast(list[dict[str, object]], snapshot["repositories"])
+        repo = next((item for item in selected if item["id"] == str(repository_id)), None)
+        if repo is None:
+            raise ProjectError("REPOSITORY_NOT_SELECTED", "仓库不在本次任务范围内")
+        await self._prepare_repository(actor, run_id, snapshot, repository_id, repo)
+        async with self.sessions() as session:
+            row = await session.get(RunRepositoryModel, (run_id, repository_id))
+            if row is None or row.status != "READY" or not row.revision:
+                code = (row.error_code if row else None) or "PROJECT_REPOSITORY_NOT_PREPARED"
+                raise ProjectError(code, "项目仓库尚未准备固定提交")
+            revision = row.revision
+        return await self.export_archive(actor, run_id, snapshot, repository_id, revision, max_bytes=max_bytes)
 
     async def validate_revision(
         self, actor: ProjectActor, run_id: UUID, snapshot: dict[str, object], repository_id: UUID, revision: str
@@ -832,14 +863,15 @@ class ProjectService:
             return row.cache_id
 
     async def export_archive(
-        self, actor: ProjectActor, run_id: UUID, snapshot: dict[str, object], repository_id: UUID, revision: str
+        self, actor: ProjectActor, run_id: UUID, snapshot: dict[str, object], repository_id: UUID, revision: str,
+        *, max_bytes: int = DEFAULT_REPOSITORY_ARCHIVE_BYTES,
     ) -> RepositoryArchive:
         """归档能力由可信装配器注入，不把宿主路径当作模型工具参数。"""
         cache_id = await self.validate_revision(actor, run_id, snapshot, repository_id, revision)
         # 读取器端口保持只读能力；仅具体 Git 适配器提供后台归档方法。
         if not hasattr(self.reader, "archive"):
             raise ProjectError("REPOSITORY_ARCHIVE_UNAVAILABLE", "当前仓库适配器不支持沙箱快照")
-        archive = await cast(RepositoryArchiveExporter, self.reader).archive(cache_id, revision)
+        archive = await cast(RepositoryArchiveExporter, self.reader).archive(cache_id, revision, max_bytes=max_bytes)
         assert isinstance(archive, RepositoryArchive)
         try:
             await self.validate_revision(actor, run_id, snapshot, repository_id, revision)

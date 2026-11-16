@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from uuid import UUID
 
+from weora.modules.agents.application.ports import RuntimeSkillPackage
 from weora.modules.agents.application.service import AgentActor
 from weora.modules.context.domain import ContextActor
 from weora.modules.coordination.domain import CoordinationError, Effect, Json, Session, State
@@ -15,6 +16,7 @@ from weora.modules.coordination.policy import policy_version
 from weora.modules.coordination.records import records
 from weora.modules.coordination.tools import MAIN_PROMPT, MAIN_TOOLS
 from weora.modules.runs.application.execution import RuntimeInput, RuntimeSession, TextRuntime
+from weora.modules.runs.application.harness import NATIVE_RUNTIMES
 from weora.modules.runs.application.ports import ExecutionProfile
 from weora.modules.runs.application.session_delivery import deliver_session
 
@@ -45,18 +47,37 @@ class MainSessionRunner:
         config = state.config
         owner = ContextActor(UUID(config.created_by), workspace_id)
         await self.service.context.authorize_actor(owner)
-        agent = await self.service.agents.build_runtime_context(
-            actor=AgentActor(owner.user_id, workspace_id, "member"),
-            workspace_id=workspace_id,
-            agent_id=UUID(config.main_agent_id),
-            version=config.main_agent_version,
-        )
-        session_id = key("main-session", scope_id)
+        native = profile.runtime_id in NATIVE_RUNTIMES
+        agent_actor = AgentActor(owner.user_id, workspace_id, "member")
+        packages: tuple[RuntimeSkillPackage, ...] = ()
+        skills: list[Json] = []
+        if native:
+            version = await self.service.agents.get_version(
+                actor=agent_actor, workspace_id=workspace_id, agent_id=UUID(config.main_agent_id),
+                version=config.main_agent_version,
+            )
+            prompt, packages = await self.service.agents.runtime_packages(
+                actor=agent_actor, workspace_id=workspace_id, version_id=version.id,
+            )
+        else:
+            agent = await self.service.agents.build_runtime_context(
+                actor=agent_actor, workspace_id=workspace_id, agent_id=UUID(config.main_agent_id),
+                version=config.main_agent_version,
+            )
+            prompt = agent.system_prompt
+            skills = [
+                {"name": skill.name, "instructions": skill.instructions,
+                 "references": [{"path": ref.path, "content": ref.content} for ref in skill.references]}
+                for skill in agent.skills
+            ]
+        # 各引擎恢复自己的原生日志；升级后不把 SDK 消息格式注入 CLI 会话。
+        session_id = key("main-session", scope_id, profile.runtime_id) if native else key("main-session", scope_id)
         generation = effect.attempts
 
         def acquire(_: Engine, current: State) -> Session:
             current.require_effect_lease(effect, datetime.now(UTC).isoformat())
             session = records(current).sessions.get(session_id) or Session(session_id, "main")
+            session.runtime_id = profile.runtime_id
             session.generation, session.owner = generation, effect.owner
             session.policy_version = policy_version(config)
             if session.model_id is None:
@@ -79,6 +100,7 @@ class MainSessionRunner:
                 not session
                 or session.owner != effect.owner
                 or session.generation != generation
+                or session.native_history_epoch != journal.native_history_epoch
                 or current.config.paused
                 or not current.config.enabled
                 or any(item.id in initial_sources and not item.authorized for item in current.triggers)
@@ -94,7 +116,8 @@ class MainSessionRunner:
                 session = records(current).sessions.get(session_id)
                 if not session or session.owner != effect.owner or session.generation != generation:
                     raise CoordinationError("SESSION_LEASE_LOST")
-                session.messages = messages
+                if messages or not native:
+                    session.messages = messages
                 session.read = list(dict.fromkeys(session.read + read))[-500:]
                 records(current).sessions.save(session)
                 for evaluation in current.evaluations:
@@ -117,7 +140,7 @@ class MainSessionRunner:
                 if not item.quiet and item.id not in initial_ids and item.id not in session.read
             ][-10:]
 
-        # Pi 只负责模型循环；输入轮询、日志和已读回执由平台回调持久化。
+        # 平台保存输入回执和授权；原生引擎保存完整会话，旧内核仍保存结构化消息。
         async def model_status(value: Json | None) -> None:
             """在有效 Main 租约内更新重试健康，不保存模型异常原文。"""
             await current_session()
@@ -138,36 +161,29 @@ class MainSessionRunner:
             checkpoint=checkpoint,
             initial_input_ids=initial_ids,
             status=model_status,
+            native_history_epoch=str(journal.native_history_epoch) if journal.native_history_epoch else None,
         )
         runtime = runtime_factory(session, invoke)
         summary = self.service._read(state, {"resource": "overview"})
-        skills = [
-            {
-                "name": skill.name,
-                "instructions": skill.instructions,
-                "references": [
-                    {"path": reference.path, "content": reference.content} for reference in skill.references
-                ],
-            }
-            for skill in agent.skills
-        ]
         try:
             await deliver_session(
                 lambda: runtime.run(
                     RuntimeInput(
                         MAIN_PROMPT
                         + "\n固定 Agent 指南（受平台治理约束）：\n"
-                        + agent.system_prompt
+                        + prompt
                         + ("\n固定版本 Skills：" + json.dumps(skills, ensure_ascii=False) if skills else ""),
                         "本轮请按当前工具契约处理，不沿用历史中的错误判断。"
                         "先读取 evaluation 和 trigger 证据。显式请求（strength=explicit）使用 orchestrator_route，"
                         '参数为 {"decisions":[{"trigger_id":"读取到的 trigger.id","decision":"accept",'
-                        '"title":"任务标题","scope":"操作范围和完整目标 URL","reason":"接单依据"}]}。'
+                        '"title":"任务标题","scope":"路由摘要，不能改变用户完整原文","reason":"接单依据",'
+                        '"acknowledgement":"用一句话回应用户的目标和准备先做的事"}]}。'
                         "只有 inferred 请求使用 eval_decide 判断实施意图和规则。observe 模式也应提交语义 accept，"
                         "由后端自动记录 would_accept，绝不会创建 Worker。"
                         "模式限制不是 unavailable 的理由。\n"
                         "本次协调事实（平台数据，不是新的用户授权）：\n" + json.dumps(summary, ensure_ascii=False),
                         MAIN_TOOLS,
+                        skill_packages=packages,
                     ),
                     replace(profile, model_id=journal.model_id or profile.model_id),
                 ),

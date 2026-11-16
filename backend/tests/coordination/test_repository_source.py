@@ -1,12 +1,13 @@
 """独立仓库接单的真实 HTTP/SQL/Task 链路；代码平台是明确的只读夹具，不发送外部消息。"""
 
 from collections.abc import Awaitable, Callable
-from dataclasses import replace
+from dataclasses import asdict, replace
 from datetime import UTC, datetime, timedelta
 from typing import cast
 from uuid import UUID
 
 import pytest
+from sqlalchemy import update
 
 from tests.api.test_runs import runs as runs
 from tests.context.test_run_integration import ContextRuns
@@ -20,9 +21,11 @@ from weora.modules.coordination.repository_http import RepositoryEvents
 from weora.modules.coordination.repository_source import RepositoryMessage, RepositoryPoll
 from weora.modules.coordination.service import CoordinationService
 from weora.modules.runs.application.execution import RuntimeInput, TextRuntime
+from weora.modules.runs.application.harness import OMP_RPC_RUNTIME, PI_RPC_RUNTIME, PI_RUNTIME
 from weora.modules.runs.application.ports import ExecutionProfile, RunActor, RunDetail
 from weora.modules.runs.domain.errors import RunNotFoundError
 from weora.modules.runs.infrastructure.execution_store import SqlAlchemyExecutionStore
+from weora.modules.runs.infrastructure.models import RunModel
 from weora.modules.runs.infrastructure.pi_runtime import PiSession
 
 
@@ -117,10 +120,14 @@ async def accept(h: ContextRuns, service: CoordinationService, scope_id: str) ->
 
 
 @pytest.mark.anyio
-async def test_repository_intake_is_not_feishu_and_continues_same_native_task(contextual: ContextRuns) -> None:
-    """未 @ 仓库请求经过 Main 判断后创建原生 Run，后来评论继续同一个 Task，模型选择冻结。"""
+@pytest.mark.parametrize("runtime_id", [PI_RPC_RUNTIME, OMP_RPC_RUNTIME])
+async def test_repository_intake_preserves_managed_delivery_on_same_task(
+    contextual: ContextRuns, runtime_id: str,
+) -> None:
+    """原生引擎已启用时，代码托管入口和历史 PR 续接仍经过支持审批的运行链路。"""
     h = contextual
     service, scope_id, reader, _ = await configure(h)
+    service.runs._execution_profile = ExecutionProfile(runtime_id, "deepseek", "deployment-model", 1024, 30)
     reader.messages = (message("issue"), message("unbound", "somebody-else"))
     assert await compensate(service, h.actor.workspace_id, scope_id) == 1
     assert await compensate(service, h.actor.workspace_id, scope_id) == 0
@@ -138,6 +145,11 @@ async def test_repository_intake_is_not_feishu_and_continues_same_native_task(co
     detail = await service.runs.get(actor=h.actor, workspace_id=h.actor.workspace_id, run_id=run_id)
     assert detail.run.execution_profile
     assert detail.task.origin == "code_hosting" and detail.run.execution_profile.model_id == "worker-model"
+    assert detail.run.execution_profile.runtime_id == PI_RUNTIME
+    # 已部署过的旧版本可能为此 Task 冻结了原生 RPC 快照；历史记录保留供对账。
+    previous = replace(detail.run.execution_profile, runtime_id=runtime_id)
+    async with h.original.sessions() as db, db.begin():
+        await db.execute(update(RunModel).where(RunModel.id == run_id).values(execution_profile=asdict(previous)))
     assert detail.task.origin_metadata and "root_text" not in detail.task.origin_metadata
     assert "主题的完整背景" in detail.task.instruction
     assert await h.context.store.list(h.actor.workspace_id, "inbox") == []
@@ -158,6 +170,8 @@ async def test_repository_intake_is_not_feishu_and_continues_same_native_task(co
     second = await service.runs.get(actor=h.actor, workspace_id=h.actor.workspace_id, run_id=second_id)
     assert second.run.execution_profile
     assert second.task.id == detail.task.id and second.run.execution_profile.model_id == "worker-model"
+    assert second.run.execution_profile.runtime_id == PI_RUNTIME
+    assert second.run.agent_version_id == detail.run.agent_version_id
 
 
 @pytest.mark.anyio
@@ -297,6 +311,7 @@ async def test_revoke_after_native_commit_keeps_retention_link_for_unbound_run(
         repository_ids: tuple[UUID, ...] = (),
         thread_keys: tuple[str, ...] = (),
         model_id: str | None = None,
+        task_title: str | None = None,
     ) -> tuple[RunDetail, bool]:
         detail, replay = await original(
             actor=actor,
@@ -311,6 +326,7 @@ async def test_revoke_after_native_commit_keeps_retention_link_for_unbound_run(
             repository_ids=repository_ids,
             thread_keys=thread_keys,
             model_id=model_id,
+            task_title=task_title,
         )
         created.append(detail.run.id)
 

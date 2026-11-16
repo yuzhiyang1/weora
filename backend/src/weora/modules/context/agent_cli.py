@@ -5,6 +5,7 @@ import base64
 import contextlib
 import hashlib
 import hmac
+import json
 import re
 import secrets
 import socket
@@ -25,12 +26,15 @@ from weora.modules.tools.application.gateway import ToolSpec, failure
 _FILENAME = r"^[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}$"
 _TRANSFER_LIMIT = 96_000
 _FEISHU_ORIGIN = "https://open.feishu.cn"
+_SHEET_READ_PATH = re.compile(r"/open-apis/sheet_ai/v2/spreadsheets/([A-Za-z0-9]+)/tools/invoke_read")
+_SHEET_READ_TOOLS = {"get_workbook_structure", "get_cell_ranges", "get_range_as_csv"}
 
 FEISHU_AGENT_CLI = ToolSpec(
     "lark.cli.exec",
     "用当前飞书群绑定的 Bot 执行官方 lark-cli 原生命令。argv 不含 lark-cli 本身。"
     "可用 lark.cli.skill 查官方 Skill，或用 --help、领域 --help 和 schema 查命令。只允许读取飞书 OpenAPI。"
-    "例如读电子表格可先查 argv=['sheets','+cells-get','--help']，再读取任务给出的链接。"
+    "读取任务给出的电子表格时，用 sheets +workbook-info 查工作表，再用 +csv-get 分批读值，"
+    "或用 +cells-get 读取公式和格式。工作表名称与 ID 以返回为准。"
     "stdin 可传原始文本，files 可传当前命令所需的 Base64 文件，output_files 可取回指定文件。",
     {
         "type": "object",
@@ -271,8 +275,7 @@ class _BotProxy:
         """校验 CLI 签名和只读权限，再用群绑定的 Bot 令牌转发并流式返回响应。"""
         body = await self._read_signed_body(request)
 
-        # 快捷命令和原始 API 共用代理。只有已签名的实际请求才能触发写审批提示。
-        if request.method not in {"GET", "HEAD"}:
+        if request.method not in {"GET", "HEAD"} and not self._is_sheet_read(request, body):
             self.requires_write_approval = True
             raise web.HTTPForbidden(text="FEISHU_CLI_WRITE_REQUIRES_APPROVAL")
         if not request.path.startswith("/open-apis/"):
@@ -311,3 +314,20 @@ class _BotProxy:
                 return response
         except (ContextError, aiohttp.ClientError, TimeoutError):
             raise web.HTTPBadGateway() from None
+
+    @staticmethod
+    def _is_sheet_read(request: web.BaseRequest, body: bytes) -> bool:
+        """官方 CLI 用 POST 读取表格。只放行已核对的入口和读取动作。"""
+        match = _SHEET_READ_PATH.fullmatch(request.raw_path)
+        if request.method != "POST" or not match:
+            return False
+        try:
+            action = json.loads(body)
+            if not isinstance(action, dict) or set(action) != {"tool_name", "input"}:
+                return False
+            if not isinstance(action["tool_name"], str) or action["tool_name"] not in _SHEET_READ_TOOLS:
+                return False
+            arguments = json.loads(action["input"])
+        except (ValueError, TypeError, RecursionError):
+            return False
+        return isinstance(arguments, dict) and arguments.get("excel_id") == match[1]

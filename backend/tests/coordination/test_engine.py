@@ -47,12 +47,14 @@ def message(identity: str = "m1", *, addressed: bool = False, actor: str = "user
     )
 
 
-def test_feishu_long_reply_requires_agent_to_shorten_it() -> None:
+def test_feishu_ack_stays_short_and_answer_keeps_details() -> None:
     engine, state = setup()
     engine.receive(message())
+    text = "说明" * 121
     with pytest.raises(CoordinationError, match="REPLY_TOO_LONG"):
-        engine.reply("m1", "answer", "说明" * 121)
-    assert state.replies == []
+        engine.reply("m1", "ack", text)
+    assert engine.reply("m1", "answer", text).text == text
+    assert len(state.replies) == 1
 
 
 def result() -> dict[str, object]:
@@ -79,6 +81,10 @@ def accept(engine: Engine, state: State, *, addressed: bool = False) -> str:
     engine.read_eval(evaluation.id)
     decision = engine.decide(evaluation.id, result(), route=addressed)
     assert decision.ticket_id
+    # 纯领域夹具模拟首轮完整短消息投递；真实派发长度由 WorkerDispatcher 冻结。
+    for item in engine.ticket(decision.ticket_id).inputs:
+        source = engine.r.triggers.get(item.trigger_id or "")
+        item.delivered_chars = len(source.text) if source else 0
     return decision.ticket_id
 
 
@@ -198,8 +204,9 @@ def test_numbered_followup_cannot_borrow_another_initiators_task() -> None:
     assert engine.receive(request)
     assert engine.pass_due() == []
     assert len(ticket.inputs) == 1
-    assert state.replies[0].ticket_id is None
-    assert "找不到可续接的任务 #ABCDEF01" in state.replies[0].text
+    reply = state.replies[-1]
+    assert reply.ticket_id is None
+    assert "找不到可续接的任务 #ABCDEF01" in reply.text
     with pytest.raises(CoordinationError, match="TASK_REFERENCE_ALREADY_HANDLED"):
         engine.route(request.id, result())
 
@@ -273,7 +280,10 @@ def test_peer_evidence_at_completion_boundary_reopens_only_original_ticket() -> 
     engine.mark_input(ticket_id, original, ticket.inputs[0].id, read=True)
     assert engine.receive(peer_message())
     engine.mark_input(ticket_id, original, ticket.inputs[-1].id)
-    engine.report(ticket_id, original, Report("ready", "页面 1 未复现", NOW, verified=True))
+    engine.report(ticket_id, original, Report(
+        "ready", "页面 1 未复现", NOW, verified=True,
+        completed_input_ids=(ticket.inputs[0].id,),
+    ))
     assert ticket.ended_at and ticket.inputs[-1].delivered_to is None
     assert engine.pass_due() == []
     assert not ticket.ended_at and len(ticket.assignments) == 2 and len(state.tickets) == 1
@@ -384,7 +394,10 @@ def test_ready_requires_platform_validation_and_stale_assignment_is_rejected() -
     with pytest.raises(CoordinationError, match="COMPLETION_NOT_VERIFIED"):
         engine.report(identity, assignment.id, Report("ready", "好了", NOW))
     engine.mark_input(identity, assignment.id, state.tickets[0].inputs[0].id, read=True)
-    engine.report(identity, assignment.id, Report("ready", "验证通过", NOW, verified=True))
+    engine.report(identity, assignment.id, Report(
+        "ready", "验证通过", NOW, verified=True,
+        completed_input_ids=(state.tickets[0].inputs[0].id,),
+    ))
     assert state.tickets[0].outcome == "ready"
     engine.receive(message("next"))
     assert len(state.tickets[0].assignments) == 2
@@ -395,14 +408,72 @@ def test_ready_requires_platform_validation_and_stale_assignment_is_rejected() -
 def test_ack_once_and_reply_cannot_change_channel_or_fabricate_answer() -> None:
     engine, state = setup()
     identity = accept(engine, state)
-    original = engine.reply("m1", "ack", "收到", ticket_id=identity)
-    assert engine.reply("m1", "ack", "不覆盖原文", ticket_id=identity).text == "收到"
+    original = state.replies[0]
+    assert engine.reply("m1", "ack", "不覆盖原文", ticket_id=identity).text == original.text
     assert len(state.replies) == 1
     assert state.replies[0].id == original.id
     with pytest.raises(CoordinationError, match="RESULT_NOT_READY"):
         engine.reply("m1", "result", "已完成", ticket_id=identity)
     with pytest.raises(CoordinationError, match="ANSWER_NOT_REPORTED"):
         engine.reply("m1", "answer", "未经 Worker 确认", ticket_id=identity)
+
+
+def test_feishu_notifies_once_per_failed_run_even_when_retry_has_same_error() -> None:
+    engine, state = setup()
+    identity = accept(engine, state)
+    ticket = engine.ticket(identity)
+    first = ticket.assignments[-1]
+    first.run_id = "first-run"
+    report = Report("failed", "模型调用失败", NOW, human_action="模型调用失败，请重试。")
+    engine.report(identity, first.id, report)
+    engine.report(identity, first.id, report)
+    notifications = [reply for reply in state.replies if reply.purpose == "attention"]
+    assert len(notifications) == 1
+    notifications[0].state, notifications[0].remote_message_id = "sent", "om_failure_1"
+    effect = next(effect for effect in state.effects if effect.kind == "worker")
+    generation = effect.generation
+    engine.receive(message("retry", addressed=True))
+    assert effect.generation == generation
+    engine.retry(identity, "retry")
+    assert effect.generation == generation + 1
+    second = ticket.assignments[-1]
+    second.run_id = "second-run"
+    engine.report(identity, second.id, report)
+    notifications = [reply for reply in state.replies if reply.purpose == "attention"]
+    assert len(notifications) == 2
+    assert all(reply.trigger_id == "m1" and reply.text == report.human_action for reply in notifications)
+    assert notifications[-1].state == "pending"
+
+
+def test_verified_retry_result_is_relayed_if_main_does_not_reply() -> None:
+    engine, state = setup()
+    identity = accept(engine, state)
+    ticket = engine.ticket(identity)
+    old = ticket.assignments[-1]
+    old.run_id = "failed-run"
+    engine.mark_input(identity, old.id, ticket.inputs[0].id, read=True)
+    engine.report(identity, old.id, Report("failed", "调用失败", NOW, human_action="请重试。"))
+    engine.receive(message("retry", addressed=True))
+    engine.retry(identity, "retry")
+    assignment = ticket.assignments[-1]
+    assignment.run_id = "retry-run"
+    ticket.inputs[-1].delivered_chars = len(state.triggers[-1].text)
+    engine.mark_input(identity, assignment.id, ticket.inputs[-1].id, read=True)
+    summary = "## 结论\n\n" + "这里保留实际证据及其适用范围。\n" * 24 + "\n尚未核实生产版本。"
+    engine.report(identity, assignment.id, Report(
+        "ready", summary, NOW, verified=True,
+        completed_input_ids=tuple(item.id for item in ticket.inputs),
+    ))
+
+    engine.relay_retried_results("https://console.example")
+    assert not any(reply.purpose == "result" for reply in state.replies)
+    engine.now = lambda: later(NOW, 21)
+    engine.relay_retried_results("https://console.example")
+    engine.relay_retried_results("https://console.example")
+    results = [reply for reply in state.replies if reply.purpose == "result"]
+    assert len(results) == 1 and results[0].trigger_id == "m1"
+    assert results[0].text.startswith(summary + "\n\n")
+    assert "https://console.example/runs/retry-run" in results[0].text
 
 
 @pytest.mark.parametrize("mode", ["off", "observe", "auto"])
@@ -427,11 +498,14 @@ def test_late_followup_survives_completion_race() -> None:
     original = ticket.assignments[0].id
     engine.mark_input(ticket_id, original, ticket.inputs[0].id, read=True)
     engine.receive(message("late"))
-    engine.report(ticket_id, original, Report("ready", "首轮已完成", NOW, verified=True))
-    assert ticket.ended_at and len(ticket.assignments) == 1
+    with pytest.raises(CoordinationError, match="OBJECTIVE_COVERAGE_INCOMPLETE"):
+        engine.report(ticket_id, original, Report(
+            "ready", "首轮已完成", NOW, verified=True, completed_input_ids=(ticket.inputs[0].id,),
+        ))
+    assert ticket.ended_at is None and len(ticket.assignments) == 1
     assert ticket.inputs[-1].read_at is None
-    assert engine.pass_due()[0].primary == "late"
-    assert not engine.owners(state.triggers[-1])
+    assert engine.pass_due() == []
+    assert engine.owners(state.triggers[-1]) == [ticket_id]
 
 
 def test_question_omission_keeps_null_clears_and_withdraws_outbox() -> None:

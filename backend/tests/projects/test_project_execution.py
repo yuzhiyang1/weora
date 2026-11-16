@@ -1,5 +1,6 @@
 """项目固定提交与沙箱衔接；Fake Docker 不冒充真实容器验收。"""
 
+import hashlib
 from dataclasses import replace
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -14,7 +15,7 @@ from tests.delivery.test_adapters import CaptureDocker, snapshot
 from weora.bootstrap.project_execution import ProjectExecution
 from weora.modules.delivery.domain.models import DeliveryError, PlanScope
 from weora.modules.delivery.infrastructure.docker import DockerResources
-from weora.modules.projects.domain import ProjectActor, RepositoryArchive
+from weora.modules.projects.domain import DEFAULT_REPOSITORY_ARCHIVE_BYTES, ProjectActor, RepositoryArchive
 from weora.modules.runs.application.ports import RunActor
 
 
@@ -25,7 +26,10 @@ async def test_selected_revision_export_has_no_default_fallback_and_rechecks_acc
     archive = snapshot(tmp_path)
 
     class Exporter(Reader):
-        async def archive(self, cache_id: UUID, revision: str) -> RepositoryArchive:
+        async def archive(
+            self, cache_id: UUID, revision: str, *, max_bytes: int = DEFAULT_REPOSITORY_ARCHIVE_BYTES,
+        ) -> RepositoryArchive:
+            assert max_bytes == DEFAULT_REPOSITORY_ARCHIVE_BYTES
             return RepositoryArchive(archive.archive_path, revision, archive.archive_sha256)
 
     projects = runs.app.state.project_service
@@ -132,3 +136,38 @@ def test_invalid_image_resources_fail_before_container_creation(tmp_path: Path, 
     docker.config = replace(docker.config, image_resources={"sha256:" + "c" * 64: resources})
     with pytest.raises(DeliveryError):
         docker.config.validate()
+
+
+@pytest.mark.anyio
+async def test_native_archive_budget_reaches_reader_without_changing_legacy_default(
+    runs: RunsHarness, tmp_path: Path,
+) -> None:
+    """可信原生入口可显式放大完整归档预算；旧交付默认及已固定 revision 均不改变。"""
+    exported: list[tuple[str, int]] = []
+
+    class Exporter(Reader):
+        async def archive(
+            self, cache_id: UUID, revision: str, *, max_bytes: int = DEFAULT_REPOSITORY_ARCHIVE_BYTES,
+        ) -> RepositoryArchive:
+            exported.append((revision, max_bytes))
+            path = tmp_path / (uuid4().hex + ".tar")
+            path.write_bytes(b"fixture archive")
+            return RepositoryArchive(path, revision, hashlib.sha256(b"fixture archive").hexdigest())
+
+    projects = runs.app.state.project_service
+    reader = Exporter()
+    projects.reader = reader
+    p = await project(runs)
+    selected = await repository(runs, p["id"], "selected")
+    created = (await task(runs, p["id"], [selected["id"]])).json()
+    actor = ProjectActor(UUID(runs.user_id), UUID(runs.workspace_id))
+    identity, repository_id = UUID(created["id"]), UUID(str(selected["id"]))
+    native = await projects.prepare_archive(
+        actor, identity, created["project_context"], repository_id, max_bytes=512 * 1024 * 1024,
+    )
+    native.path.unlink()
+    reader.revision = "b" * 40
+    legacy = await projects.prepare_archive(actor, identity, created["project_context"], repository_id)
+    legacy.path.unlink()
+    assert exported == [("a" * 40, 512 * 1024 * 1024), ("a" * 40, 64 * 1024 * 1024)]
+    assert len(reader.checked) == 1

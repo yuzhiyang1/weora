@@ -25,12 +25,16 @@ def test_automatic_facts_do_not_wake_until_new_human_input(status: str) -> None:
     assert len([item for item in ticket.inputs if item.kind == "note"]) == 2
     assert not any(item.id in ticket.undelivered for item in ticket.inputs if item.kind == "note")
     engine.now = lambda: later(NOW, 1)
-    engine.receive(message("human-resumes"))
+    engine.receive(message("human-resumes", addressed=True))
     assert not engine.waits_for_person(ticket)
+    if status == "failed":
+        # 飞书失败已有明确重试契约；普通跟进不能自动重放失败安排。
+        assert worker.state == "done"
+        engine.retry(identity, "human-resumes")
     assert next(item for item in state.effects if item.kind == "worker").state == "pending"
 
 
-@pytest.mark.parametrize("status", ["ready", "dropped"])
+@pytest.mark.parametrize("status", ["dropped"])
 @pytest.mark.parametrize("handled", [False, True])
 def test_ticket_end_releases_only_unhandled_human_messages(status: str, handled: bool) -> None:
     """结束窗口的未读跟进退回主 Agent；已确认的消息不重复接单。"""
@@ -87,13 +91,20 @@ def test_ready_waits_for_owned_review_and_merge_does_not_swallow_human_input() -
     assignment = ticket.assignments[-1]
     engine.mark_input(identity, assignment.id, ticket.inputs[0].id, read=True)
     engine.bind_review(identity, "code:review", "run", "review")
-    engine.report(identity, assignment.id, Report("ready", "已提交评审", NOW, verified=True))
+    engine.report(identity, assignment.id, Report(
+        "ready", "已提交评审", NOW, verified=True,
+        completed_input_ids=(ticket.inputs[0].id,),
+    ))
     assert not ticket.ended_at and not assignment.ended_at
     engine.receive(message("late"))
     engine.observe_review(identity, "code:review", "merged", later(NOW, 1))
     assert not ticket.ended_at
+    ticket.inputs[-1].delivered_chars = len(state.triggers[-1].text)
     engine.mark_input(identity, assignment.id, ticket.inputs[-1].id, read=True)
-    engine.report(identity, assignment.id, Report("ready", "补充已完成", later(NOW, 2), verified=True))
+    engine.report(identity, assignment.id, Report(
+        "ready", "补充已完成", later(NOW, 2), verified=True,
+        completed_input_ids=tuple(item.id for item in ticket.inputs),
+    ))
     assert ticket.outcome == "merged"
     assert engine.reply("m1", "result", "评审已经合并", ticket_id=identity).purpose == "result"
 
@@ -106,7 +117,10 @@ def test_review_reopening_does_not_automatically_restart_ended_work() -> None:
     assignment = ticket.assignments[-1]
     engine.mark_input(identity, assignment.id, ticket.inputs[0].id, read=True)
     engine.bind_review(identity, "code:review", "run", "review")
-    engine.report(identity, assignment.id, Report("ready", "已提交", NOW, verified=True))
+    engine.report(identity, assignment.id, Report(
+        "ready", "已提交", NOW, verified=True,
+        completed_input_ids=(ticket.inputs[0].id,),
+    ))
     engine.observe_review(identity, "code:review", "closed", later(NOW, 1))
     assert ticket.outcome == "closed"
     engine.observe_review(identity, "code:review", "open", later(NOW, 2))

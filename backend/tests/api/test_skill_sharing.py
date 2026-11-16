@@ -4,6 +4,7 @@ import hashlib
 import os
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
@@ -25,17 +26,25 @@ from weora.shared.object_storage.testing import InMemoryObjectStorage
 
 
 @pytest.fixture
-async def sharing_client(request: pytest.FixtureRequest) -> AsyncIterator[tuple[AsyncClient, FastAPI]]:
+async def sharing_client(
+    request: pytest.FixtureRequest, tmp_path: Path,
+) -> AsyncIterator[tuple[AsyncClient, FastAPI]]:
     postgres = os.environ.get("WEORA_SKILL_TEST_DATABASE_URL")
-    engine = (
-        create_async_engine(postgres)
-        if postgres
-        else create_async_engine(
-            "sqlite+aiosqlite:///:memory:",
-            connect_args={"check_same_thread": False},
-            poolclass=StaticPool,
+    single_connection = getattr(request, "param", None) == "single_connection"
+    if single_connection:
+        # 本事务只允许借一个连接；下载再次借连接在旧实现必然超时。
+        target = postgres or f"sqlite+aiosqlite:///{tmp_path / 'distribution.db'}"
+        engine = create_async_engine(target, pool_size=1, max_overflow=0, pool_timeout=0.5)
+    else:
+        engine = (
+            create_async_engine(postgres)
+            if postgres
+            else create_async_engine(
+                "sqlite+aiosqlite:///:memory:",
+                connect_args={"check_same_thread": False},
+                poolclass=StaticPool,
+            )
         )
-    )
     if not postgres:
         enable_sqlite_foreign_keys(engine)
         async with engine.begin() as connection:
@@ -211,6 +220,7 @@ async def test_member_contributes_and_owner_reviews_without_overwriting_newer_dr
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("sharing_client", ["single_connection"], indirect=True)
 async def test_device_download_and_versioned_usage(sharing_client: tuple[AsyncClient, FastAPI]) -> None:
     client, app = sharing_client
     registration = await client.post(

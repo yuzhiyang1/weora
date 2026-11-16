@@ -3,7 +3,7 @@ import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { test } from 'node:test';
 import { createModels, fauxAssistantMessage, fauxProvider, fauxText, fauxToolCall } from '@earendil-works/pi-ai';
-import { ModelDeadline, PROTOCOL, SafeRuntimeError, modelToolHistory, parseRequest, providerToolName, runText } from './runtime.js';
+import { ModelDeadline, PROTOCOL, SafeRuntimeError, modelToolHistory, parseRequest, providerToolName, runConfiguredModel, runText } from './runtime.js';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import { SessionInput } from './session-input.js';
 import { withModelRetry, type ModelRetryStatus } from './model-retry.js';
@@ -281,6 +281,64 @@ test('模型不能通过工具调用获得宿主机操作能力', async () => {
     error => error instanceof SafeRuntimeError && ['UNEXPECTED_TOOL_CALL', 'MODEL_FAILED'].includes(error.code));
 });
 
+test('飞书核对经 DeepSeek 工具调用纠错后仍能提交结论', async t => {
+  const requests: { messages: { role: string; content?: string; tool_call_id?: string }[];
+    tools: { function: { name: string } }[] }[] = [];
+  // 复现飞书 Worker 同一轮混发一个拼错的工具和一个合法的仓库搜索。
+  const toolCalls = [
+    [['weora_lark_dot_cli_dot_exec', { argv: ['sheets', '+cells-get', '--range', 'A1:B3'] }]],
+    [['weora_repo_dot_file_find', { pattern: '*Exam*.java' }], ['weora_repo_dot_text_dot_search', { query: '组卷' }]],
+    [['weora_repo_dot_file_dot_find', { pattern: '*Exam*.java' }]],
+    [['orchestrator_report', { state: 'ready', summary: '已核对表格规则与仓库文件' }]],
+  ] as const;
+  t.mock.method(globalThis, 'fetch', async (_url: unknown, init: RequestInit) => {
+    const index = requests.push(JSON.parse(String(init.body))) - 1;
+    const batch = toolCalls[index];
+    const delta = batch ? { tool_calls: batch.map(([name, args], slot) => ({
+      index: slot, id: `call_${index}_${slot}`, type: 'function',
+      function: { name, arguments: JSON.stringify(args) },
+    })) } : { content: '核对完成' };
+    const chunk = { id: 'fixture', object: 'chat.completion.chunk', created: 1, model: 'deepseek-flash',
+      choices: [{ index: 0, delta, finish_reason: batch ? 'tool_calls' : 'stop' }] };
+    return new Response(`data: ${JSON.stringify(chunk)}\n\ndata: [DONE]\n\n`, {
+      headers: { 'Content-Type': 'text/event-stream' },
+    });
+  });
+  const calls: string[] = [];
+  const result = await runConfiguredModel({
+    protocol: PROTOCOL, type: 'run', system_prompt: '', instruction: '读取飞书表格，查找仓库文件并提交核对结论',
+    api_key: 'fixture-key', model_id: 'deepseek-flash', provider: 'deepseek', timeout_seconds: 5,
+    tools: ['lark.cli.exec', 'repo.text.search', 'repo.file.find', 'orchestrator_report'].map(name => ({
+      name, description: name, input_schema: { type: 'object', properties: {} },
+    })),
+  }, undefined, async (_id, name) => { calls.push(name); return { ok: true }; });
+
+  assert.equal(result, '核对完成');
+  assert.deepEqual(calls, ['lark.cli.exec', 'repo.text.search', 'repo.file.find', 'orchestrator_report']);
+  assert.equal(requests.length, 5);
+  const correction = requests[2];
+  assert.ok(correction);
+  assert.ok(correction.tools.some(tool => tool.function.name === 'weora_repo_dot_file_dot_find'));
+  assert.match(correction.messages.find(message => message.role === 'tool' && message.tool_call_id === 'call_1_0')?.content ?? '',
+    /weora_repo_dot_file_find.*not found/);
+});
+
+test('连续请求未声明工具时停止，只有一次纠正机会', async () => {
+  const { faux, options } = runtime();
+  const invalid = fauxAssistantMessage([fauxToolCall('bash', {})], { stopReason: 'toolUse' });
+  faux.setResponses([invalid, invalid, fauxAssistantMessage([fauxText('不应执行到这里')])]);
+  let requests = 0;
+  const calls: string[] = [];
+  await assert.rejects(runText({ system_prompt: '', instruction: '只读核对' }, {
+    ...options,
+    tools: [{ name: 'repo.file.read', description: '读取仓库', input_schema: { type: 'object' } }],
+    streamFn: (...args) => { requests++; return options.streamFn(...args); },
+    callTool: async (_id, name) => { calls.push(name); return { ok: true }; },
+  }), /UNEXPECTED_TOOL_CALL/);
+  assert.equal(requests, 2);
+  assert.deepEqual(calls, []);
+});
+
 test('提前取消不发送模型请求', async () => {
   const { options } = runtime();
   await assert.rejects(runText({ system_prompt: '', instruction: '你好' }, {
@@ -405,4 +463,44 @@ test('上下文UUID与可空时间Schema可以经过真实Pi参数验证', async
   });
   assert.equal(called, true);
   assert.equal(text, '上下文事实已交付。');
+});
+
+
+test('第六十四次工具成功后仍可生成最终结果', async () => {
+  const { faux, options } = runtime();
+  faux.setResponses([
+    ...Array.from({ length: 64 }, () => fauxAssistantMessage([fauxToolCall('read', {})], { stopReason: 'toolUse' })),
+    fauxAssistantMessage([fauxText('目标全部完成')]),
+  ]);
+  let count = 0;
+  assert.equal(await runText({ system_prompt: '', instruction: '完整执行' }, {
+    ...options, tools: [{ name: 'read', description: '读取', input_schema: { type: 'object' } }],
+    callTool: async () => { count++; return { ok: true }; },
+  }), '目标全部完成');
+  assert.equal(count, 64);
+});
+
+test('预算耗尽保留部分报告通道且不能将未完成目标报为 ready', async () => {
+  const { faux, options } = runtime();
+  faux.setResponses([
+    ...Array.from({ length: 65 }, () => fauxAssistantMessage([fauxToolCall('read', {})], { stopReason: 'toolUse' })),
+    fauxAssistantMessage([fauxToolCall('orchestrator_report', { state: 'ready', summary: '错误完成' })],
+      { stopReason: 'toolUse' }),
+    fauxAssistantMessage([fauxToolCall('orchestrator_report', {
+      state: 'partial', summary: '已读 A，仍须检查 B', remaining_work: ['检查 B'], completed_input_ids: [],
+    })], { stopReason: 'toolUse' }),
+  ]);
+  const seen: string[] = [];
+  assert.equal(await runText({ system_prompt: '', instruction: '核对 A 和 B' }, {
+    ...options, tools: ['read', 'orchestrator_report'].map(name => ({
+      name, description: name, input_schema: { type: 'object' },
+    })),
+    callTool: async (_id, name, args) => {
+      seen.push(name);
+      if (name === 'orchestrator_report') assert.equal((args as {state: string}).state, 'partial');
+      return { ok: true, status: 'pending_run_validation' };
+    },
+  }), '已读 A，仍须检查 B');
+  assert.equal(seen.filter(name => name === 'read').length, 64);
+  assert.equal(seen.filter(name => name === 'orchestrator_report').length, 1);
 });

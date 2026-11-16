@@ -136,6 +136,15 @@ class SqlAlchemyRunStore:
         model = await self._session.scalar(query.with_for_update() if lock else query)
         return None if model is None else _record(model)
 
+    async def native_session_anchor(self, *, actor: RunActor, task_id: UUID, runtime_id: str) -> UUID | None:
+        """定位同任务首轮，刷新运行列表或追加轮次不改变会话和仓库基准。"""
+        return await self._session.scalar(
+            select(RunModel.id).where(
+                RunModel.workspace_id == actor.workspace_id, RunModel.created_by == actor.user_id,
+                RunModel.task_id == task_id, RunModel.execution_profile["runtime_id"].as_string() == runtime_id,
+            ).order_by(RunModel.created_at, RunModel.id).limit(1)
+        )
+
     async def task_runs(self, *, actor: RunActor, task_id: UUID, limit: int = 8) -> list[RunRecord]:
         rows = await self._session.scalars(select(RunModel).where(
             RunModel.workspace_id == actor.workspace_id, RunModel.created_by == actor.user_id,
@@ -205,8 +214,15 @@ class SqlAlchemyRunStore:
             for model in models
         ]
 
-    async def cancel_queued(self, *, actor: RunActor, run_id: UUID, request_id: str) -> bool:
-        """状态比较更新是取消的最终防线；只有赢得更新者追加终态事件。"""
+    async def cancel_queued(
+        self, *, actor: RunActor, run_id: UUID, request_id: str, waiting_context_only: bool = False,
+    ) -> bool:
+        """状态比较更新是取消的最终防线；显式上下文重试不接管审批或未知操作。"""
+        cancellable = (
+            (RunModel.status == "WAITING_CONTEXT", RunModel.recovery_read_only.is_(False))
+            if waiting_context_only
+            else (RunModel.status.in_(["QUEUED", "WAITING_CONTEXT", "WAITING_APPROVAL", "RECOVERY_REQUIRED"]),)
+        )
         now = datetime.now(UTC)
         sequence = await self._session.scalar(
             update(RunModel)
@@ -214,7 +230,7 @@ class SqlAlchemyRunStore:
                 RunModel.id == run_id,
                 RunModel.workspace_id == actor.workspace_id,
                 RunModel.created_by == actor.user_id,
-                RunModel.status.in_(["QUEUED", "WAITING_CONTEXT", "WAITING_APPROVAL", "RECOVERY_REQUIRED"]),
+                *cancellable,
             )
             .values(
                 status="CANCELLED",

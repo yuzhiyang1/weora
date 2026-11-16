@@ -1,5 +1,6 @@
 import hashlib
 import hmac
+import json
 import time
 from unittest.mock import AsyncMock
 from uuid import uuid4
@@ -42,19 +43,18 @@ async def test_agent_cli_proxy_only_injects_bound_bot_token_for_signed_feishu_re
     received = []
 
     async def fake_feishu(request: web.Request) -> web.Response:
-        received.append((request.raw_path, request.headers["Authorization"]))
+        received.append((request.method, request.raw_path, request.headers["Authorization"], await request.read()))
         return web.json_response({"code": 0, "data": {"values": [["marker"]]}}, headers={"X-Tt-Logid": "provider-id"})
 
     upstream_app = web.Application()
-    upstream_app.router.add_get("/{path:.*}", fake_feishu)
+    upstream_app.router.add_route("*", "/{path:.*}", fake_feishu)
     proxy = _BotProxy("cli-call-key", token)
     path = "/open-apis/sheets/v2/spreadsheets/test/values/sheet%21A1%3AA1"
     timestamp = str(int(time.time()))
 
-    def signed(method: str, body: bytes = b"") -> dict[str, str]:
-        canonical = "\n".join(
-            ("v1", method, "open.feishu.cn", path, hashlib.sha256(body).hexdigest(), timestamp, "bot", "Authorization")
-        )
+    def signed(method: str, body: bytes = b"", *, target: str = path) -> dict[str, str]:
+        digest = hashlib.sha256(body).hexdigest()
+        canonical = "\n".join(("v1", method, "open.feishu.cn", target, digest, timestamp, "bot", "Authorization"))
         return {
             "X-Lark-Proxy-Target": "https://open.feishu.cn",
             "X-Lark-Proxy-Identity": "bot",
@@ -101,6 +101,24 @@ async def test_agent_cli_proxy_only_injects_bound_bot_token_for_signed_feishu_re
                 async with session.request(method, url, headers=signed(method, body), data=body) as response:
                     assert response.status == 403
                     assert await response.text() == "FEISHU_CLI_WRITE_REQUIRES_APPROVAL"
-    assert received == [(path, "Bearer bound-bot-token")]
+            read_path = "/open-apis/sheet_ai/v2/spreadsheets/test/tools/invoke_read"
+            for tool in ("get_workbook_structure", "get_cell_ranges", "get_range_as_csv"):
+                body = json.dumps({"tool_name": tool, "input": '{"excel_id":"test"}'}).encode()
+                async with session.post(
+                    server.make_url(read_path), headers=signed("POST", body, target=read_path), data=body,
+                ) as response:
+                    assert response.status == 200
+                    assert received[-1] == ("POST", read_path, "Bearer bound-bot-token", body)
+            for target, rejected_body in (
+                (read_path, b'{"tool_name":"set_cell_range","input":"{\\"excel_id\\":\\"test\\"}"}'),
+                (read_path, b'{"tool_name":"get_cell_ranges","input":"{\\"excel_id\\":\\"other\\"}"}'),
+                (read_path, b'not-json'),
+                (read_path.replace("invoke_read", "invoke_write"), body),
+            ):
+                async with session.post(
+                    server.make_url(target), headers=signed("POST", rejected_body, target=target), data=rejected_body,
+                ) as response:
+                    assert response.status == 403
+    assert [(method, target) for method, target, _, _ in received] == [("GET", path)] + [("POST", read_path)] * 3
     assert proxy.log_id == "provider-id"
-    token.assert_awaited_once()
+    assert token.await_count == 4

@@ -632,25 +632,37 @@ class SkillRegistryService:
         record: SkillVersionRecord,
         request_id: str,
     ) -> SkillDownload:
-        """CLI 和控制台使用同一套固定版本下载和审计。"""
-        self._require_workspace(actor, record.workspace_id)
+        """控制台下载自行管理审计事务。"""
         async with self._uow_factory() as uow:
-            archive = await self._read_archive(uow.store, record.workspace_id, record)
-            await uow.store.add_event(
-                workspace_id=record.workspace_id,
-                skill_id=record.skill_id,
-                event_type="SKILL_DOWNLOAD_REQUESTED",
-                actor_id=actor.user_id,
-                request_id=request_id,
-                # 记录下载时的显示名，成员改名或退出工作空间后仍可辨认。
-                data={
-                    "version": record.version,
-                    "content_sha256": record.content_sha256,
-                    "actor_name": actor.display_name,
-                },
-                occurred_at=datetime.now(UTC),
-            )
+            download = await self.download_from_store(actor, record, request_id, store=uow.store)
             await uow.commit()
+        return download
+
+    async def download_from_store(
+        self,
+        actor: SkillActor,
+        record: SkillVersionRecord,
+        request_id: str,
+        *,
+        store: SkillStore,
+    ) -> SkillDownload:
+        """复用调用方的事务，校验固定版本、下载字节和审计一起提交。"""
+        self._require_workspace(actor, record.workspace_id)
+        archive = await self._read_archive(store, record.workspace_id, record)
+        await store.add_event(
+            workspace_id=record.workspace_id,
+            skill_id=record.skill_id,
+            event_type="SKILL_DOWNLOAD_REQUESTED",
+            actor_id=actor.user_id,
+            request_id=request_id,
+            # 记录下载时的显示名，成员改名或退出工作空间后仍可辨认。
+            data={
+                "version": record.version,
+                "content_sha256": record.content_sha256,
+                "actor_name": actor.display_name,
+            },
+            occurred_at=datetime.now(UTC),
+        )
         return SkillDownload(
             filename=record.package_name,
             package_sha256=record.package_sha256,

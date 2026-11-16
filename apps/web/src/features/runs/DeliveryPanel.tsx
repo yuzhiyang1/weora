@@ -112,30 +112,37 @@ export function DeliveryPanel({
   workspaceId,
   userId,
   runId,
+  live = false,
 }: {
   workspaceId: string;
   userId: string;
   runId: string;
+  live?: boolean;
 }) {
   const client = useQueryClient();
   const base = `/runs/${encodeURIComponent(runId)}`;
   const key = ["run-delivery", workspaceId, userId, runId];
+  // 产物和远端交付回执可在 Run 状态不变时更新。
+  const refetchInterval = live ? 5000 : false;
   const plan = useQuery({
     queryKey: [...key, "plan"],
     queryFn: () =>
       consoleRequest<{ plan: Plan | null }>(workspaceId, `${base}/plan`),
+    refetchInterval,
     retry: false,
   });
   const artifacts = useQuery({
     queryKey: [...key, "artifacts"],
     queryFn: () =>
       consoleRequest<{ items: Artifact[] }>(workspaceId, `${base}/artifacts`),
+    refetchInterval,
     retry: false,
   });
   const deliveries = useQuery({
     queryKey: [...key, "deliveries"],
     queryFn: () =>
       consoleRequest<{ items: Delivery[] }>(workspaceId, `${base}/deliveries`),
+    refetchInterval,
     retry: false,
   });
   const [decision, setDecision] = useState<Decision | null>(null);

@@ -10,11 +10,11 @@ import signal
 import subprocess
 import sys
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol, cast
+from typing import Protocol, cast, runtime_checkable
 from urllib.parse import urlsplit
 from uuid import UUID
 
@@ -83,6 +83,16 @@ class GitRunner(Protocol):
     ) -> bytes: ...
 
 
+@runtime_checkable
+class StreamingGitRunner(Protocol):
+    """只读大对象流式接口；调用方提供有界消费者和明确的最大对象尺寸。"""
+
+    async def stream(
+        self, cwd: Path, env: Mapping[str, str], *args: str,
+        consumer: Callable[[bytes], None], max_bytes: int,
+    ) -> None: ...
+
+
 class IsolatedGitRunner:
     """仅接受应用层固定 argv；限制时间/输出，失败不回显可能包含凭据的 stderr。"""
 
@@ -93,6 +103,23 @@ class IsolatedGitRunner:
         self, cwd: Path, env: Mapping[str, str], *args: str,
         stdin: bytes | None = None, success_codes: tuple[int, ...] = (0,),
     ) -> bytes:
+        output = bytearray()
+        await self._stream(cwd, env, *args, consumer=output.extend, max_bytes=2 * 1024 * 1024,
+                           stdin=stdin, success_codes=success_codes)
+        return bytes(output)
+
+    async def stream(
+        self, cwd: Path, env: Mapping[str, str], *args: str,
+        consumer: Callable[[bytes], None], max_bytes: int,
+    ) -> None:
+        """复用普通 Git 的隔离、超时和取消清理，只把正文逐块交给只读消费者。"""
+        await self._stream(cwd, env, *args, consumer=consumer, max_bytes=max_bytes)
+
+    async def _stream(
+        self, cwd: Path, env: Mapping[str, str], *args: str,
+        consumer: Callable[[bytes], None], max_bytes: int,
+        stdin: bytes | None = None, success_codes: tuple[int, ...] = (0,),
+    ) -> None:
         options: dict[str, object] = (
             {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {"start_new_session": True}
         )
@@ -110,7 +137,7 @@ class IsolatedGitRunner:
         except OSError:
             raise DeliveryError("GIT_NOT_CONFIGURED", "受控 Git 可执行文件不可用") from None
 
-        async def collect() -> bytes:
+        async def collect() -> None:
             async def feed() -> None:
                 assert process.stdin is not None
                 try:
@@ -125,18 +152,18 @@ class IsolatedGitRunner:
                 with suppress(BrokenPipeError, ConnectionResetError):
                     await process.stdin.wait_closed()
 
-            async def read() -> bytes:
+            async def read() -> None:
                 assert process.stdout is not None
-                output = bytearray()
+                received = 0
                 while chunk := await process.stdout.read(65536):
-                    output.extend(chunk)
-                    if len(output) > 2 * 1024 * 1024:
+                    received += len(chunk)
+                    if received > max_bytes:
                         raise DeliveryError("GIT_OUTPUT_LIMIT", "Git 输出超过限制")
-                return bytes(output)
+                    consumer(chunk)
 
             tasks = (asyncio.create_task(feed()), asyncio.create_task(read()))
             try:
-                _, output = await asyncio.gather(*tasks)
+                await asyncio.gather(*tasks)
             finally:
                 for task in tasks:
                     if not task.done():
@@ -145,10 +172,9 @@ class IsolatedGitRunner:
             await process.wait()
             if process.returncode not in success_codes:
                 raise DeliveryError("GIT_OPERATION_FAILED", "受控 Git 操作失败，请核对登记仓库和授权")
-            return output
 
         try:
-            return await asyncio.wait_for(collect(), self.timeout)
+            await asyncio.wait_for(collect(), self.timeout)
         except BaseException:
             if process.returncode is None:
                 if sys.platform == "win32":

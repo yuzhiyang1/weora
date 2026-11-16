@@ -21,6 +21,11 @@ export type RunSummary = {
   created_at: string;
   updated_at: string;
 };
+
+/** 工作台和运行页面使用同一任务标题；Agent 名称单独展示。 */
+export function runTaskTitle(run: Pick<RunSummary, "task_title">) {
+  return run.task_title || "未命名任务";
+}
 export type RunDetail = RunSummary & {
   instruction: string;
   audience: string;

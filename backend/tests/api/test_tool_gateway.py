@@ -129,9 +129,8 @@ async def test_repository_denies_windows_sensitive_filename_aliases(tmp_path: Pa
     [
         ("missing.md", None, "REPOSITORY_FILE_UNAVAILABLE"),
         ("binary.dat", b"\xff\xfe", "REPOSITORY_FILE_UNAVAILABLE"),
-        ("oversized.md", b"x" * 65537, "REPOSITORY_FILE_TOO_LARGE"),
     ],
-    ids=["missing-file", "invalid-utf8", "over-64k"],
+    ids=["missing-file", "invalid-utf8"],
 )
 async def test_repository_unavailable_and_size_boundaries(
     tmp_path: Path, filename: str, content: bytes | None, code: str

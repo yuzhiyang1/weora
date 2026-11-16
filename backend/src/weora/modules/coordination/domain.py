@@ -9,6 +9,8 @@ Strength = Literal["explicit", "inferred"]
 Mode = Literal["off", "observe", "auto"]
 EffectKind = Literal["main", "worker", "poll", "code_poll", "reply", "cancel"]
 EffectState = Literal["pending", "running", "done", "cancelled", "blocked", "unknown"]
+# 平台权限/历史变化时安全关闭旧原生会话；有效原目标可在新 Run 继续，不重放未知外部写入。
+SESSION_RESTART_FAILURES = frozenset({"SESSION_POLICY_CHANGED", "SESSION_HISTORY_REVOKED"})
 
 
 class CoordinationError(Exception):
@@ -148,7 +150,7 @@ class Mandate:
     policy_version: str
     actor_id: str
     actor_open_id: str
-    scope: str
+    scope: str  # Main 的路由摘要；执行目标以 Ticket 引用的用户原文和纠偏为准。
     basis: Json
     rules: tuple[str, ...] = ()
     worker_agent_id: str = ""
@@ -178,7 +180,7 @@ class Decision:
 
 @dataclass
 class Report:
-    state: Literal["progress", "ready", "blocked", "failed", "dropped", "waiting"]
+    state: Literal["progress", "partial", "ready", "blocked", "failed", "dropped", "waiting"]
     summary: str
     at: str
     human_action: str | None = None
@@ -186,6 +188,9 @@ class Report:
     answers: str | None = None
     verified: bool = False
     human_action_supplied: bool = False
+    # 引用只校验目标版本，不能代替 summary 中逐项列出的实际完成证据。
+    completed_input_ids: tuple[str, ...] = ()
+    remaining_work: tuple[str, ...] = ()
 
 
 @dataclass
@@ -202,6 +207,8 @@ class Assignment:
     status_only: bool = False
     # 报告时已接收的输入数；后来的有效人类输入解除自动消息挂起，不依赖外部时间戳。
     report_input_count: int | None = None
+    # 明确重试的第一轮读取当前模型；普通续接继续沿用运行快照。
+    refresh_model: bool = False
 
 
 @dataclass
@@ -217,8 +224,15 @@ class Input:
     delivered_at: str | None = None
     read_at: str | None = None
     status: str = "pending"
+    # 已准备投递的正文前缀长度；只有原生确认后才计入读取区间。
+    delivered_chars: int = 0
+    body_read_ranges: list[tuple[int, int]] = field(default_factory=list)
+    # 同伴证据只读核实后恢复原目标已有权限，不要求发起人重新批准原任务。
+    peer_evidence_checked: bool = False
     # 可交给原 Worker 核实，但不能解除人工等待或代表原发起人授权。
     peer_evidence: bool = False
+    # 停止是执行控制，不构成恢复后仍须实现的工作目标；恢复原文中的纠偏仍保留为目标。
+    control_action: Literal["stop", "resume"] | None = None
 
 
 @dataclass
@@ -304,6 +318,8 @@ class Session:
     # 只保存非敏感执行快照，密钥版本由后台装配按团队解析。
     execution_profile: Json | None = None
     runtime_id: str | None = None
+    # 任一已载入来源撤权时递增；原生持久卷必须隔代，不能继续载入旧 JSONL。
+    native_history_epoch: int = 0
     # 父会话发给子会话的受限指令，读取回执后移除；不视为新的人类授权。
     pending_messages: list[Json] = field(default_factory=list)
 
@@ -389,6 +405,7 @@ class Repository[T](Protocol):
 
 class EffectQueue(Protocol):
     def enqueue(self, kind: EffectKind, key: str, data: Json, *, priority: int = 0) -> None: ...
+    def retry_blocked_reply(self, identity: str, now: str) -> bool: ...
     def cancel(self, kind: EffectKind, key: str) -> None: ...
 
 

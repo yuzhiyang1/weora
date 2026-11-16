@@ -156,6 +156,10 @@ async def test_feishu_inbox_pump_creates_group_run_and_assembles_automatic_first
     service = cast(RunService, h.app.state.run_service)
     detail = await service.access_metadata(h.actor, run_id)
     assert detail is not None and detail.task.audience == "group" and detail.task.origin == "feishu"
+    assert detail.run.status == "QUEUED"
+    ack = await h.context.store.get(h.actor.workspace_id, "delivery", f"run-ack:{run_id}")
+    assert ack and ack["status"] == "SENT" and ack["message_id"] == "om_trigger"
+    assert h.context.cipher.decrypt(str(ack["text"])) == "好，我来处理这件事。有结果我会在这里告诉你。"
     origin = detail.task.origin_metadata
     assert origin and origin["message_id"] == "om_trigger" and origin["source_id"] == str(h.source_id)
     assert "route_key" not in origin and "project_grant_id" not in origin
@@ -168,6 +172,7 @@ async def test_feishu_inbox_pump_creates_group_run_and_assembles_automatic_first
         executions=h.app.state.execution_store,
     )
     model_input = await access.load_input(detail.run)
+    assert "最终回复会发回飞书原话题" in model_input.system_prompt
     assert "企业 SSO" in model_input.instruction and "不是操作指令" in model_input.instruction
     snapshots = await h.context.snapshots(scope)
     refs = [str(message["ref"]) for item in snapshots for message in cast(list[Json], item["messages"])]
@@ -177,6 +182,7 @@ async def test_feishu_inbox_pump_creates_group_run_and_assembles_automatic_first
     await channels.receive(h.actor.workspace_id, h.connection_id, payload)
     await _pump_context(h.app)
     assert len(await h.context.store.list(h.actor.workspace_id, "inbox")) == 1
+    assert h.reader.replies == 1
     await h.context.bind_identity(h.context_actor, h.connection_id, "ou_user", h.actor.user_id, False)
     denied = await h.client.get(h.base + f"/runs/{run_id}")
     assert denied.status_code == 404
