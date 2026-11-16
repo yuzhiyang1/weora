@@ -79,9 +79,8 @@ async def test_reply_uploads_screenshots_then_sends_one_native_post(mode: str) -
                 return
             first = await reader.upload_image(connection, PNG)
             second = await reader.upload_image(connection, PNG)
-            result = await reader.reply(
-                connection, "om_original", "**未复现原错**。四科引导正常。", "stable-id", image_keys=(first, second)
-            )
+            conclusion = "## 核对结论\n\n" + "这里保留证据和文件位置。\n" * 28 + "\n**尚未核实生产版本。**"
+            result = await reader.reply(connection, "om_original", conclusion, "stable-id", image_keys=(first, second))
         finally:
             await reader.aclose()
         assert result == "om_post" and len(sent) == 1 and len(uploads) == 2
@@ -89,7 +88,7 @@ async def test_reply_uploads_screenshots_then_sends_one_native_post(mode: str) -
         assert sent[0]["reply_in_thread"] is True
         content = json.loads(str(sent[0]["content"]))["zh_cn"]["content"]
         assert content == [
-            [{"tag": "text", "text": "未复现原错。四科引导正常。"}],
+            [{"tag": "md", "text": conclusion}],
             [{"tag": "img", "image_key": "img_test_1"}],
             [{"tag": "img", "image_key": "img_test_2"}],
         ]
