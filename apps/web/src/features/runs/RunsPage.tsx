@@ -20,7 +20,7 @@ import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { useAuth } from "../auth/AuthProvider";
 import { formatDate } from "../skills/SkillsPage";
 import { CreateRunDialog } from "./CreateRunDialog";
-import { errorMessage, listRuns, runKey, type RunSummary } from "./api";
+import { errorMessage, listRuns, runKey, runTaskTitle, type RunSummary } from "./api";
 import { RunStatusTag } from "./RunStatusTag";
 import "./runs.css";
 
@@ -84,7 +84,7 @@ export function RunsPage() {
       dataIndex: "task_title",
       render: (_: unknown, run: RunSummary) => (
         <Link className="run-link" to={`/runs/${run.id}`}>
-          <strong>{run.task_title || "未命名任务"}</strong>
+          <strong>{runTaskTitle(run)}</strong>
           <small>
             {run.agent_name} · 固定版本 {run.agent_version}
           </small>
@@ -99,7 +99,6 @@ export function RunsPage() {
         <RunStatusTag status={run.status} />
       ),
     },
-    { title: "记录序号", dataIndex: "last_sequence", width: 110 },
     {
       title: "创建时间",
       dataIndex: "created_at",

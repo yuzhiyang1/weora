@@ -132,18 +132,19 @@ class FeishuChannels:
         ):
             return None
         # 飞书可在首次回复时创建话题；旧根消息未保存 thread_id，以已发送回执核实。
-        delivery = await self.context.store.get(workspace_id, "delivery", f"run-result:{root['run_id']}")
-        if (
-            delivery
-            and delivery.get("status") == "SENT"
-            and delivery.get("remote_message_id")
-            and delivery.get("inbox_id") == root["id"]
-            and delivery.get("connection_id") == str(connection_id)
-            and delivery.get("chat_id") == chat_id
-            and delivery.get("message_id") == root_id
-            and timestamp(delivery["expires_at"]) > datetime.now(UTC)
-        ):
-            return str(root["actor_id"])
+        for purpose in ("ack", "result"):
+            delivery = await self.context.store.get(workspace_id, "delivery", f"run-{purpose}:{root['run_id']}")
+            if (
+                delivery
+                and delivery.get("status") == "SENT"
+                and delivery.get("remote_message_id")
+                and delivery.get("inbox_id") == root["id"]
+                and delivery.get("connection_id") == str(connection_id)
+                and delivery.get("chat_id") == chat_id
+                and delivery.get("message_id") == root_id
+                and timestamp(delivery["expires_at"]) > datetime.now(UTC)
+            ):
+                return str(root["actor_id"])
         return None
 
     async def receive(
@@ -345,6 +346,9 @@ class FeishuChannels:
             status = "COORDINATING"
         elif receipt.get("run_id"):
             status = "SUBMITTED"
+        # 与 Run 回执一起保存，扫描可补偿崩溃，也不会给上线前的任务补发首回。
+        if status == "SUBMITTED" and receipt.get("task_id") and not receipt.get("input_id"):
+            receipt = {**receipt, "send_acceptance_reply": True}
         return await self.context.store.change(
             workspace_id,
             "inbox",

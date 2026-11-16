@@ -28,6 +28,11 @@ _HOME_VARIABLES = ("HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "XDG_CONFIG
 _SAFE_CODES = frozenset(
     {
         "MODEL_FAILED",
+        "MODEL_PAYMENT_REQUIRED",
+        "MODEL_AUTHENTICATION_FAILED",
+        "MODEL_ACCESS_DENIED",
+        "MODEL_RATE_LIMITED",
+        "MODEL_PROVIDER_UNAVAILABLE",
         "MODEL_ABORTED",
         "MODEL_OUTPUT_LIMIT",
         "MODEL_UNKNOWN",
@@ -288,6 +293,8 @@ class ProcessRuntime:
         assert process.stdin is not None and process.stdout is not None
         permitted = {tool.name for tool in payload.tools}
         output_bytes = tool_calls = checkpoint_frames = checkpoint_bytes = 0
+        closing_calls = denied_calls = 0
+        budget_exhausted = partial_reported = False
         history = model_messages.copy()
         awaiting_checkpoint_tail = False
         remaining = model_seconds
@@ -379,12 +386,10 @@ class ProcessRuntime:
                 # 最终响应之后关闭输入，防止退出等待和后续越权工具请求。
                 if not process.stdin.is_closing():
                     process.stdin.close()
-                return self._result(line)
-            tool_calls += 1
-            if tool_calls > MAX_TOOL_CALLS:
-                raise RuntimeFailure("TOOL_BUDGET_EXCEEDED")
-            # 从这个边界起，工具可能已经产生副作用；后续断连必须走原生恢复，不能重投整轮。
-            self._delivery_started = True
+                output = self._result(line)
+                if budget_exhausted and not partial_reported:
+                    raise RuntimeFailure("TOOL_BUDGET_EXCEEDED")
+                return output
             call_id, name, arguments = frame.get("id"), frame.get("name"), frame.get("arguments")
             if (
                 not isinstance(call_id, str)
@@ -395,7 +400,42 @@ class ProcessRuntime:
                 or set(frame) != {"protocol", "type", "id", "name", "arguments"}
             ):
                 raise RuntimeFailure("RUNTIME_PROTOCOL_INVALID")
-            result = await self._call_tool(call_id, name, arguments)
+            closing = name in {"orchestrator_report", "orchestrator_ack", "orchestrator_activity_cancel"}
+            limited = tool_calls >= MAX_TOOL_CALLS or budget_exhausted
+            denied = False
+            if closing and limited:
+                # 收尾额度独立且有界；不能因为第 64 次成功就切断 partial 的持久化通道。
+                closing_calls += 1
+                if closing_calls > 4:
+                    raise RuntimeFailure("TOOL_BUDGET_EXCEEDED")
+                denied = budget_exhausted and name == "orchestrator_report" and arguments.get("state") == "ready"
+            elif limited:
+                budget_exhausted = denied = True
+                denied_calls += 1
+                if denied_calls > 2:
+                    raise RuntimeFailure("TOOL_BUDGET_EXCEEDED")
+            else:
+                tool_calls += 1
+            if denied:
+                result = {
+                    "ok": False, "error": {"code": "TOOL_BUDGET_EXCEEDED"}, "continuation_required": True,
+                    "instruction": (
+                        "本轮业务预算已用尽；请报告 partial、已核实事实与剩余事项，"
+                        "在新 Run 续接完整目标。不得报告 ready。"
+                    ),
+                }
+            else:
+                # 从这个边界起，工具可能已有副作用；断连只能恢复会话，不能重投整轮。
+                self._delivery_started = True
+                result = await self._call_tool(call_id, name, arguments)
+                error = result.get("error")
+                code = error.get("code") if isinstance(error, dict) else result.get("code")
+                budget_exhausted = budget_exhausted or code == "TOOL_BUDGET_EXCEEDED"
+                if (
+                    name == "orchestrator_report" and arguments.get("state") == "partial" and result.get("ok") is True
+                    and (budget_exhausted or tool_calls >= MAX_TOOL_CALLS)
+                ):
+                    partial_reported = True
             encoded = json.dumps(
                 {"protocol": self._protocol, "type": "tool_result", "id": call_id, "result": result},
                 ensure_ascii=False,

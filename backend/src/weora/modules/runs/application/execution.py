@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import Literal, Protocol
 from uuid import UUID
 
+from weora.modules.agents.application.ports import RuntimeSkillPackage
 from weora.modules.runs.application.ports import ExecutionProfile, RunActor, RunRecord
 from weora.modules.tools.application.gateway import ToolSpec
 
@@ -29,6 +30,7 @@ class RuntimeInput:
     tools: tuple[ToolSpec, ...] = ()
     # 飞书读表纠正只使用本轮用户原文，避免把历史答复当作能力事实。
     explicit_feishu_sheet_read: str | None = None
+    skill_packages: tuple[RuntimeSkillPackage, ...] = ()
 
 
 @dataclass
@@ -42,6 +44,12 @@ class RuntimeSession:
     checkpoint: Callable[[list[dict[str, object]], list[str]], Awaitable[None]] | None = None
     initial_input_ids: list[str] = field(default_factory=list)
     status: Callable[[dict[str, object] | None], Awaitable[None]] | None = None
+    # 子会话独立工作区，不与父会话并发修改同一份仓库。
+    isolated_workspace: bool = False
+    # 来源仅允许观察时，原生文件系统与工具都必须保持只读。
+    read_only: bool = False
+    # 来源撤权后切换历史代次，旧引擎日志不能被下一轮自动恢复。
+    native_history_epoch: str | None = None
 
 
 class RuntimeFailure(Exception):
@@ -200,10 +208,13 @@ class RunExecutor:
             try:
                 while not capture.done():
                     await asyncio.wait({capture}, timeout=self._heartbeat_seconds)
+                    if capture.done():
+                        break
                     if not await self._store.renew(lease, lease_seconds=self._lease_seconds):
                         capture.cancel()
                         await asyncio.gather(capture, return_exceptions=True)
-                        return False
+                        # finish 自己比较有效租约，只有仍拥有这轮的执行者能够确认取消。
+                        return await self._store.finish(lease, status="CANCELLED")
                 await capture
             except RuntimeFailure as error:
                 status, output, failure_code = "FAILED", None, error.code

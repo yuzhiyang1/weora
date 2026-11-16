@@ -327,6 +327,16 @@ class DeliveryService:
         await self.access.authorize(actor, run_id)
         return await self._evidence(actor, run_id, "computer_screenshot", SandboxResult("PASSED", png))
 
+    async def record_native_diff(
+        self, actor: RunActor, run_id: UUID, repository_id: UUID, revision: str, body: str, truncated: bool,
+    ) -> ArtifactRecord:
+        """记录隔离副本的 Git 证据。来源提交与仓库用于多仓库任务查看和复现。"""
+        await self.access.authorize(actor, run_id)
+        return await self._evidence(
+            actor, run_id, "diff", SandboxResult("TRUNCATED" if truncated else "PASSED", body),
+            ("git diff", str(repository_id), revision),
+        )
+
     @staticmethod
     def _repository_digest(result: SandboxResult) -> str | None:
         if result.status != "PASSED" or result.exit_code != 0:

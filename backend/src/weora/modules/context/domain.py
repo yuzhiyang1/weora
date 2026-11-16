@@ -19,6 +19,10 @@ class ContextError(Exception):
         self.message = message
 
 
+class ReplyNotSent(ContextError):
+    """发送请求尚未提交，可安全重试。"""
+
+
 @dataclass(frozen=True, slots=True)
 class ContextActor:
     user_id: UUID

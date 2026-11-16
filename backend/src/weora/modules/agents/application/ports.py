@@ -97,10 +97,20 @@ class AgentRuntimeContext:
     skills: tuple[RuntimeSkillDefinition, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class RuntimeSkillPackage:
+    """已按 AgentVersion 校验的完整 Skill 发布包。"""
+
+    slug: str
+    archive: bytes
+
+
 class AgentRuntimeContextAssemblerPort(Protocol):
     """把版本快照和对象存储材料转换成 Runtime 中立输入。"""
 
     async def assemble(self, version: AgentVersionRecord) -> AgentRuntimeContext: ...
+
+    async def packages(self, version: AgentVersionRecord) -> tuple[RuntimeSkillPackage, ...]: ...
 
 
 class PublishedSkillVersionCatalog(Protocol):

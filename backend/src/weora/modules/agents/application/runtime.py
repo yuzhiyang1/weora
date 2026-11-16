@@ -11,6 +11,7 @@ from weora.modules.agents.application.ports import (
     AgentSkillBindingRecord,
     AgentVersionRecord,
     RuntimeSkillDefinition,
+    RuntimeSkillPackage,
     RuntimeSkillReference,
 )
 from weora.modules.agents.domain.errors import (
@@ -40,12 +41,17 @@ class AgentRuntimeContextAssembler:
             skills=skills,
         )
 
-    async def _load_skill(
+    async def packages(self, version: AgentVersionRecord) -> tuple[RuntimeSkillPackage, ...]:
+        return tuple([
+            RuntimeSkillPackage(binding.skill_slug, await self._verified_archive(version.workspace_id, binding))
+            for binding in version.skills
+        ])
+
+    async def _verified_archive(
         self,
         workspace_id: UUID,
         binding: AgentSkillBindingRecord,
-    ) -> RuntimeSkillDefinition:
-        """下载并校验固定包，只暴露 SKILL.md 与文本 references。"""
+    ) -> bytes:
         try:
             archive_bytes = await self._read_archive(workspace_id, binding.skill_version_id)
         except SkillStorageUnavailableError as exc:
@@ -58,7 +64,11 @@ class AgentRuntimeContextAssembler:
             or hashlib.sha256(archive_bytes).hexdigest() != binding.package_sha256
         ):
             raise AgentRuntimeMaterialInvalidError
+        return archive_bytes
 
+    async def _load_skill(self, workspace_id: UUID, binding: AgentSkillBindingRecord) -> RuntimeSkillDefinition:
+        """旧文本内核仅使用 SKILL.md 和文本 references。"""
+        archive_bytes = await self._verified_archive(workspace_id, binding)
         try:
             with ZipFile(BytesIO(archive_bytes)) as archive:
                 root = f"{binding.skill_slug}/"

@@ -14,6 +14,7 @@ from weora.modules.coordination.engine import Engine, key
 from weora.modules.coordination.ports import CoordinationStore
 from weora.modules.coordination.records import records
 from weora.modules.runs.application.execution import RuntimeFailure, RuntimeInput, RuntimeSession, TextRuntime
+from weora.modules.runs.application.harness import NATIVE_RUNTIMES
 from weora.modules.runs.application.ports import ExecutionProfile
 from weora.modules.runs.application.session_delivery import deliver_session
 
@@ -32,6 +33,8 @@ class ChildContext:
     owner: str
     payload: RuntimeInput
     profile: ExecutionProfile
+    # 子会话继承本轮只读边界，不能通过委派扩大父会话权限。
+    read_only: bool = False
 
 
 class WorkerChildren:
@@ -98,6 +101,7 @@ class WorkerChildren:
             if child.owner != self.context.owner:
                 raise RuntimeFailure("ACCESS_REVOKED")
             child.model_id = self.context.profile.model_id
+            child.runtime_id = self.context.profile.runtime_id
             records(current).sessions.save(child)
             return child
 
@@ -108,13 +112,20 @@ class WorkerChildren:
             pull=partial(self._pull, child_id),
             checkpoint=partial(self._checkpoint, child_id),
             status=partial(self._status, child_id),
+            isolated_workspace=True,
+            read_only=self.context.read_only,
+            native_history_epoch=str(child.native_history_epoch) if child.native_history_epoch else None,
         )
         runtime = self.runtime(session, partial(self._tool, identity, child_id, depth))
         request = RuntimeInput(
             self.context.payload.system_prompt + "\n你是当前 Worker 的子会话，只处理委派的子任务。"
-            "原生审批保持有效，不自行提出或批准计划，不直接回复外部用户，结果返回父会话。",
+            "原生审批保持有效，不自行提出或批准计划，不直接回复外部用户，结果返回父会话。"
+            "原生子会话使用独立的固定提交工作区；改动不会自动并入父工作区。"
+            "返回具体文件、修改内容与验证证据，父会话须应用并重新验证才可交付。",
             instruction,
             tuple(item for item in self.context.payload.tools if item.effect != "control") + self.tools,
+            explicit_feishu_sheet_read=self.context.payload.explicit_feishu_sheet_read,
+            skill_packages=self.context.payload.skill_packages,
         )
         text = await deliver_session(
             partial(runtime.run, request, self.context.profile), partial(self._status, child_id)
@@ -126,7 +137,9 @@ class WorkerChildren:
 
         def save(_: Engine, current: State) -> None:
             child = self._session(current, child_id)
-            child.messages, child.read = messages, read
+            if messages or child.runtime_id not in NATIVE_RUNTIMES:
+                child.messages = messages
+            child.read = list(dict.fromkeys(child.read + read))[-500:]
             child.pending_messages = [item for item in child.pending_messages if item["id"] not in read]
 
         await self._change(save)

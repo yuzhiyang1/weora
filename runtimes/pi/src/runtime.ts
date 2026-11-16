@@ -4,6 +4,7 @@ import { configuredModels, configuredModel, isSupportedProvider, type SupportedP
 import { createHash } from 'node:crypto';
 import { ModelResponseLimitError, withModelRetry, type ModelRetryStatus } from './model-retry.js';
 import { PiCompaction, type Summarize } from './compaction.js';
+import { ToolBudget } from './tool-budget.js';
 
 export const PROTOCOL = 'weora.runtime.v1';
 export const MAX_OUTPUT_CHARS = 65536;
@@ -140,19 +141,24 @@ export async function runText(
 ): Promise<string> {
   // Pi 提供执行循环和摘要，Weora 持久化原始会话并管理授权与工具。
   const declarations = options.tools ?? [];
+  const declaredNames = new Set(declarations.map(tool => tool.name));
   const compaction = options.session && options.summarize ? new PiCompaction(options.session.messages) : undefined;
-  let calls = 0;
+  const budget = new ToolBudget();
   let modelDeadline: ModelDeadline | undefined;
   let modelTimedOut = false;
+  let toolCorrectionUsed = false;
+  let unexpectedTool = false;
   const tools: AgentTool[] = declarations.map(tool => ({
     name: tool.name, label: tool.name, description: tool.description,
     parameters: tool.input_schema as AgentTool['parameters'], replay: 'never',
     execute: async (id, args) => {
       if (modelTimedOut) throw new SafeRuntimeError('MODEL_TIMEOUT');
-      if (!options.callTool || ++calls > 64) throw new SafeRuntimeError('TOOL_BUDGET_EXCEEDED');
+      if (!options.callTool) throw new SafeRuntimeError('TOOL_BUDGET_EXCEEDED');
+      const rejected = budget.before(tool.name, args);
+      if (rejected) return { content: [{ type: 'text', text: JSON.stringify(rejected) }], details: undefined, isError: true };
       modelDeadline?.pause();
       try {
-        const result = await options.callTool(id, tool.name, args);
+        const result = budget.after(tool.name, args, await options.callTool(id, tool.name, args));
         return { content: [{ type: 'text', text: JSON.stringify(result) }], details: undefined, isError: result.ok === false };
       } finally { modelDeadline?.resume(); }
     },
@@ -178,7 +184,12 @@ export async function runText(
       if (projected) return { context: { ...request.context, messages: [...system, ...projected] } };
     },
     beforeToolCall: async () => tools.length ? undefined : ({ block: true, reason: 'Tool not authorized', terminate: true }),
-    finishTurn: async turn => (turn.toolResults.length || agent.hasQueuedMessages()) && calls < 64 ? undefined : ({ action: 'end' }),
+    finishTurn: async turn => {
+      // SDK 可能先结算失败工具再进入下一次推理，终止条件必须在回合边界再次检查。
+      if (unexpectedTool || budget.stop || (!turn.toolResults.length && !agent.hasQueuedMessages())) {
+        return { action: 'end' };
+      }
+    },
   });
   const received = new Map<string, string>();
   const read = new Set<string>();
@@ -197,7 +208,6 @@ export async function runText(
   let streamedLength = 0;
   let completedLength = 0;
   let oversized = false;
-  let unexpectedTool = false;
   agent.subscribe(async event => {
     // 退避包装只发布最终响应；累计终态正文同样受预算约束，不能因没有 delta 而漏计。
     if (event.type === 'message_end' && event.message.role === 'assistant') {
@@ -209,9 +219,14 @@ export async function runText(
       await checkpoint();
     }
     if (event.type === 'message_end' && event.message.role === 'assistant' &&
-        event.message.content.some(block => block.type === 'toolCall' && !declarations.some(tool => tool.name === block.name))) {
-      unexpectedTool = true;
-      agent.abort();
+        event.message.content.some(block => block.type === 'toolCall' && !declaredNames.has(block.name))) {
+      // SDK 会把未知工具作为失败结果交回模型，给它一次按本轮声明纠正的机会。
+      // 无工具权限或再次出现未知工具时终止，避免无效调用反复消耗模型预算。
+      if (toolCorrectionUsed || !options.callTool || !declaredNames.size) {
+        unexpectedTool = true;
+        agent.abort();
+      }
+      toolCorrectionUsed = true;
     }
     if (event.type === 'message_update' && event.assistantMessageEvent.type === 'text_delta') {
       streamedLength += event.assistantMessageEvent.delta.length;
@@ -229,11 +244,13 @@ export async function runText(
         weoraInputIds: options.session.initialInputIds ?? [],
       } as AgentMessage);
     } else await agent.prompt(input.instruction);
-    // 达到预算时 SDK 可能停在 toolResult；明确告知预算耗尽，不能误报普通模型错误。
-    if (calls >= 64) throw new SafeRuntimeError('TOOL_BUDGET_EXCEEDED');
+    if (options.signal?.aborted) throw new SafeRuntimeError('MODEL_ABORTED');
     if (modelTimedOut) throw new SafeRuntimeError('MODEL_TIMEOUT');
     if (oversized) throw new SafeRuntimeError('MODEL_OUTPUT_LIMIT');
     if (unexpectedTool) throw new SafeRuntimeError('UNEXPECTED_TOOL_CALL');
+    // 第 64 次成功不算失败；预算耗尽时已验收的 partial 可直接结束本 Run，保留原目标续接。
+    if (budget.partialSummary !== undefined) return budget.partialSummary;
+    if (budget.exhausted) throw new SafeRuntimeError('TOOL_BUDGET_EXCEEDED');
     const last = agent.state.messages.at(-1);
     if (!last || last.role !== 'assistant') throw new SafeRuntimeError('MODEL_FAILED');
     if (last.stopReason === 'aborted') throw new SafeRuntimeError('MODEL_ABORTED');

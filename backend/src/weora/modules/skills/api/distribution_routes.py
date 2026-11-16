@@ -22,6 +22,7 @@ from weora.modules.skills.application.service import SkillActor
 from weora.modules.skills.domain.errors import SkillRegistryError
 from weora.modules.skills.infrastructure import distribution
 from weora.modules.skills.infrastructure.models import SkillDeviceGrant
+from weora.modules.skills.infrastructure.unit_of_work import SqlAlchemySkillStore
 from weora.shared.api.request_id import get_request_id
 from weora.shared.infrastructure.database import SessionFactory
 
@@ -235,10 +236,12 @@ async def download_package(
 ) -> Response:
     async with device(request, workspace_id, authorization) as (db, actor):
         record = await distribution.archive_version(db, actor, version_id)
-        download = await _service(request).download_record(
+        # 在已锁定的设备授权事务中读取固定包并写审计，避免并发下载二次借用连接。
+        download = await _service(request).download_from_store(
             SkillActor(actor.user_id, workspace_id, "member", actor.display_name),
             record,
             get_request_id() or "unknown",
+            store=SqlAlchemySkillStore(db),
         )
     return Response(
         download.archive,

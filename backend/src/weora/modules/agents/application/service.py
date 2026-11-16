@@ -14,6 +14,7 @@ from weora.modules.agents.application.ports import (
     AgentsUnitOfWorkFactory,
     AgentVersionRecord,
     PublishedSkillVersionCatalog,
+    RuntimeSkillPackage,
 )
 from weora.modules.agents.domain.errors import (
     AgentNotFoundError,
@@ -261,12 +262,23 @@ class AgentRegistryService:
         version_id: UUID,
     ) -> AgentRuntimeContext:
         """为 Worker 按 Run 冻结的版本 ID 装配材料，不开放跨模块 ORM。"""
+        record = await self.runtime_version(actor=actor, workspace_id=workspace_id, version_id=version_id)
+        return await self._runtime_context_assembler.assemble(record)
+
+    async def runtime_version(self, *, actor: AgentActor, workspace_id: UUID, version_id: UUID) -> AgentVersionRecord:
         self._require_workspace(actor, workspace_id)
         async with self._uow_factory() as uow:
             record = await uow.store.get_version_by_id(workspace_id=workspace_id, version_id=version_id)
         if record is None:
             raise AgentNotFoundError
-        return await self._runtime_context_assembler.assemble(record)
+        return record
+
+    async def runtime_packages(
+        self, *, actor: AgentActor, workspace_id: UUID, version_id: UUID
+    ) -> tuple[str, tuple[RuntimeSkillPackage, ...]]:
+        """向原生会话交付固定版本的系统提示和已校验整包。"""
+        record = await self.runtime_version(actor=actor, workspace_id=workspace_id, version_id=version_id)
+        return record.system_prompt, await self._runtime_context_assembler.packages(record)
 
     async def _resolve_bindings(
         self,

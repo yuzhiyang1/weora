@@ -599,7 +599,8 @@ def test_bot_ordinary_message_and_edits_do_not_start_run() -> None:
     asyncio.run(scenario())
 
 
-def test_same_sender_can_follow_up_after_bot_reply_without_mention() -> None:
+@pytest.mark.parametrize("purpose", ["ack", "result"])
+def test_same_sender_can_follow_up_after_bot_reply_without_mention(purpose: str) -> None:
     """飞书首次回复可创建话题，根消息入库时没有 thread_id。"""
     async def scenario() -> None:
         f = await setup()
@@ -615,8 +616,8 @@ def test_same_sender_can_follow_up_after_bot_reply_without_mention() -> None:
 
         await channels.process(ws, str(root["inbox_id"]), submit)
         scope = replace(f.scope, audience="group", source_id=f.source)
-        key = f"run-result:{f.scope.run_id}"
-        await channels.enqueue_delivery(scope, str(root["inbox_id"]), "处理完成", key)
+        key = f"run-{purpose}:{f.scope.run_id}"
+        await channels.enqueue_delivery(scope, str(root["inbox_id"]), "机器人的回复", key)
 
         def follow_up(event_id: str, open_id: str = "ou_user", chat_id: str = "oc_project") -> Json:
             payload = inbound(event_id, f"om_{event_id}", open_id)

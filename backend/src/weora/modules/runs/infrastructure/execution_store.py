@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql import ColumnElement
 
 from weora.modules.runs.application.execution import RunLease
+from weora.modules.runs.application.harness import NATIVE_RUNTIMES
 from weora.modules.runs.application.ports import RunActor, RunRecord
 from weora.modules.runs.infrastructure.models import RunDispatchModel, RunEventModel, RunModel, RunStepModel
 from weora.modules.runs.infrastructure.unit_of_work import _record
@@ -111,6 +112,21 @@ class SqlAlchemyExecutionStore:
             if write:
                 query = query.where(RunModel.recovery_read_only.is_(False))
             return await session.scalar(query) is not None
+
+    async def owns_lease(self, lease: RunLease) -> bool:
+        """终止过程中仍由执行者负责收尾，直到租约被撤销或过期。"""
+        async with self._sessions() as session:
+            return await session.scalar(select(RunModel.id).where(*self._lease_conditions(session, lease))) is not None
+
+    async def native_progress(self, lease: RunLease, name: str) -> None:
+        """原生工具只公示阶段和结果类型，参数、输出和模型思考不进入运行事件。"""
+        async with self._sessions() as session, session.begin():
+            model = await session.scalar(
+                update(RunModel).where(*self._lease_conditions(session, lease))
+                .values(last_sequence=RunModel.last_sequence + 1).returning(RunModel)
+            )
+            if model is not None:
+                await self._event(session, model.id, model.last_sequence, name)
 
     async def transition(
         self,
@@ -266,6 +282,7 @@ class SqlAlchemyExecutionStore:
             raise ValueError("成功运行必须有受限大小的真实输出")
         async with self._sessions() as session, session.begin():
             cancelled = RunModel.cancellation_requested_at.is_not(None)
+            native = RunModel.execution_profile["runtime_id"].as_string().in_(NATIVE_RUNTIMES)
             conditions = self._lease_conditions(session, lease)
             if status == "CANCELLED":
                 conditions += (cancelled,)
@@ -275,7 +292,11 @@ class SqlAlchemyExecutionStore:
                 .values(
                     status=case((cancelled, "CANCELLED"), else_=status),
                     output_text=case((cancelled, None), else_=output if status == "SUCCEEDED" else None),
-                    failure_code=case((cancelled, "REMOTE_COMPLETION_UNCONFIRMED"), else_=failure_code),
+                    failure_code=case(
+                        (cancelled & native, None),
+                        (cancelled, "REMOTE_COMPLETION_UNCONFIRMED"),
+                        else_=failure_code,
+                    ),
                     lease_owner=None,
                     lease_expires_at=None,
                     updated_at=self._now(session),
@@ -294,6 +315,7 @@ class SqlAlchemyExecutionStore:
     async def recover_expired(self) -> int:
         """运行已开始但租约过期时转人工恢复，不自动重复请求模型。"""
         async with self._sessions() as session, session.begin():
+            native = RunModel.execution_profile["runtime_id"].as_string().in_(NATIVE_RUNTIMES)
             rows = (
                 await session.execute(
                     update(RunModel)
@@ -302,20 +324,26 @@ class SqlAlchemyExecutionStore:
                         RunModel.lease_expires_at <= self._now(session),
                     )
                     .values(
-                        status="RECOVERY_REQUIRED",
-                        failure_code="LEASE_EXPIRED",
+                        # 原生工作区和历史已持久化。结束旧 Run，允许人类向同一会话追加新任务。
+                        status=case(
+                            (native & RunModel.cancellation_requested_at.is_not(None), "CANCELLED"),
+                            (native, "FAILED"), else_="RECOVERY_REQUIRED",
+                        ),
+                        failure_code=case((native, "NATIVE_SESSION_INTERRUPTED"), else_="LEASE_EXPIRED"),
                         lease_owner=None,
                         lease_expires_at=None,
                         fencing_token=RunModel.fencing_token + 1,
                         last_sequence=RunModel.last_sequence + 1,
                         updated_at=self._now(session),
                     )
-                    .returning(RunModel.id, RunModel.last_sequence)
+                    .returning(RunModel.id, RunModel.last_sequence, RunModel.status)
                 )
             ).all()
-            for run_id, sequence in rows:
-                await session.execute(update(RunStepModel).where(RunStepModel.run_id == run_id).values(status="FAILED"))
-                await self._event(session, run_id, sequence, "run.recovery_required")
+            for run_id, sequence, status in rows:
+                await session.execute(update(RunStepModel).where(RunStepModel.run_id == run_id).values(
+                    status="CANCELLED" if status == "CANCELLED" else "FAILED",
+                ))
+                await self._event(session, run_id, sequence, f"run.{status.lower()}")
             return len(rows)
 
     async def maintenance_runs(self) -> list[RunRecord]:

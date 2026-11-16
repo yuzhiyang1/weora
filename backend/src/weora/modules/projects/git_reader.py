@@ -5,22 +5,30 @@ import base64
 import hashlib
 import ipaddress
 import os
+import posixpath
 import re
 import shlex
 import shutil
 import socket
 import stat
+import tarfile
 from collections.abc import Callable, Mapping
 from contextlib import suppress
 from dataclasses import replace
 from fnmatch import fnmatchcase
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
 from weora.modules.delivery.domain.models import DeliveryError
-from weora.modules.delivery.infrastructure.git import ConfiguredCredentials, GitRunner, IsolatedGitRunner
+from weora.modules.delivery.infrastructure.git import (
+    ConfiguredCredentials,
+    GitRunner,
+    IsolatedGitRunner,
+    StreamingGitRunner,
+)
 from weora.modules.projects.domain import (
+    DEFAULT_REPOSITORY_ARCHIVE_BYTES,
     ProjectError,
     RepositoryArchive,
     RepositorySource,
@@ -28,6 +36,7 @@ from weora.modules.projects.domain import (
     validate_repository_directory_path,
     validate_repository_file_path,
 )
+from weora.shared.text_window import TextWindow
 
 
 def revision_id(raw: bytes) -> str:
@@ -388,7 +397,7 @@ class GitRepositoryReader:
         validate_repository_directory_path(path)
         root = self._path(cache_id)
         env = await self._environment(root)
-        args = ("--", path + "/") if path else ()
+        args = ("--", path) if path else ()
         raw = await self._run(root, env, "--literal-pathspecs", "ls-tree", "-rz", "--full-tree", revision, *args)
         paths: list[str] = []
         for record in filter(None, raw.split(b"\0")):
@@ -409,12 +418,12 @@ class GitRepositoryReader:
             raise ProjectError("REPOSITORY_SEARCH_INVALID", "请输入单行搜索关键词")
         root = self._path(cache_id)
         env = await self._environment(root)
-        args = ("--", path + "/") if path else ()
+        args = ("--", path) if path else ()
         # 按字面搜索，不运行文本转换器。每个文件保留少量命中，结果交给调用者继续精读。
         try:
             raw = await self.runner.run(
                 root, env, "--literal-pathspecs", "grep", "--no-textconv", "--no-color", "-I", "-F", "-i",
-                "-n", "-z", "-m", "5", "-e", query, revision, *args, success_codes=(0, 1),
+                "-n", "-z", "-m", "51", "-e", query, revision, *args, success_codes=(0, 1),
             )
         except TimeoutError:
             raise ProjectError("REPOSITORY_TIMEOUT", "仓库搜索超时，请缩小目录范围") from None
@@ -438,12 +447,32 @@ class GitRepositoryReader:
             offset = line_end + 1
             visible = self._visible_path(name[len(prefix):]) if name.startswith(prefix) else None
             if visible and number.isdigit():
-                hits.append({"path": visible, "line": int(number), "text": content[:400].decode("utf-8", "replace")})
+                hit: dict[str, object] = {
+                    "path": visible, "line": int(number), "text": content[:400].decode("utf-8", "replace"),
+                }
+                if len(content) > 400:
+                    hit["text_truncated"] = True
+                hits.append(hit)
                 if len(hits) == 51:
                     break
         return {"matches": hits[:50], "truncated": len(hits) > 50}
 
     async def read(self, cache_id: UUID, revision: str, path: str) -> dict[str, object]:
+        """小文件兼容完整返回，大文件默认返回首个可续读窗口。"""
+        return await self._read(cache_id, revision, path, start_line=1, max_lines=None, start_column=0)
+
+    async def read_page(
+        self, cache_id: UUID, revision: str, path: str,
+        *, start_line: int = 1, max_lines: int = 200, start_column: int = 0,
+    ) -> dict[str, object]:
+        return await self._read(
+            cache_id, revision, path, start_line=start_line, max_lines=max_lines, start_column=start_column,
+        )
+
+    async def _read(
+        self, cache_id: UUID, revision: str, path: str,
+        *, start_line: int, max_lines: int | None, start_column: int,
+    ) -> dict[str, object]:
         revision_id(revision.encode())
         validate_repository_file_path(path)
         root = self._path(cache_id)
@@ -458,30 +487,42 @@ class GitRepositoryReader:
             raise ProjectError("REPOSITORY_PATH_DENIED", "不读取符号链接、目录或子模块")
         object_id = revision_id(oid)
         size = int((await self._run(root, env, "cat-file", "-s", object_id)).strip())
-        if size > 65536:
-            raise ProjectError("REPOSITORY_FILE_TOO_LARGE", "只读文件超过 64 KiB")
-        content = await self._run(root, env, "cat-file", "blob", object_id)
+        if size > self.max_bytes:
+            raise ProjectError("REPOSITORY_FILE_TOO_LARGE", "文件超过登记仓库的读取预算")
         try:
-            text = content.decode("utf-8")
+            # 页预算控制返回正文，整体扫描只用于 UTF-8 校验、行总数和完整内容哈希。
+            window = TextWindow(start_line, max_lines if max_lines is not None or size <= 65536 else 200, start_column)
+            if isinstance(self.runner, StreamingGitRunner):
+                await self.runner.stream(
+                    root, env, "cat-file", "blob", object_id, consumer=window.feed, max_bytes=self.max_bytes,
+                )
+            else:
+                window.feed(await self._run(root, env, "cat-file", "blob", object_id))
+            page = window.result()
         except UnicodeError:
             raise ProjectError("REPOSITORY_FILE_UNAVAILABLE", "文件不是 UTF-8 文本") from None
-        if "\0" in text:
-            raise ProjectError("REPOSITORY_FILE_UNAVAILABLE", "文件不是普通文本")
+        except ValueError as error:
+            raise ProjectError("REPOSITORY_FILE_UNAVAILABLE", str(error)) from None
+        except TimeoutError:
+            raise ProjectError("REPOSITORY_TIMEOUT", "仓库文件读取超时") from None
+        except DeliveryError:
+            raise ProjectError("REPOSITORY_GIT_FAILED", "固定提交文件读取失败") from None
         return {
-            "ok": True,
-            "path": path,
-            "revision": revision,
-            "content": text,
-            "sha256": hashlib.sha256(content).hexdigest(),
-            "lfs_pointer": text.startswith("version https://git-lfs.github.com/spec/v1"),
+            "ok": True, "path": path, "revision": revision, **page,
+            "lfs_pointer": start_line == 1 and start_column == 0
+            and str(page["content"]).startswith("version https://git-lfs.github.com/spec/v1"),
         }
 
-    async def archive(self, cache_id: UUID, revision: str) -> RepositoryArchive:
-        """从已准备对象导出 tar，不 checkout、不执行过滤器，路径完全由后台生成。"""
+    async def archive(
+        self, cache_id: UUID, revision: str, *, max_bytes: int = DEFAULT_REPOSITORY_ARCHIVE_BYTES,
+    ) -> RepositoryArchive:
+        """按调用方预算导出固定提交，敏感路径与只读文件接口执行同一规则。"""
+        if type(max_bytes) is not int or max_bytes <= 0:
+            raise ProjectError("REPOSITORY_ARCHIVE_LIMIT", "归档预算必须是正整数字节数")
         revision_id(revision.encode())
         root = self._path(cache_id)
         target = root / ("weora-export-" + uuid4().hex + ".tar")
-        limit = 64 * 1024 * 1024
+        limit = max_bytes
 
         def archive_size() -> int:
             try:
@@ -490,7 +531,7 @@ class GitRepositoryReader:
                 return 0
 
         try:
-            # 同步裸库可容纳大仓，归档仍在生成过程中遵守原沙箱预算。
+            # 不同执行内核使用显式预算；超过上限仍立即停止进程，不裁掉仓库内容。
             await self._run_bounded(
                 root,
                 await self._environment(root),
@@ -504,11 +545,73 @@ class GitRepositoryReader:
             )
             if target.is_symlink() or target.resolve().parent != root or target.stat().st_size > limit:
                 raise ProjectError("REPOSITORY_ARCHIVE_LIMIT", "固定提交归档超过沙箱预算或路径无效")
-            digest = await asyncio.to_thread(lambda: hashlib.sha256(target.read_bytes()).hexdigest())
-            return RepositoryArchive(target, revision, digest)
+            def prepare_archive() -> tuple[str, bool]:
+                filtered = target.with_suffix(".filtered.tar")
+                removed = False
+                try:
+                    with tarfile.open(target, "r:") as archive:
+                        for member in archive:
+                            if not self._archive_member_allowed(member):
+                                removed = True
+                                break
+                    if removed:
+                        # 避免 Git pathspec 参数超限，也不让受限内容进入后续容器。
+                        with tarfile.open(target, "r:") as archive, tarfile.open(filtered, "x:") as safe:
+                            for member in archive:
+                                if not self._archive_member_allowed(member):
+                                    continue
+                                if member.isfile():
+                                    source = archive.extractfile(member)
+                                    if source is None:
+                                        raise tarfile.ReadError("missing archive file")
+                                    with source:
+                                        safe.addfile(member, source)
+                                else:
+                                    safe.addfile(member)
+                        filtered.replace(target)
+                except (tarfile.TarError, OSError):
+                    raise ProjectError("REPOSITORY_ARCHIVE_INVALID", "无法验证固定提交归档") from None
+                finally:
+                    filtered.unlink(missing_ok=True)
+                # 大仓归档只按块进入内存，同时防止生成后文件增长绕过预算。
+                digest = hashlib.sha256()
+                size = 0
+                with target.open("rb") as source:
+                    if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):
+                        raise ProjectError("REPOSITORY_ARCHIVE_LIMIT", "固定提交归档不是普通文件")
+                    while chunk := source.read(1024 * 1024):
+                        size += len(chunk)
+                        if size > limit:
+                            raise ProjectError("REPOSITORY_ARCHIVE_LIMIT", "固定提交归档超过沙箱预算")
+                        digest.update(chunk)
+                return digest.hexdigest(), removed
+
+            hashing = asyncio.create_task(asyncio.to_thread(prepare_archive))
+            try:
+                digest, removed = await asyncio.shield(hashing)
+            except asyncio.CancelledError:
+                # Windows 打开的文件不能立即删除；先等后台只读 hash 释放句柄再清理归档。
+                await asyncio.gather(hashing, return_exceptions=True)
+                raise
+            return RepositoryArchive(target, revision, digest, restricted_paths_removed=removed)
         except BaseException:
             await asyncio.to_thread(target.unlink, missing_ok=True)
             raise
+
+    @staticmethod
+    def _archive_member_allowed(member: tarfile.TarInfo) -> bool:
+        try:
+            validate_repository_file_path(member.name)
+            if member.issym():
+                # 相对链接可保留，但不能指向归档之外或跳回受限路径。
+                if member.linkname.startswith("/"):
+                    return False
+                directory = PurePosixPath(member.name).parent.as_posix()
+                destination = posixpath.normpath(posixpath.join(directory, member.linkname))
+                validate_repository_file_path(destination)
+        except ProjectError:
+            return False
+        return member.isfile() or member.isdir() or member.issym()
 
     async def discard(self, cache_id: UUID) -> None:
         """只删除平台生成的 UUID 目录，先验证绝对目标始终在专用缓存根内。"""

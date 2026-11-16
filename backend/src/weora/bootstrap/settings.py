@@ -5,6 +5,7 @@
 """
 
 from functools import lru_cache
+from pathlib import PurePosixPath
 from typing import Literal, Self
 from urllib.parse import urlsplit
 from uuid import UUID
@@ -125,6 +126,10 @@ class AppSettings(BaseSettings):
     project_sandbox_image: str | None = None
     # 对应的沙箱镜像必须预装固定版本的 Pi/OMP 工具执行器。
     sandbox_native_tools_enabled: bool = False
+    # 独立于旧审批沙箱，管理员授权私有项目任务在断网副本中运行完整引擎。
+    native_rpc_image: str | None = None
+    native_rpc_pi_extensions: tuple[str, ...] = ()
+    native_rpc_omp_extensions: tuple[str, ...] = ()
     project_sandbox_resources: ProjectSandboxResources = Field(default_factory=ProjectSandboxResources)
     # 受信任的部署级 argv，不能由任务或模型提供；Windows 可桥接本地 WSL Docker。
     sandbox_cli_executable: str = "docker"
@@ -215,6 +220,15 @@ class AppSettings(BaseSettings):
             raise ValueError("项目隔离执行必须配置固定镜像和只读仓库缓存")
         if self.sandbox_native_tools_enabled and not self.sandbox_image:
             raise ValueError("原生编码工具必须配置受管沙箱镜像")
+        if self.native_rpc_image and (not self.repository_cache_path or self.run_runtime == "disabled"):
+            raise ValueError("原生 RPC 会话需要启用执行和仓库缓存")
+        for extension in (*self.native_rpc_pi_extensions, *self.native_rpc_omp_extensions):
+            path = PurePosixPath(extension)
+            if (
+                not self.native_rpc_image or not path.is_relative_to("/opt/weora-coding-tools/extensions")
+                or ".." in path.parts or path.suffix not in {".js", ".mjs", ".ts"}
+            ):
+                raise ValueError("原生 RPC 扩展必须是受管镜像中的已批准文件")
         if self.project_sandbox_resources != ProjectSandboxResources() and not self.project_sandbox_image:
             raise ValueError("项目资源预算必须绑定独立固定镜像，不能覆盖默认沙箱")
         if self.sandbox_image and (

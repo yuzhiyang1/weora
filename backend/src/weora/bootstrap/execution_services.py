@@ -434,6 +434,9 @@ def configure_execution_services(app: FastAPI, settings: AppSettings, guard: Run
                     str(arguments.get("path", "")),
                     operation=operation,
                     term=str(arguments.get("query", arguments.get("pattern", ""))),
+                    start_line=int(str(arguments["start_line"])) if "start_line" in arguments else None,
+                    max_lines=int(str(arguments["max_lines"])) if "max_lines" in arguments else None,
+                    start_column=int(str(arguments.get("start_column", 0))),
                 )
             except ValueError:
                 return failure("TOOL_ARGUMENTS_INVALID")

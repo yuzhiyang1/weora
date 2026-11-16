@@ -3,6 +3,7 @@
 from dataclasses import asdict
 
 from weora.modules.coordination.domain import CoordinationError, Json, State
+from weora.modules.coordination.objectives import fully_read, objective_inputs, record_body_read
 from weora.modules.coordination.records import records
 
 
@@ -25,6 +26,8 @@ def worker_facts(state: State, ticket_id: str, arguments: Json) -> Json:
             if resource == "root" and trigger
             else (trigger.text if trigger else (item.text or "") if item else "")
         )
+        if resource == "input" and item:
+            record_body_read(item, offset, min(offset + 4000, len(text)))
         return {
             "ok": True,
             "id": identity or ticket.origin_id,
@@ -41,6 +44,7 @@ def worker_facts(state: State, ticket_id: str, arguments: Json) -> Json:
         if trigger and not trigger.authorized:
             continue
         text = trigger.text if trigger else item.text or ""
+        record_body_read(item, 0, min(1200, len(text)))
         inputs.append(
             {
                 "id": item.id,
@@ -53,6 +57,7 @@ def worker_facts(state: State, ticket_id: str, arguments: Json) -> Json:
                 "chars": len(text),
                 "next_offset": 1200 if len(text) > 1200 else None,
                 "read_at": item.read_at,
+                "fully_read": bool(trigger and fully_read(item, trigger)),
             }
         )
     assignment = asdict(ticket.assignments[-1]) if ticket.assignments else None
@@ -64,6 +69,12 @@ def worker_facts(state: State, ticket_id: str, arguments: Json) -> Json:
             "id": ticket.id,
             "title": ticket.title,
             "mandate": asdict(ticket.mandate),
+            "objective_source": "下列用户原文和纠偏是任务目标；mandate.scope 仅为 Main 的路由摘要",
+            "objective_input_ids": [item.id for item, _ in objective_inputs(ticket, records(state).triggers)],
+            "unread_objective_input_ids": [
+                item.id for item, trigger in objective_inputs(ticket, records(state).triggers)
+                if not fully_read(item, trigger)
+            ],
             "task_id": ticket.task_id,
             "outcome": ticket.outcome,
             "attention": ticket.attention,

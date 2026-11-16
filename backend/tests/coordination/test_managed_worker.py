@@ -61,7 +61,7 @@ async def test_peer_evidence_can_reproduce_but_cannot_change_or_expand_the_task(
             assert (await self.call("navigate", "browser.navigate", {"url": "https://fixture.example/page2"}))["ok"]
             assert (await self.call("read", "browser.read", {}))["ok"]
             for name in ("plan.propose", "sandbox.file.write", "browser.click"):
-                assert (await self.call(name, name, {}))["code"] == "PEER_EVIDENCE_REQUIRES_OWNER_CONFIRMATION"
+                assert (await self.call(name, name, {}))["code"] == "PEER_EVIDENCE_READ_ONLY"
             await self.session.checkpoint([], [pending[0][0]])
             assert (await self.call("question", "orchestrator_report", {
                 "state": "waiting", "summary": "页面 2 已核实，删除页面不在原目标内",
@@ -98,6 +98,11 @@ async def test_peer_evidence_can_reproduce_but_cannot_change_or_expand_the_task(
     peer = next(trigger for trigger in state.triggers if trigger.id == "om_peer")
     assert not peer.authorized and not peer.text
     assert state.tickets[0].mandate == ticket.mandate
+    detail = await service.runs.access_metadata(h.actor, run_id)
+    assert detail and detail.task.origin_metadata
+    # 换代后的当前来源闸门不再要求已撤销 peer；原发起人的授权目标依然有效。
+    await service.authorize_runtime_origin(h.actor, detail.task.origin_metadata)
+    await service.link_native_inputs(h.context_actor, detail.task.origin_metadata, run_id)
 
 
 @pytest.mark.anyio
@@ -150,6 +155,7 @@ async def test_child_steering_completion_keeps_run_slot_and_handoff_cancels_desc
         async def run(self, payload: RuntimeInput, profile: ExecutionProfile) -> str:
             assert profile.model_id == "worker-model"
             if self.session.id != root_session:
+                assert self.session.isolated_workspace and not self.session.read_only
                 child_started.set()
                 try:
                     await release.wait()
@@ -167,6 +173,8 @@ async def test_child_steering_completion_keeps_run_slot_and_handoff_cancels_desc
                     raise
             root_turns.append(payload.instruction)
             if len(root_turns) == 1:
+                assert self.session.checkpoint
+                await self.session.checkpoint([], self.session.initial_input_ids)
                 child = await self.call("delegate", "orchestrator_delegate", {"instruction": "核对错误原因"})
                 assert child["state"] == "running"
                 assert (
@@ -190,9 +198,10 @@ async def test_child_steering_completion_keeps_run_slot_and_handoff_cancels_desc
             assert "子会话已核对原因" in payload.instruction
             assert self.session.checkpoint
             await self.session.checkpoint([{"role": "user", "content": "主会话记录"}], self.session.initial_input_ids)
-            assert (await self.call("ready", "orchestrator_report", {"state": "ready", "summary": "只读核对完成"}))[
-                "ok"
-            ] is True
+            assert (await self.call("ready", "orchestrator_report", {
+                "state": "ready", "summary": "只读核对完成",
+                "completed_input_ids": [item.id for item in ticket.inputs],
+            }))["ok"] is True
             return "已结合子会话结果完成"
 
     async def gateway(identity: str, name: str, arguments: Json) -> Json:

@@ -6,9 +6,11 @@ import re
 import traceback
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
+from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
-from uuid import UUID, uuid4
+from uuid import UUID, uuid4, uuid5
 
 from fastapi import FastAPI
 from pydantic import TypeAdapter
@@ -23,11 +25,13 @@ from weora.modules.coordination.engine import key
 from weora.modules.coordination.records import records
 from weora.modules.coordination.service import CoordinationService
 from weora.modules.delivery.domain.models import DeliveryError
-from weora.modules.projects.domain import ProjectError
-from weora.modules.runs.application.execution import RuntimeFailure
+from weora.modules.projects.domain import ProjectError, RepositoryArchive
+from weora.modules.runs.application.execution import RuntimeFailure, RuntimeSession, TextRuntime
+from weora.modules.runs.application.harness import OMP_RPC_RUNTIME, PI_RPC_RUNTIME
 from weora.modules.runs.application.ports import ExecutionProfile, RunActor
 from weora.modules.runs.domain.errors import RunError
-from weora.modules.runs.infrastructure.pi_runtime import PiSession, PiTextRuntime
+from weora.modules.runs.infrastructure.native_rpc import NativeCodingRuntime, NativeSandbox
+from weora.modules.runs.infrastructure.pi_runtime import PiTextRuntime
 
 logger = logging.getLogger(__name__)
 
@@ -79,7 +83,13 @@ async def execute(workspace_id: UUID, scope_id: str, effect_id: str) -> bool:
             if effect.kind == "main":
                 if profile is None:
                     raise RuntimeFailure("RUNTIME_NOT_CONFIGURED")
-                journal = records(current).sessions.get(key("main-session", scope_id))
+                selected, _ = await app.state.console_settings_service.selected_harness(workspace_id)
+                native_id = OMP_RPC_RUNTIME if selected == "oh-my-pi" else PI_RPC_RUNTIME
+                session_key = (
+                    key("main-session", scope_id, native_id)
+                    if settings.native_rpc_image else key("main-session", scope_id)
+                )
+                journal = records(current).sessions.get(session_key)
                 if journal and journal.execution_profile:
                     frozen = TypeAdapter(ExecutionProfile).validate_python(journal.execution_profile)
                     active_profile, active_key = await resolve_run_profile(
@@ -93,8 +103,50 @@ async def execute(workspace_id: UUID, scope_id: str, effect_id: str) -> bool:
                     active_profile, active_key = model_profile(configuration, profile), configuration.api_key
                 if not active_key:
                     raise RuntimeFailure("MODEL_KEY_REQUIRED")
+                if settings.native_rpc_image:
+                    active_profile = replace(active_profile, runtime_id=native_id)
 
-                def runtime(session: PiSession, invoke: Callable[[str, str, Json], Awaitable[Json]]) -> PiTextRuntime:
+                async def authorized() -> bool:
+                    # Main 没有用户 Task 租约，必须逐次验证自己的效果租约和群来源权限。
+                    fresh = await coordinator.authorized_state(workspace_id, scope_id)
+                    fresh.require_effect_lease(effect, datetime.now(UTC).isoformat())
+                    return fresh.config.enabled and not fresh.config.paused
+
+                async def empty_repositories() -> dict[UUID, RepositoryArchive]:
+                    return {}
+
+                async def progress(_: str) -> None:
+                    return None
+
+                async def no_repository_diff(_: UUID, __: str, ___: str, ____: bool) -> None:
+                    raise RuntimeFailure("NATIVE_DIFF_FAILED")
+
+                def runtime(
+                    session: RuntimeSession, invoke: Callable[[str, str, Json], Awaitable[Json]]
+                ) -> TextRuntime:
+                    if settings.native_rpc_image:
+                        # Main 只挂载独立会话卷，仓库与模型凭据均不进入它的原生工作目录。
+                        sandbox = NativeSandbox(
+                            (settings.sandbox_cli_executable, *settings.sandbox_cli_args),
+                            settings.native_rpc_image,
+                            workspace_id,
+                            uuid5(
+                                workspace_id,
+                                session.id
+                                + (":history:" + session.native_history_epoch if session.native_history_epoch else ""),
+                            ),
+                            memory_mb=max(1024, settings.project_sandbox_resources.memory_mb),
+                            cpus=settings.project_sandbox_resources.cpus,
+                            pids=settings.project_sandbox_resources.pids,
+                            temporary_mb=settings.project_sandbox_resources.workspace_mb,
+                            extensions=(settings.native_rpc_omp_extensions if native_id == OMP_RPC_RUNTIME
+                                        else settings.native_rpc_pi_extensions),
+                        )
+                        return NativeCodingRuntime(
+                            sandbox, key=active_key, session=session, call=invoke,
+                            load_repositories=empty_repositories, check_access=authorized,
+                            progress=progress, diff=no_repository_diff,
+                        )
                     return PiTextRuntime(
                         node_executable=settings.pi_node_executable,
                         entry=Path(settings.pi_runtime_entry or ""),
@@ -105,9 +157,7 @@ async def execute(workspace_id: UUID, scope_id: str, effect_id: str) -> bool:
 
                 await coordinator.main(workspace_id, scope_id, effect, runtime, active_profile)
             elif effect.kind == "worker":
-                if profile is None:
-                    raise RuntimeFailure("RUNTIME_NOT_CONFIGURED")
-                await coordinator.launch(workspace_id, scope_id, effect)
+                await coordinator.launch(workspace_id, scope_id, effect, runtime_available=profile is not None)
             elif effect.kind == "poll":
                 from weora.modules.coordination.polling import compensate
 
@@ -197,7 +247,7 @@ async def execute(workspace_id: UUID, scope_id: str, effect_id: str) -> bool:
                         )
                         return False
             # 外部写未知禁止自动重放；主会话失败等候人工重排，不把 SDK 原文写入日志。
-            await coordinator.effect_failed(workspace_id, scope_id, effect)
+            await coordinator.effect_failed(workspace_id, scope_id, effect, code=code)
             await coordinator.store.settle(workspace_id, scope_id, effect, error=code, unknown=unknown_reply)
             return False
         finally:

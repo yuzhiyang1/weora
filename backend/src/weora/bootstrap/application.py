@@ -73,7 +73,7 @@ from weora.modules.projects.git_reader import GitRepositoryReader
 from weora.modules.projects.repository_sync import RepositorySync
 from weora.modules.projects.service import ProjectService
 from weora.modules.runs.api.routes import router as runs_router
-from weora.modules.runs.application.harness import OMP_RUNTIME
+from weora.modules.runs.application.harness import OMP_RPC_RUNTIME, OMP_RUNTIME, PI_RPC_RUNTIME
 from weora.modules.runs.application.ports import ExecutionProfile, RunActor
 from weora.modules.runs.application.service import RunService
 from weora.modules.runs.application.task_collaboration import TaskCollaborationService
@@ -224,7 +224,7 @@ def create_app(
         ),
         resolved_settings.deepseek_api_key.get_secret_value() if resolved_settings.deepseek_api_key else "",
         resolved_settings.run_runtime != "disabled",
-        omp_available=omp_configured(resolved_settings),
+        omp_available=bool(resolved_settings.native_rpc_image) or omp_configured(resolved_settings),
     )
 
     @app.exception_handler(SettingsError)
@@ -277,11 +277,23 @@ def create_app(
         config = await service.resolve_model(actor.workspace_id)
         profile = model_profile(config, base_profile)
         selected, _ = await service.selected_harness(actor.workspace_id)
+        if resolved_settings.native_rpc_image:
+            # 所有入口复用完整引擎；来源权限由任务与工具授权继续检查。
+            return replace(profile, runtime_id=OMP_RPC_RUNTIME if selected == "oh-my-pi" else PI_RPC_RUNTIME)
         if selected == "oh-my-pi":
             if not omp_configured(resolved_settings) or profile.provider != "deepseek" or not config.api_key:
                 raise SettingsError("HARNESS_UNAVAILABLE", "Oh My Pi 当前不可用，请检查执行内核和模型设置", 409)
             return replace(profile, runtime_id=OMP_RUNTIME)
         return profile
+
+    async def private_project_profile(actor: RunActor) -> ExecutionProfile | None:
+        if base_profile is None:
+            return None
+        service = app.state.console_settings_service
+        config = await service.resolve_model(actor.workspace_id)
+        selected, _ = await service.selected_harness(actor.workspace_id)
+        profile = model_profile(config, base_profile)
+        return replace(profile, runtime_id=OMP_RPC_RUNTIME if selected == "oh-my-pi" else PI_RPC_RUNTIME)
 
     async def current_git_identity(actor: RunActor, agent_name: str) -> dict[str, object]:
         return await git_identity(app.state.console_settings_service, app.state.identity_service, actor, agent_name)
@@ -303,6 +315,7 @@ def create_app(
         agent_catalog=agent_catalog,
         execution_profile=base_profile,
         profile_provider=current_profile if base_profile is not None else None,
+        private_project_profile=private_project_profile if resolved_settings.native_rpc_image else None,
         git_identity_provider=current_git_identity,
         content_authorizer=guard,
         projects=project_catalog,
@@ -341,6 +354,7 @@ def create_app(
             app.state.project_service,
             app.state.delivery_service,
             app.state.code_event_reader,
+            console_url=resolved_settings.console_public_url,
         )
         if context
         else None

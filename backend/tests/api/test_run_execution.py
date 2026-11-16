@@ -266,6 +266,41 @@ async def test_expired_fenced_or_wrong_owner_cannot_commit_or_revive(configured:
 
 
 @pytest.mark.anyio
+async def test_expired_native_run_accepts_new_instruction_in_same_task(configured: RunsHarness) -> None:
+    """原生会话进程中止后关闭旧 Run，并用新租约续接同 Task。"""
+    from sqlalchemy import update
+
+    from weora.modules.runs.application.harness import PI_RPC_RUNTIME
+    from weora.modules.runs.infrastructure.models import RunModel
+
+    run_id = await create(configured)
+    async with configured.sessions() as session:
+        row = await session.get(RunModel, run_id)
+        assert row and row.execution_profile
+        native = row.execution_profile | {"runtime_id": PI_RPC_RUNTIME}
+        await session.execute(update(RunModel).where(RunModel.id == run_id).values(execution_profile=native))
+        await session.commit()
+    clock = Clock(datetime.now(UTC))
+    store = SqlAlchemyExecutionStore(configured.sessions, clock=clock)
+    workspace_id = UUID(configured.workspace_id)
+    lease = await store.claim(workspace_id=workspace_id, run_id=run_id, owner="native-lost", lease_seconds=3)
+    assert lease is not None
+    clock.now += timedelta(seconds=4)
+    assert await store.recover_expired() == 1
+    detail = (await configured.client.get(f"{configured.path}/{run_id}")).json()
+    assert detail["status"] == "FAILED" and detail["failure_code"] == "NATIVE_SESSION_INTERRUPTED"
+    response = await configured.client.post(
+        f"{configured.path}/{run_id}/continue", headers=configured.headers("native-after-worker-loss"),
+        json={"instruction": "查看已经改过的文件再继续"},
+    )
+    assert response.status_code == 202, response.text
+    resumed_id = response.json()["run_id"]
+    resumed = (await configured.client.get(f"{configured.path}/{resumed_id}")).json()
+    assert resumed["task_id"] == detail["task_id"]
+    assert resumed["execution_profile"]["runtime_id"] == PI_RPC_RUNTIME
+
+
+@pytest.mark.anyio
 async def test_running_cancellation_waits_for_runtime_cleanup(configured: RunsHarness) -> None:
     run_id = await create(configured)
     runtime = ScriptedRuntime(hold=True)

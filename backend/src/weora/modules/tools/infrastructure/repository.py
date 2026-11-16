@@ -7,15 +7,21 @@ import sys
 from pathlib import Path, PurePosixPath
 
 from weora.modules.tools.application.gateway import ToolScope, ToolSpec, failure
+from weora.shared.text_window import TextWindow
 
 READ_FILE = ToolSpec(
     "repo.file.read",
-    "读取固定提交的 UTF-8 文件。项目任务必须显式提供本次选中仓库 repository_id；不能传地址或凭据。",
+    "读取固定提交的 UTF-8 文件。小文件默认完整返回，大文件按行分段；"
+    "用 next_line/next_column 作为 start_line/start_column 续读，max_lines 默认 200。"
+    "项目任务必须提供选中 repository_id；不能传地址或凭据。",
     {
         "type": "object",
         "properties": {
             "path": {"type": "string", "minLength": 1, "maxLength": 400},
             "repository_id": {"type": "string", "pattern": "^[0-9a-fA-F-]{36}$"},
+            "start_line": {"type": "integer", "minimum": 1},
+            "start_column": {"type": "integer", "minimum": 0},
+            "max_lines": {"type": "integer", "minimum": 1, "maximum": 1000},
         },
         "required": ["path"],
         "additionalProperties": False,
@@ -59,10 +65,10 @@ class ReadOnlyRepository:
         raw = arguments.get("path")
         if not isinstance(raw, str):
             return failure("TOOL_ARGUMENTS_INVALID")
-        return await asyncio.to_thread(self._read, root, raw)
+        return await asyncio.to_thread(self._read, root, raw, arguments)
 
     @staticmethod
-    def _read(root: Path, raw: str) -> dict[str, object]:
+    def _read(root: Path, raw: str, arguments: dict[str, object]) -> dict[str, object]:
         path = PurePosixPath(raw)
         if path.is_absolute() or "\\" in raw or ":" in raw or any(part in {"..", ".git"} for part in path.parts):
             return failure("REPOSITORY_PATH_DENIED")
@@ -92,10 +98,23 @@ class ReadOnlyRepository:
                 _verify_open_handle(stream.fileno(), root)
                 if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
                     return failure("REPOSITORY_PATH_DENIED")
-                content = stream.read(65537)
-            if len(content) > 65536:
-                return failure("REPOSITORY_FILE_TOO_LARGE")
-            return {"ok": True, "path": raw, "content": content.decode("utf-8")}
+                size = os.fstat(stream.fileno()).st_size
+                if size > 128 * 1024 * 1024:
+                    return failure("REPOSITORY_FILE_TOO_LARGE")
+                paged = size > 65536 or any(key in arguments for key in ("start_line", "max_lines", "start_column"))
+                window = TextWindow(
+                    int(str(arguments.get("start_line", 1))),
+                    int(str(arguments.get("max_lines", 200))) if paged else None,
+                    int(str(arguments.get("start_column", 0))),
+                )
+                # 复用已验证句柄，文件增长也不能绕过整个扫描预算。
+                received = 0
+                while chunk := stream.read(65536):
+                    received += len(chunk)
+                    if received > 128 * 1024 * 1024:
+                        return failure("REPOSITORY_FILE_TOO_LARGE")
+                    window.feed(chunk)
+            return {"ok": True, "path": raw, **window.result()}
         except (OSError, ValueError, UnicodeError):
             return failure("REPOSITORY_FILE_UNAVAILABLE")
 

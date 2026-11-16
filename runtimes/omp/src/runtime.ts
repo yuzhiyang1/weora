@@ -1,6 +1,7 @@
 import { Agent, type AgentMessage, type AgentTool, type StreamFn } from '@oh-my-pi/pi-agent-core';
 import { streamSimple } from '@oh-my-pi/pi-ai';
 import { getBundledModels } from '@oh-my-pi/pi-catalog';
+import { ToolBudget } from '../../pi/src/tool-budget.js';
 import {
   MAX_OUTPUT_CHARS, SafeRuntimeError, modelToolHistory, providerToolName,
   type RuntimeRequest, type SessionControl, type ToolCaller,
@@ -21,7 +22,7 @@ export async function runOmp(
   if (!model) throw new SafeRuntimeError('MODEL_UNKNOWN');
 
   // 只装配 Weora 声明的工具，OMP 不发现宿主机扩展、文件、Shell 或 MCP。
-  let calls = 0;
+  const budget = new ToolBudget();
   const tools: AgentTool[] = (input.tools ?? []).map(tool => ({
     name: providerToolName(tool.name),
     label: tool.name,
@@ -30,8 +31,9 @@ export async function runOmp(
     concurrency: 'exclusive',
     execute: async (id, args) => {
       if (!callTool || signal?.aborted) throw new SafeRuntimeError('MODEL_ABORTED');
-      if (++calls > 64) throw new SafeRuntimeError('TOOL_BUDGET_EXCEEDED');
-      const result = await callTool(id, tool.name, args);
+      const rejected = budget.before(tool.name, args);
+      if (rejected) return { content: [{ type: 'text', text: JSON.stringify(rejected) }], details: undefined, isError: true };
+      const result = budget.after(tool.name, args, await callTool(id, tool.name, args));
       return { content: [{ type: 'text', text: JSON.stringify(result) }], details: undefined, isError: result.ok === false };
     },
   }));
@@ -73,14 +75,21 @@ export async function runOmp(
   let outputLength = 0;
   let streamedLength = 0;
   let oversized = false;
+  let toolCorrectionUsed = false;
   let unexpectedTool = false;
   const permitted = new Set(tools.map(tool => tool.name));
+  // SDK 结算失败结果后仍可能走到请求边界，这里拦住额外的模型调用。
+  agent.setBeforeModelCall(() => unexpectedTool || budget.stop ? { stop: true } : undefined);
   const unsubscribe = agent.subscribe(event => {
     if (event.type === 'message_end' && event.message.role === 'assistant') {
       outputLength += event.message.content.reduce((n, block) => n + (block.type === 'text' ? block.text.length : 0), 0);
       if (event.message.content.some(block => block.type === 'toolCall' && !permitted.has(block.name))) {
-        unexpectedTool = true;
-        agent.abort();
+        // OMP 会把未找到的工具作为失败结果反馈给模型，同一轮运行只允许一次纠正。
+        if (toolCorrectionUsed || !callTool || !permitted.size) {
+          unexpectedTool = true;
+          agent.abort();
+        }
+        toolCorrectionUsed = true;
       }
     }
     if (event.type === 'message_update' && event.assistantMessageEvent.type === 'text_delta') {
@@ -96,6 +105,11 @@ export async function runOmp(
   try {
     await agent.prompt(message(input.instruction, session?.initialInputIds ?? []));
     if (signal?.aborted) throw new SafeRuntimeError('MODEL_ABORTED');
+    if (budget.partialSummary !== undefined) {
+      await checkpoint(agent.state.messages);
+      return budget.partialSummary;
+    }
+    if (budget.exhausted) throw new SafeRuntimeError('TOOL_BUDGET_EXCEEDED');
     if (oversized) throw new SafeRuntimeError('MODEL_OUTPUT_LIMIT');
     if (unexpectedTool) throw new SafeRuntimeError('UNEXPECTED_TOOL_CALL');
     const last = agent.state.messages.at(-1);

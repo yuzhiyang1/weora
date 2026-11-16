@@ -29,10 +29,12 @@ export function ToolInvocationsPanel({
   workspaceId,
   userId,
   runId,
+  live = false,
 }: {
   workspaceId: string;
   userId: string;
   runId: string;
+  live?: boolean;
 }) {
   const query = useQuery({
     queryKey: ["run-tools", workspaceId, userId, runId],
@@ -41,6 +43,8 @@ export function ToolInvocationsPanel({
         workspaceId,
         `/runs/${encodeURIComponent(runId)}/tools`,
       ),
+    // 工具审计独立更新，Run 的 SSE 序号可能保持不变。
+    refetchInterval: live ? 5000 : false,
     retry: false,
   });
   return (

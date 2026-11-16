@@ -1,6 +1,7 @@
 """协调用例：模型在事务外运行，Task/Run 写入只调用 Runs 的公开应用接口。"""
 
 import base64
+import hashlib
 import json
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict, replace
@@ -14,9 +15,10 @@ from pydantic import TypeAdapter
 from weora.modules.agents.application.service import AgentActor, AgentRegistryService
 from weora.modules.agents.domain.errors import AgentRegistryError
 from weora.modules.collaboration.application.tasks import TaskRecord
-from weora.modules.context.domain import ContextActor, ContextError, ContextRunScope, Json
+from weora.modules.context.domain import ContextActor, ContextError, ContextRunScope, Json, ReplyNotSent
 from weora.modules.context.service import ContextService, timestamp
 from weora.modules.coordination.domain import (
+    SESSION_RESTART_FAILURES,
     Config,
     CoordinationError,
     DeferredEffect,
@@ -30,6 +32,7 @@ from weora.modules.coordination.engine import Engine, key, later
 from weora.modules.coordination.hosting import CodeEventReader
 from weora.modules.coordination.hosting_poll import CodePolling
 from weora.modules.coordination.main_session import MainSessionRunner
+from weora.modules.coordination.objectives import objective_inputs
 from weora.modules.coordination.ports import CoordinationStore
 from weora.modules.coordination.records import Effects, records
 from weora.modules.coordination.repository_source import RepositoryIntake
@@ -40,9 +43,36 @@ from weora.modules.delivery.application.service import DeliveryService
 from weora.modules.delivery.domain.models import DeliveryError
 from weora.modules.projects.domain import ProjectActor, ProjectError
 from weora.modules.projects.service import ProjectService
-from weora.modules.runs.application.execution import RuntimeSession, TextRuntime
+from weora.modules.runs.application.execution import RunLease, RuntimeSession, TextRuntime
+from weora.modules.runs.application.harness import NATIVE_RUNTIMES
 from weora.modules.runs.application.ports import ExecutionProfile, RunActor
 from weora.modules.runs.application.service import RunService
+
+FEISHU_REPLY_ERRORS = {
+    "PROVIDER_UNAVAILABLE": "飞书接口暂时不可用",
+    "RATE_LIMITED": "飞书接口限流",
+    "TOKEN_EXPIRED": "飞书应用访问凭证已失效",
+    "CREDENTIALS_UNAVAILABLE": "无法获取飞书应用访问凭证",
+    "PERMISSION_DENIED": "机器人没有权限、未入群或无法访问原话题",
+    "REPLY_ACCESS_REVOKED": "原话题访问授权已失效",
+}
+
+RUN_FAILURE_REASONS = {
+    "MODEL_FAILED": "模型调用失败",
+    "MODEL_PAYMENT_REQUIRED": "模型供应商因付费或额度条件拒绝请求",
+    "MODEL_UNKNOWN": "模型服务无法识别当前模型",
+    "MODEL_TIMEOUT": "模型响应超时",
+    "MODEL_KEY_REQUIRED": "模型访问凭证缺失",
+    "MODEL_CONFIGURATION_MISMATCH": "模型配置不一致",
+    "RUN_TIMEOUT": "任务执行超时",
+    "RUNTIME_NOT_CONFIGURED": "执行环境未配置",
+    "RUNTIME_PROCESS_FAILED": "执行进程异常退出",
+}
+
+# 付费拒绝并不等价于余额为零；先修复账户/配置条件，不能建议无条件重复模型调用。
+RUN_FAILURE_ACTIONS = {
+    "MODEL_PAYMENT_REQUIRED": "请先核对模型账户的付费/额度条件及模型配置，处理后在原话题回复重试，继续原任务。",
+}
 
 
 class CoordinationService:
@@ -55,10 +85,12 @@ class CoordinationService:
         projects: ProjectService | None = None,
         delivery: DeliveryService | None = None,
         code_events: CodeEventReader | None = None,
+        console_url: str | None = None,
     ) -> None:
         self.store, self.context, self.runs, self.agents = store, context, runs, agents
         self.projects = projects
         self.delivery, self.code_events = delivery, code_events
+        self.console_url = console_url
         self.repository_intake: RepositoryIntake | None = None
         self.worker_dispatch = WorkerDispatcher(store, context, runs)
 
@@ -201,6 +233,7 @@ class CoordinationService:
         def prepare(engine: Engine, state: State) -> None:
             # 领域规则决定何时评估；运输层不需要了解游标、暂停或代次格式。
             engine.pass_due()
+            engine.relay_retried_results(self.console_url)
             checkpoints = {name: value for name, value in state.checkpoints.items() if name.startswith("poll:")}
             now = engine.now()
             compensation_due = not checkpoints or any(
@@ -549,22 +582,27 @@ class CoordinationService:
         if revoked:
 
             def revoke(_: Engine, current: State) -> None:
+                newly_revoked = {item.id for item in current.triggers if item.authorized and item.id in revoked}
+                if not newly_revoked:
+                    return  # 同一批来源的并发授权检查不得反复旋转原生历史代次。
                 invalid_mandates = {
                     ticket.id
                     for ticket in current.tickets
-                    if ticket.origin_id in revoked
-                    or any(item.trigger_id in revoked and not item.peer_evidence for item in ticket.inputs)
+                    if ticket.origin_id in newly_revoked
+                    or any(item.trigger_id in newly_revoked and not item.peer_evidence for item in ticket.inputs)
                 }
                 affected = invalid_mandates | {
-                    ticket.id for ticket in current.tickets if any(item.trigger_id in revoked for item in ticket.inputs)
+                    ticket.id for ticket in current.tickets
+                    if any(item.trigger_id in newly_revoked for item in ticket.inputs)
                 }
                 for trigger in current.triggers:
-                    if trigger.id in revoked:
+                    if trigger.id in newly_revoked:
                         trigger.authorized, trigger.text = False, ""
                         trigger.origin.pop("root_text", None)
                         trigger.handbacks = {identity: "来源已失效" for identity in trigger.handbacks}
                 # 会话是多个消息的派生副本；任何来源失效都放弃历史，保留业务状态与幂等标识。
                 for session in current.sessions:
+                    session.native_history_epoch += 1
                     session.messages = []
                     session.pending_messages = []
                     session.model_retry = None
@@ -597,6 +635,10 @@ class CoordinationService:
                         current.checkpoints.pop(identity)
 
                 for ticket in current.tickets:
+                    for item in ticket.inputs:
+                        item.body_read_ranges = []
+                        if item.peer_evidence and item.trigger_id in newly_revoked:
+                            item.peer_evidence_checked = True
                     if ticket.id in affected:
                         ticket.attention = ticket.attention_id = ticket.attention_trigger_id = None
                         # 撤回补充人的证据不撤销原发起人的任务授权。
@@ -616,11 +658,12 @@ class CoordinationService:
                             if assignment.report:
                                 assignment.report.summary = "来源已失效"
                                 assignment.report.human_action = None
+                                assignment.report.remaining_work = ()
                 for decision in current.decisions:
-                    if any(identity in revoked for identity in decision.trigger_ids):
+                    if any(identity in newly_revoked for identity in decision.trigger_ids):
                         decision.audit, decision.reason = {}, "source_revoked"
                 for reply in current.replies:
-                    if reply.trigger_id in revoked or reply.ticket_id in affected:
+                    if reply.trigger_id in newly_revoked or reply.ticket_id in affected:
                         reply.text = ""
                         if reply.state == "pending":
                             reply.state = "expired"
@@ -728,8 +771,8 @@ class CoordinationService:
                         results.append({"ok": False, "code": "INVALID_TOOL_PARAMETERS"})
                         continue
                     item = dict(item)
-                    if item.get("decision") in {"accept", "attach"}:
-                        item.setdefault("reason", "显式人类请求" if item["decision"] == "accept" else "跟进已有任务")
+                    if item.get("decision") in {"accept", "attach", "resume"}:
+                        item.setdefault("reason", "显式人类请求" if item["decision"] != "attach" else "跟进已有任务")
                     try:
                         decision = await commit(
                             lambda engine, _: engine.route(str(item["trigger_id"]), item),  # noqa: B023 - 本轮 await 内执行
@@ -781,6 +824,7 @@ class CoordinationService:
                                 str(arguments["text"]),
                                 ticket_id=identity or None,
                                 artifact_ids=tuple(cast(list[str], arguments.get("artifact_ids", []))),
+                                console_url=self.console_url,
                             )
                         ),
                     }
@@ -967,6 +1011,8 @@ class CoordinationService:
                 {
                     "id": item.id,
                     "title": item.title,
+                    "task_id": item.task_id,
+                    "ended_by": item.ended_by,
                     "outcome": item.outcome,
                     "attention": item.attention,
                     "assignment": asdict(item.assignments[-1]) if item.assignments else None,
@@ -988,7 +1034,9 @@ class CoordinationService:
         """在平台租约内恢复主会话；资产与会话生命周期由独立应用组件处理。"""
         await MainSessionRunner(self).run(workspace_id, scope_id, effect, runtime_factory, profile)
 
-    async def launch(self, workspace_id: UUID, scope_id: str, effect: Effect) -> None:
+    async def launch(
+        self, workspace_id: UUID, scope_id: str, effect: Effect, *, runtime_available: bool = True,
+    ) -> None:
         """复核来源后派发 Worker；跨模块幂等与租约绑定由 WorkerDispatcher 统一管理。"""
         state = await self.authorized_state(workspace_id, scope_id)
         if state.config.source_kind == "code_hosting":
@@ -999,6 +1047,7 @@ class CoordinationService:
             scope_id,
             state,
             effect,
+            runtime_available=runtime_available,
             external_link=self.link_native_inputs,
         )
 
@@ -1017,7 +1066,15 @@ class CoordinationService:
             or metadata.get("coordination_ticket_id") != ticket.id
         ):
             raise CoordinationError("MANDATE_REVOKED")
-        identities = {ticket.origin_id} | {item.trigger_id for item in ticket.inputs if item.trigger_id}
+        # 已撤回的同伴证据不再进入新历史，也不能永久阻断原发起人的有效任务。
+        # 发起人原文和授权纠偏仍是必需来源；历史换代由 authorized_state 统一处理。
+        retired_peers = {
+            item.trigger_id for item in ticket.inputs if item.peer_evidence and item.trigger_id
+            and (source := records(state).triggers.get(item.trigger_id)) and not source.authorized
+        }
+        identities = {ticket.origin_id} | {
+            item.trigger_id for item in ticket.inputs if item.trigger_id and item.trigger_id not in retired_peers
+        }
         for identity in identities:
             trigger = records(state).triggers.get(identity)
             if not trigger:
@@ -1053,13 +1110,54 @@ class CoordinationService:
         ticket = records(state).tickets.get(str(origin.get("coordination_ticket_id", "")))
         if not ticket or ticket.mandate.actor_id != str(actor.user_id):
             raise CoordinationError("MANDATE_REVOKED")
-        # 历史是所有已交付输入的派生副本；只校验原请求会漏掉已撤权或过期的后续消息。
-        for identity in {item.trigger_id for item in ticket.inputs if item.trigger_id}:
-            source = records(state).triggers.get(identity)
+        # 必需目标来源必须持续有效；已撤销 peer 的历史已换代，不阻断原授权目标续接。
+        for item in ticket.inputs:
+            if not item.trigger_id:
+                continue
+            source = records(state).triggers.get(item.trigger_id)
+            if source and not source.authorized and item.peer_evidence:
+                continue
             if not source or not source.authorized:
                 raise CoordinationError("SOURCE_REVOKED")
             await self._authorize_trigger(actor.workspace_id, state.config, source)
         return state.config
+
+    async def confirm_run_stop(self, lease: RunLease) -> None:
+        """提交终态前补齐已持久的人工停止，避免 cancel 队列晚于会话撤销检查。
+
+        只确认本用户、当前安排和当前领取代次的停止，不把一般撤权转换成取消。
+        本方法只记录取消请求；执行器须已等待受控进程退出，才可提交 CANCELLED。
+        """
+        actor = RunActor(lease.run.created_by, lease.run.workspace_id)
+        detail = await self.runs.access_metadata(actor, lease.run.id)
+        if (
+            not detail or detail.run.status != "RUNNING"
+            or detail.run.fencing_token != lease.fencing_token
+            or detail.run.cancellation_requested_at is not None
+        ):
+            return
+        origin = detail.task.origin_metadata or {}
+        scope_id, ticket_id = origin.get("coordination_scope_id"), origin.get("coordination_ticket_id")
+        if not scope_id or not ticket_id:
+            return
+        state = await self.store.snapshot(actor.workspace_id, str(scope_id))
+        ticket = records(state).tickets.get(str(ticket_id))
+        if (
+            not ticket or ticket.mandate.actor_id != str(actor.user_id)
+            or ticket.ended_by != "human" or not ticket.ended_at or not ticket.assignments
+        ):
+            return
+        assignment = ticket.assignments[-1]
+        if (
+            assignment.run_id != str(lease.run.id) or assignment.end_reason != "human_stopped"
+            or not assignment.ended_at
+        ):
+            return
+        # 跨模块只调用 Runs 应用接口；重复补偿仍复用它的原子取消和幂等事件规则。
+        await self.runs.cancel(
+            actor=actor, workspace_id=actor.workspace_id, run_id=lease.run.id,
+            request_id=f"coord-stop:{assignment.id}",
+        )
 
     async def reconcile(self, workspace_id: UUID, scope_id: str) -> None:
         """将原生 Run 的终态或等待状态投影为 Worker 报告，成功仍以原生交付验收为准。
@@ -1110,23 +1208,42 @@ class CoordinationService:
             summary = detail.run.output_text or f"运行状态 {status}，请在 Weora Console 处理该运行。"
             if len(summary) > 16000:
                 summary = summary[:15800] + f"\n（摘要已截断，完整结果见 Weora Run {assignment.run_id}。）"
+            failure_code = detail.run.failure_code or status
             report = Report(
                 "waiting" if status == "SUCCEEDED" else "failed" if status in {"FAILED", "CANCELLED"} else "blocked",
                 summary,
                 datetime.now(UTC).isoformat(),
                 human_action=(
-                    f"执行未完成（{detail.run.failure_code or status}）。"
-                    "请在原话题 @Weora 回复重试；平台将先核对已有工具事实，不自动重放业务写入。"
+                    f"{RUN_FAILURE_REASONS.get(failure_code, '任务执行失败')}（{failure_code}）。"
+                    + RUN_FAILURE_ACTIONS.get(failure_code, "请在原话题 @机器人回复重试。平台会先核对已执行的操作。")
                     if status == "FAILED" else None if status in {"SUCCEEDED", "CANCELLED"}
                     else f"任务需要人类处理：{status}。运行：{assignment.run_id}"
                 ),
-                verified=status == "SUCCEEDED",
+                verified=False,
             )
             proposed = state.checkpoints.get(f"report:{assignment.run_id}")
             if status == "SUCCEEDED" and isinstance(proposed, dict) and proposed.get("state") != "progress":
-                report = TypeAdapter(Report).validate_python(dict(proposed, at=report.at, verified=True))
+                # Run 成功只验证执行证据；ready 的用户目标覆盖将在提交事务中再次核验。
+                report = TypeAdapter(Report).validate_python(dict(proposed, at=report.at, verified=False))
             elif status == "SUCCEEDED" and isinstance(proposed, dict) and proposed.get("human_action"):
                 report = TypeAdapter(Report).validate_python(dict(proposed, state="waiting", at=report.at))
+
+            if status == "FAILED" and failure_code in SESSION_RESTART_FAILURES:
+                # 旧进程已停止，原目标仍有效；新 Run 重新装配当前权限和历史代次，无需用户重试。
+                prior = proposed if isinstance(proposed, dict) else {}
+                report = Report(
+                    "partial", str(prior.get("summary") or "会话权限或来源历史已变化，保留目标并安全续接"),
+                    report.at, remaining_work=("在当前有效来源与权限下继续完整原任务",),
+                )
+            native_work = False
+            if report.state == "partial":
+                events, _, _ = await self.runs.events(
+                    actor=actor, workspace_id=workspace_id, run_id=UUID(assignment.run_id), after=0, limit=500,
+                )
+                native_work = any(
+                    event.event_type.startswith("native.tool.") and event.event_type.endswith(".finished")
+                    for event in events
+                )
 
             def save_report(
                 engine: Engine,
@@ -1136,12 +1253,23 @@ class CoordinationService:
                 revision: str = report_id,
                 ticket_id: str = ticket.id,
                 assignment_id: str = assignment.id,
+                expected_run: str | None = assignment.run_id,
                 snapshot: Report = report,
+                observed_native_work: bool = native_work,
             ) -> None:
                 # 模型回合成功不是目标完成；只有明确 ready 且原生验收通过才结束 Ticket。
                 if current.checkpoints.get(revision_key) != revision:
-                    run_id = engine.ticket(ticket_id).assignments[-1].run_id
-                    session_ids = {engine.ticket(ticket_id).session_id} | {
+                    active = engine.ticket(ticket_id)
+                    current_assignment = active.assignments[-1]
+                    if (
+                        active.ended_by == "human" or current_assignment.ended_at
+                        or current_assignment.id != assignment_id or current_assignment.run_id != expected_run
+                    ):
+                        return
+                    run_id = current_assignment.run_id
+                    session_ids = {active.session_id} | {
+                        key("worker-native-session", active.session_id, runtime_id) for runtime_id in NATIVE_RUNTIMES
+                    } | {
                         key("subagent-session", str(run_id), item.id)
                         for item in current.activities
                         if item.run_id == run_id and item.kind == "subagent"
@@ -1152,7 +1280,55 @@ class CoordinationService:
                     for activity in current.activities:
                         if activity.run_id == run_id and activity.state == "running":
                             activity.state = "unknown"
-                    engine.report(ticket_id, assignment_id, snapshot)
+                    accepted = snapshot
+                    if snapshot.state == "ready":
+                        try:
+                            engine.validate_objective_completion(active, snapshot)
+                        except CoordinationError:
+                            # 模型结束到对账之间可能收到纠偏；保留结果并继续，不能假完成或卡死对账。
+                            accepted = replace(
+                                snapshot, state="partial", verified=False,
+                                remaining_work=snapshot.remaining_work or ("按用户完整原文及最新纠偏补齐未覆盖要求",),
+                            )
+                        else:
+                            accepted = replace(snapshot, verified=True)
+                    if accepted.state == "partial" and not accepted.human_action:
+                        # 对同一份未推进的结果仅续接有限次数；重放对账由 revision_key 保证不重复计数。
+                        progress_key = f"partial-progress:{ticket_id}"
+                        fingerprint = hashlib.sha256(json.dumps(
+                            [sorted(accepted.completed_input_ids),
+                             sorted(" ".join(item.split()) for item in accepted.remaining_work)],
+                            ensure_ascii=False,
+                        ).encode()).hexdigest()
+                        previous = current.checkpoints.get(progress_key)
+                        observed_work = observed_native_work or current.checkpoints.get(
+                            f"work-observed:{expected_run}",
+                        ) is True
+                        repeats = 0 if observed_work else (
+                            int(str(previous.get("repeats", 0))) + 1
+                            if isinstance(previous, dict) and previous.get("fingerprint") == fingerprint else 1
+                        )
+                        goal_version = key(*(item.id for item, _ in objective_inputs(active, engine.r.triggers)))
+                        rounds = (
+                            int(str(previous.get("rounds", 0))) + 1
+                            if isinstance(previous, dict) and previous.get("goal_version") == goal_version else 1
+                        )
+                        current.checkpoints[progress_key] = {
+                            "fingerprint": fingerprint, "repeats": repeats,
+                            "goal_version": goal_version, "rounds": rounds,
+                        }
+                        if repeats >= 3 or rounds >= 16:
+                            accepted = replace(
+                                accepted, state="blocked", verified=False,
+                                human_action=(
+                                    "连续三轮没有新的工具执行或目标覆盖进展，已保留原目标和会话；需核对阻碍后续接。"
+                                    if repeats >= 3 else
+                                    "本次自动续接已达到执行预算，原目标仍未完成；进度与会话已保留，可继续原任务。"
+                                ),
+                            )
+                    engine.report(ticket_id, assignment_id, accepted)
+                    if accepted.state == "partial" and not accepted.human_action:
+                        engine.continue_partial(ticket_id)
                     current.checkpoints[revision_key] = revision
 
             await self.store.transact(
@@ -1237,6 +1413,14 @@ class CoordinationService:
             if not current_trigger or not current_trigger.authorized:
                 raise CoordinationError("REPLY_ACCESS_REVOKED")
             ticket = records(current).tickets.get(saved.ticket_id or "")
+            if saved.purpose == "result":
+                assignment = next((
+                    item for item in ticket.assignments if key("result", ticket.id, item.id) == saved.id
+                ), None) if ticket else None
+                if not assignment:
+                    raise CoordinationError("RESULT_NOT_READY")
+                # 兼容升级前仍待发送的摘要；unknown/sent 不重写、不重发，避免结果未知时重复投递。
+                saved.text = Engine.result_text(assignment, self.console_url)
             if saved.purpose == "attention" and (
                 not ticket
                 or ticket.attention != saved.text
@@ -1247,13 +1431,14 @@ class CoordinationService:
                 current.config.source_kind == "feishu" and saved.purpose == "ack"
                 and ticket and ticket.origin_id == saved.trigger_id
             ):
-                if not ticket.task_id:
-                    if ticket.ended_at:
-                        return None
-                    raise DeferredEffect("TASK_NUMBER_PENDING")
-                # 回执与看板展示同一编号；在发送事务里写入正文，保留实际投递内容供对账。
-                number = f"任务 #{ticket.task_id[:8].upper()}｜"
-                saved.text = f"{number}{saved.text[:240 - len(number)]}"
+                if ticket.ended_at:
+                    saved.state = "withdrawn"
+                    records(current).replies.save(saved)
+                    return None
+                # 首回和执行独立；已有原生任务号时附上，结束后的迟到首回在上方撤销。
+                if ticket.task_id:
+                    number = f"\n\n任务 #{ticket.task_id[:8].upper()}"
+                    saved.text = f"{saved.text[:240 - len(number)]}{number}"
             saved.state = "unknown"
             saved.sending_owner = effect.owner
             return saved.text
@@ -1264,10 +1449,21 @@ class CoordinationService:
         if code_identity and self.repository_intake:
             remote_id = await self.repository_intake.reply(code_identity, trigger, text, reply.id)
         else:
-            remote_id = await self.context.reader.reply(
-                connection, str(trigger.origin["message_id"]), text,
-                str(uuid5(NAMESPACE_URL, f"{workspace_id}:{scope_id}:{reply.id}")), image_keys=tuple(image_keys),
-            )
+            try:
+                remote_id = await self.context.reader.reply(
+                    connection, str(trigger.origin["message_id"]), text,
+                    str(uuid5(NAMESPACE_URL, f"{workspace_id}:{scope_id}:{reply.id}")), image_keys=tuple(image_keys),
+                )
+            except ReplyNotSent:
+                def reset(_: Engine, current: State) -> None:
+                    if effect.owner is not None:
+                        current.require_effect_lease(effect, datetime.now(UTC).isoformat())
+                    saved = records(current).replies.get(reply.id)
+                    if saved and saved.state == "unknown" and saved.sending_owner == effect.owner:
+                        saved.state, saved.sending_owner = "pending", None
+
+                await self.store.transact(workspace_id, scope_id, reset)
+                raise
 
         def sent(_: Engine, current: State) -> None:
             saved = records(current).replies.get(reply.id)
@@ -1281,30 +1477,42 @@ class CoordinationService:
         await self.store.transact(workspace_id, scope_id, sent)
         return True
 
-    async def effect_failed(self, workspace_id: UUID, scope_id: str, effect: Effect) -> None:
+    async def effect_failed(self, workspace_id: UUID, scope_id: str, effect: Effect, *, code: str) -> None:
         """失败也进入管理事实；渠道未知绝不能用 Worker 重试偷偷变成第二次发送。"""
 
         def failed(engine: Engine, current: State) -> None:
             if effect.kind == "reply":
                 reply = records(current).replies.get(str(effect.data["reply_id"]))
-                if reply and reply.ticket_id:
+                if reply and reply.ticket_id and reply.state in {"pending", "unknown"}:
                     ticket = records(current).tickets.get(reply.ticket_id)
                     if ticket:
                         unknown = reply.state == "unknown"
-                        ticket.delivery_error = "DELIVERY_RESULT_UNKNOWN" if unknown else "DELIVERY_PREPARATION_FAILED"
+                        delivery_state = "DELIVERY_RESULT_UNKNOWN" if unknown else "DELIVERY_PREPARATION_FAILED"
+                        if reply.purpose != "ack":
+                            ticket.delivery_error = delivery_state
                         engine.record_notice(
                             "ticket.delivery_failed",
                             effect.id,
                             {"ticket_id": ticket.id, "reply_id": reply.id,
-                             "code": "CHANNEL_RECONCILIATION_REQUIRED" if unknown else "DELIVERY_PREPARATION_FAILED"},
+                             "code": code, "delivery_state": delivery_state},
                         )
+                        # 首回失败只影响消息投递，不能伪造 Worker 失败或要求重新授权任务。
             elif effect.kind == "worker":
                 ticket = records(current).tickets.get(str(effect.data["ticket_id"]))
-                if ticket and ticket.assignments and not ticket.assignments[-1].ended_at:
+                if (
+                    ticket and ticket.assignments and not ticket.ended_by
+                    and ticket.assignments[-1].id == effect.data["assignment_id"]
+                    and not ticket.assignments[-1].ended_at
+                ):
+                    reason = RUN_FAILURE_REASONS.get(code, "任务未能启动")
+                    message = f"{reason}（{code}）。" + RUN_FAILURE_ACTIONS.get(code, "请在原话题 @机器人回复重试。")
                     engine.report(
                         ticket.id,
                         ticket.assignments[-1].id,
-                        Report("failed", "执行安排失败，请查看协调器状态并明确重试。", engine.now()),
+                        Report(
+                            "failed", message, engine.now(),
+                            human_action=message if current.config.source_kind == "feishu" else None,
+                        ),
                     )
 
         await self.store.transact(workspace_id, scope_id, failed)

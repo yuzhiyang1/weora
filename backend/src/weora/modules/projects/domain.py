@@ -48,6 +48,16 @@ class RepositoryReader(Protocol):
 
 
 @runtime_checkable
+class RepositoryPagedReader(Protocol):
+    """同一固定提交内的行窗口读取；游标不能改变仓库或提交权限。"""
+
+    async def read_page(
+        self, cache_id: UUID, revision: str, path: str,
+        *, start_line: int = 1, max_lines: int = 200, start_column: int = 0,
+    ) -> dict[str, object]: ...
+
+
+@runtime_checkable
 class RepositoryDirectoryReader(Protocol):
     async def directory(self, cache_id: UUID, revision: str, path: str) -> dict[str, object]: ...
 
@@ -73,12 +83,19 @@ class RepositoryArchive:
     path: Path
     revision: str
     sha256: str
+    restricted_paths_removed: bool = False
+
+
+# 旧交付沙箱的默认归档预算；原生运行通过可信装配层显式传入自己的预算。
+DEFAULT_REPOSITORY_ARCHIVE_BYTES = 64 * 1024 * 1024
 
 
 class RepositoryArchiveExporter(Protocol):
     """可选后台能力：只读来源不必实现沙箱归档。"""
 
-    async def archive(self, cache_id: UUID, revision: str) -> RepositoryArchive: ...
+    async def archive(
+        self, cache_id: UUID, revision: str, *, max_bytes: int = DEFAULT_REPOSITORY_ARCHIVE_BYTES,
+    ) -> RepositoryArchive: ...
 
 
 def git_address(value: str) -> str:

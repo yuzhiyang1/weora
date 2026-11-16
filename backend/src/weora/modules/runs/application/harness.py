@@ -8,5 +8,8 @@ from weora.modules.runs.application.execution import RuntimeSession, TextRuntime
 HarnessId = Literal["pi", "oh-my-pi"]
 PI_RUNTIME = "pi-agent-core@1.3.0"
 OMP_RUNTIME = "oh-my-pi@18.16.0"
+PI_RPC_RUNTIME = "pi-rpc@1.3.0"
+OMP_RPC_RUNTIME = "omp-rpc@18.16.0"
+NATIVE_RUNTIMES = frozenset({PI_RPC_RUNTIME, OMP_RPC_RUNTIME})
 ToolCaller = Callable[[str, str, dict[str, object]], Awaitable[dict[str, object]]]
 HarnessFactory = Callable[[RuntimeSession | None, ToolCaller | None], TextRuntime]

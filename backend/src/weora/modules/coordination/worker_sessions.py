@@ -9,7 +9,7 @@ from weora.modules.coordination.domain import Activity, Json, Session, State
 from weora.modules.coordination.engine import Engine
 from weora.modules.coordination.records import records
 from weora.modules.runs.application.execution import RunLease, RuntimeFailure, RuntimeSession
-from weora.modules.runs.application.harness import PI_RUNTIME
+from weora.modules.runs.application.harness import NATIVE_RUNTIMES, PI_RUNTIME
 from weora.modules.runs.application.ports import RunActor
 
 if TYPE_CHECKING:
@@ -26,6 +26,7 @@ class WorkerBinding:
     assignment_id: str
     session_id: str
     initial: tuple[str, ...]
+    status_only: bool = False
 
     @property
     def owner(self) -> str:
@@ -61,10 +62,13 @@ class WorkerSession:
         session = records(state).sessions.get(self.binding.session_id)
         if not session or session.owner != self.binding.owner:
             raise RuntimeFailure("ACCESS_REVOKED")
+        epoch = str(session.native_history_epoch) if session.native_history_epoch else None
+        if self.port and self.port.native_history_epoch != epoch:
+            raise RuntimeFailure("SESSION_HISTORY_REVOKED")
         return session
 
     async def open(self, model_id: str, runtime_id: str = PI_RUNTIME) -> RuntimeSession:
-        """原子接管持久日志；只改领取代次，保留已确认历史和冻结的模型选择。"""
+        """原子接管持久日志；保留历史，记录本次 Run 已冻结的模型。"""
 
         def acquire(_: Engine, state: State) -> Session:
             self.check(state)
@@ -76,7 +80,7 @@ class WorkerSession:
                 raise RuntimeFailure("HARNESS_SESSION_MISMATCH")
             session.runtime_id = runtime_id
             session.owner, session.generation = self.binding.owner, session.generation + 1
-            session.model_id = session.model_id or model_id
+            session.model_id = model_id
             records(state).sessions.save(session)
             return session
 
@@ -89,6 +93,7 @@ class WorkerSession:
             self.checkpoint,
             list(self.binding.initial),
             self.status,
+            native_history_epoch=str(journal.native_history_epoch) if journal.native_history_epoch else None,
         )
         return self.port
 
@@ -97,7 +102,12 @@ class WorkerSession:
         if not await self.authorize():
             raise RuntimeFailure("ACCESS_REVOKED")
         state = await self.service.authorized_state(self.workspace_id, self.binding.scope_id)
-        self._stored(state)
+        journal = self._stored(state)
+        ticket = records(state).tickets.get(self.binding.ticket_id)
+        if self.port and journal.runtime_id in NATIVE_RUNTIMES and ticket:
+            read_only = self.binding.status_only or Engine.peer_evidence_only(ticket)
+            if read_only != self.port.read_only:
+                raise RuntimeFailure("SESSION_POLICY_CHANGED")
         detail = await self.service.runs.access_metadata(self.actor, self.binding.lease.run.id)
         if not detail or detail.run.status != "RUNNING":
             raise RuntimeFailure("RUN_PAUSED")
@@ -132,7 +142,11 @@ class WorkerSession:
                             "context_only": item.context_only,
                             "peer_evidence": item.peer_evidence,
                             "text": (trigger.text if trigger else item.text or "")[:4000],
-                            "reference": "长正文使用 orchestrator_read resource=input 分段读取",
+                            "chars": len(trigger.text if trigger else item.text or ""),
+                            "next_offset": (
+                                4000 if len(trigger.text if trigger else item.text or "") > 4000 else None
+                            ),
+                            "reference": "用户纠偏保持原文；有 next_offset 时用 orchestrator_read resource=input 读完",
                         },
                         ensure_ascii=False,
                     ),
@@ -160,7 +174,9 @@ class WorkerSession:
 
         def save(engine: Engine, state: State) -> None:
             session = self._stored(state)
-            session.messages = messages
+            # 原生 CLI 的 JSONL 是会话权威；输入回执没有 messages，不能借此清空平台历史。
+            if messages or session.runtime_id not in NATIVE_RUNTIMES:
+                session.messages = messages
             session.read = list(dict.fromkeys(session.read + read))[-500:]
             ticket = engine.ticket(self.binding.ticket_id)
             for identity in read:
@@ -176,11 +192,15 @@ class WorkerSession:
                     activity.read = True
                     continue
                 previous = next((item for item in ticket.inputs if item.id == identity), None)
+                if previous and identity not in self.binding.initial:
+                    trigger = records(state).triggers.get(previous.trigger_id) if previous.trigger_id else None
+                    # pull 的插话正文前缀为 4000；初始正文长度由冻结派发记录提供。
+                    previous.delivered_chars = min(4000, len(trigger.text if trigger else previous.text or ""))
                 if not previous or not previous.read_at:
                     engine.mark_input(ticket.id, self.binding.assignment_id, identity, read=True)
 
         await self.service.store.transact(self.workspace_id, self.binding.scope_id, save)
-        if self.port:
+        if self.port and messages:
             self.port.messages = messages
 
     async def save_activity(self, activity: Activity) -> None:
