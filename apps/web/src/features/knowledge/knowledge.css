@@ -70,6 +70,46 @@
   list-style: none;
 }
 
+.knowledge-columns {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 19rem), 1fr));
+  gap: calc(var(--spacing) * 4);
+  align-items: start;
+}
+
+.knowledge-directory-row {
+  border-block-start: 1px solid var(--border);
+}
+
+.knowledge-directory-row dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.knowledge-source-filters {
+  margin-block-end: calc(var(--spacing) * 3);
+}
+
+.knowledge-field {
+  display: grid;
+  gap: calc(var(--spacing) * 2);
+  min-inline-size: 0;
+}
+
+.knowledge-field:has(> button) {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+}
+
+.knowledge-field label {
+  display: grid;
+  gap: calc(var(--spacing) * 2);
+}
+
+.knowledge-dialog-footer {
+  justify-content: flex-end;
+}
+
 .knowledge-row {
   padding-block: calc(var(--spacing) * 4);
   min-inline-size: 0;

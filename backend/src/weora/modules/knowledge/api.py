@@ -1921,6 +1921,13 @@ async def graph_documents(code: CodeIndex, topic: GraphTopic, codebase_id: UUID 
     return await code.graph_document_catalog(topic, codebase_id)
 
 
+@router.get("/codebases/{codebase_id}/modules")
+async def codebase_modules(
+    code: CodeIndex, codebase_id: UUID, query: Annotated[str, Query(max_length=160)] = "",
+) -> dict[str, object]:
+    return await code.module_catalog(codebase_id, query.strip())
+
+
 @router.get("/codebases/local/{codebase_id}")
 async def local_codebase_status(code: CodeIndex, codebase_id: UUID, lint: bool = False) -> dict[str, object]:
     return await code.local_status(codebase_id, lint=lint)

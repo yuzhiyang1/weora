@@ -670,6 +670,9 @@ def _contribution_request(args: argparse.Namespace) -> tuple[str, dict[str, Json
         raise CollabError("KNOWLEDGE_NAMESPACE_KIND", "经验目录只在新建经验时指定。")
     if namespace:
         source["namespace"] = namespace
+    elif namespace == "" and "resource_path" not in source:
+        # 显式选根目录时固定落点，即使成员只有一个生效的经验目录。
+        source["resource_path"] = f"learnings/{operation}"
     heading: str = args.title or content.title or args.file.stem
     if not body.strip() or len(body) > 64_000 or "\x00" in body:
         raise CollabError("KNOWLEDGE_CONTRIBUTION_TEXT", "请提供 64,000 字内的非空 Markdown 正文。")
@@ -714,14 +717,20 @@ def _preview_contribution(args: argparse.Namespace) -> dict[str, JsonValue]:
         and payload["promoted_from"] is None and source["type"] in ("manual", "session", "run")
     )
     location = source.get("resource_path")
+    resolves_on_publish = False
     if location is None and immediate:
         directory = source.get("namespace")
-        location = f"learnings/{directory}/{operation}" if directory else f"learnings/{operation}"
+        if directory:
+            location = f"learnings/{directory}/{operation}"
+        else:
+            # 离线预览也可用，未指定的目录由服务端按发布时的清单解析。
+            resolves_on_publish = True
     return {
         "preview": True, "operation_id": operation, "project_id": entry["project"], "entry_id": entry["entry"],
         "kind": payload["kind"], "title": title.strip(), "resource_path": location,
         "bytes": len(body.encode()), "target_status": "active" if immediate else "pending",
         "base_revision": payload["base_revision"],
+        **({"resolve_namespace_on_publish": True} if resolves_on_publish else {}),
         **({"authored_at": payload["authored_at"]} if "authored_at" in payload else {}),
         **({"domain": payload["domain"]} if "domain" in payload else {}),
     }

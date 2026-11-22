@@ -11,7 +11,10 @@ import { useAuth } from "../auth/AuthProvider";
 import { listProjects, projectKey } from "../projects/api";
 import { errorMessage } from "../runs/api";
 import { skillPagePath } from "../skills/api";
-import { contribute, detail, feedback, health, knowledgeTypes, list, review, type Entry, type Scope } from "./api";
+import {
+  contribute, detail, feedback, health, knowledgeTypes, list, namespaceKey, namespaceSettings, review, type Entry, type Scope,
+} from "./api";
+import { KnowledgeDirectories } from "./KnowledgeDirectories";
 import { KnowledgeHealthReport } from "./KnowledgeHealthReport";
 import { KnowledgeMaintenance } from "./KnowledgeMaintenance";
 import { KnowledgeRows } from "./KnowledgeRows";
@@ -20,7 +23,7 @@ import { KnowledgeWorkflowSettings } from "./KnowledgeWorkflowSettings";
 import "./knowledge.css";
 
 const types: Record<string, string> = knowledgeTypes;
-const tabs = ["search", "review", "maintenance", "sources", "workflows", "health"];
+const tabs = ["search", "review", "maintenance", "sources", "directories", "workflows", "health"];
 const reviewerTabs = ["review", "health"];
 const kindOptions = [
   { value: "all", label: "全部类型" },
@@ -93,6 +96,7 @@ function KnowledgePanel({ scope, scopeLabel, user, reviewer, tab, setTab, editin
   const [kind, setKind] = useState("");
   const [githubOnly, setGithubOnly] = useState(false);
   const [selected, setSelected] = useState<Entry | null>(null);
+  const [selectedModule, setSelectedModule] = useState<EntryPreview | null>(null);
   const cache = useQueryClient();
   const key = ["knowledge", scope.workspace, user, scope.project];
   const isReview = tab === "review";
@@ -130,8 +134,13 @@ function KnowledgePanel({ scope, scopeLabel, user, reviewer, tab, setTab, editin
     setTab("search");
   }
 
+  const preview = tab === "search" ? selected : tab === "sources" ? selectedModule : null;
   return <>
-    <Tabs className="knowledge-tabs" activeKey={tab} onChange={(value) => { setSelected(null); setTab(value); }}>
+    <Tabs className="knowledge-tabs" activeKey={tab} onChange={(value) => {
+      setSelected(null);
+      setSelectedModule(null);
+      setTab(value);
+    }}>
       <TabPane itemKey="search" tab="检索">
         <form className="knowledge-searchbar" onSubmit={(event) => {
           event.preventDefault();
@@ -159,7 +168,11 @@ function KnowledgePanel({ scope, scopeLabel, user, reviewer, tab, setTab, editin
         {tab === "maintenance" && <KnowledgeMaintenance scope={scope} user={user} reviewer={reviewer} refresh={refresh} />}
       </TabPane>
       <TabPane itemKey="sources" tab="来源">
-        {tab === "sources" && <KnowledgeSources scope={scope} user={user} onReviews={openGithubReviews} />}
+        {tab === "sources" && <KnowledgeSources scope={scope} user={user} onReviews={openGithubReviews}
+          onModule={(module) => setSelectedModule({ id: module.entry_id, title: module.title })} />}
+      </TabPane>
+      <TabPane itemKey="directories" tab="目录">
+        {tab === "directories" && <KnowledgeDirectories scope={scope} user={user} reviewer={reviewer} scopeLabel={scopeLabel} />}
       </TabPane>
       <TabPane itemKey="workflows" tab="工作流">
         {tab === "workflows" && <KnowledgeWorkflowSettings scope={scope} user={user} reviewer={reviewer} />}
@@ -171,39 +184,62 @@ function KnowledgePanel({ scope, scopeLabel, user, reviewer, tab, setTab, editin
         ) : <KnowledgeHealthReport report={report.data} labels={types} />}
       </TabPane>}
     </Tabs>
-    {editing && <ContributionDialog scope={scope} scopeLabel={scopeLabel} onClose={closeEditing} refresh={refresh} />}
-    {selected && tab === "search" && <EntryDialog scope={scope} entry={selected}
-      key={selected.id} user={user} onClose={() => setSelected(null)} />}
+    {editing && <ContributionDialog scope={scope} user={user} scopeLabel={scopeLabel} onClose={closeEditing} refresh={refresh} />}
+    {preview && <EntryDialog scope={scope} entry={preview} key={preview.id} user={user} onClose={() => {
+      setSelected(null);
+      setSelectedModule(null);
+    }} />}
   </>;
 }
 
 type DialogProps = { scope: Scope; onClose: () => void };
 type KnowledgeWriteProps = DialogProps & { refresh: () => Promise<void> };
+type EntryPreview = Pick<Entry, "id" | "title"> & Partial<Pick<Entry, "revision">>;
 
-function ContributionDialog({ scope, scopeLabel, onClose, refresh }: KnowledgeWriteProps & { scopeLabel: string }) {
+function ContributionDialog({ scope, scopeLabel, user, onClose, refresh }: KnowledgeWriteProps & {
+  scopeLabel: string; user: string;
+}) {
   // 同一份草稿重试时沿用提交 ID，防止服务端已写入但响应丢失时重复发布。
   const [operationId] = useState(() => crypto.randomUUID());
   const [title, setTitle] = useState("");
   const [body, setBody] = useState("");
   const [ref, setRef] = useState("");
+  const [directory, setDirectory] = useState<string>();
+  const settings = useQuery({ queryKey: namespaceKey(scope, user), queryFn: () => namespaceSettings(scope) });
+  const folders = settings.data?.effective?.learnings ?? [];
+  const selectedDirectory = directory ?? (folders.length === 1 ? `folder:${folders[0]}` : "root");
+  const folderOptions = [{ value: "root", label: scope.project ? "项目根目录" : "共享根目录" },
+    ...folders.map((folder) => ({ value: `folder:${folder}`, label: folder }))];
   const publish = useMutation({
-    mutationFn: () => contribute(scope, { operation_id: operationId, title: title.trim(), body: body.trim(), ref }),
+    mutationFn: () => contribute(scope, {
+      operation_id: operationId, title: title.trim(), body: body.trim(), ref,
+      namespace: selectedDirectory === "root" ? "" : selectedDirectory.slice("folder:".length),
+    }),
     onSuccess: async () => {
       await refresh();
       onClose();
     },
   });
+  const canPublish = settings.isSuccess && folderOptions.some(({ value }) => value === selectedDirectory) &&
+    !!title.trim() && !!body.trim() && !publish.isPending;
   return <Modal visible title="贡献经验" onCancel={onClose} maskClosable={!publish.isPending} closeOnEsc={!publish.isPending}>
-    <form className="knowledge-form" onSubmit={(event) => { event.preventDefault(); publish.mutate(); }}>
-      <p className="knowledge-meta">发布到 {scopeLabel}</p>
+    <form className="knowledge-form" onSubmit={(event) => { event.preventDefault(); if (canPublish) publish.mutate(); }}>
+      {settings.isPending ? <Skeleton active /> : settings.isError ? <AssetLoadError title="经验目录暂时无法加载"
+        description={errorMessage(settings.error)} onRetry={() => void settings.refetch()} /> : <div className="knowledge-form">
+        <span>经验目录</span>
+        <Select aria-label="经验目录" value={selectedDirectory} optionList={folderOptions}
+          disabled={publish.isPending} onChange={(value) => setDirectory(String(value))} />
+        <p className="knowledge-meta">发布到 {scopeLabel}{directory === undefined && folders.length === 1
+          ? "。已选中当前唯一生效的经验目录。" : "。"}</p>
+      </div>}
       <label>标题<Input maxLength={160} value={title} onChange={setTitle} required disabled={publish.isPending} /></label>
       <label>经验正文<TextArea maxLength={64000} value={body} onChange={setBody} rows={8}
         required disabled={publish.isPending} /></label>
       <label>出处<Input maxLength={1000} value={ref} onChange={setRef} disabled={publish.isPending} /></label>
       {publish.isError && <Banner closeIcon={null} type="danger" description={errorMessage(publish.error)} />}
-      <div className="knowledge-actions">
+      <div className="knowledge-actions knowledge-dialog-footer">
         <Button onClick={onClose} disabled={publish.isPending}>取消</Button>
-        <Button htmlType="submit" theme="solid" disabled={!title.trim() || !body.trim()} loading={publish.isPending}>
+        <Button htmlType="submit" theme="solid" disabled={!canPublish} loading={publish.isPending}>
           发布经验
         </Button>
       </div>
@@ -265,7 +301,7 @@ function getFeedbackSession() {
 }
 
 function EntryDialog({ scope, entry, user, onClose }: DialogProps & {
-  entry: Entry; user: string;
+  entry: EntryPreview; user: string;
 }) {
   const loaded = useQuery({
     queryKey: ["knowledge-entry", scope.workspace, user, scope.project, entry.id, entry.revision],

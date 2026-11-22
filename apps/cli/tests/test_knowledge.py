@@ -46,6 +46,13 @@ class KnowledgeCliTests(unittest.TestCase):
                 "kind": "learning", "title": "回归方法", "resource_path": f"learnings/release/{operation}",
                 "bytes": len("选择稳定游标。".encode()), "target_status": "active", "base_revision": None,
             })
+            arguments = ["contribute", "--file", str(path), "--dry-run", "--project", project, "--key", operation]
+            default = as_object(knowledge.execute(self.parser.parse_args(arguments)))
+            self.assertIsNone(default["resource_path"])
+            self.assertTrue(default["resolve_namespace_on_publish"])
+            shared = as_object(knowledge.execute(self.parser.parse_args([*arguments, "--namespace", ""])))
+            self.assertIsNone(shared["project_id"])
+            self.assertEqual(shared["resource_path"], f"learnings/{operation}")
             paired.assert_not_called()
             service.assert_not_called()
             self.assertFalse((self.root / "knowledge-outbox").exists())

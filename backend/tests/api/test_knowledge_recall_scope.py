@@ -1,4 +1,4 @@
-"""项目召回默认隔离，显式配置才引入工作空间共享知识。"""
+"""项目默认召回共享知识，管理员仍可选择仅召回项目知识。"""
 
 from uuid import UUID, uuid4
 
@@ -36,7 +36,7 @@ async def test_project_recall_scope_applies_to_hits_preview_links_open_and_devic
     shared = await publish("meteorvector procedure", {}, source={"type": "manual", "resource_path": "learnings/shared"})
     current = await publish("stormrelay runbook", scope, relations=[{"kind": "REFERENCES", "target": shared}])
     other_hit = await publish("meteorvector procedure", other)
-    assert (await runs.client.get(settings, params=scope)).json() == {"inherit_shared": False, "revision": 0}
+    assert (await runs.client.get(settings, params=scope)).json() == {"inherit_shared": True, "revision": 0}
     assert (await runs.client.get(settings)).status_code == 422
     missing_scope = {"project_id": str(uuid4())}
     assert (await runs.client.get(settings, params=missing_scope)).status_code == 404
@@ -45,6 +45,12 @@ async def test_project_recall_scope_applies_to_hits_preview_links_open_and_devic
         assert forbidden.status_code == 403, forbidden.text
 
     query = {"query": "meteorvector", "check": True, "check_details": True}
+    default = await runs.client.get(root, params=scope | {"query": "meteorvector", "recall_mode": "1"})
+    assert default.status_code == 200 and [item["id"] for item in default.json()["items"]] == [shared]
+    project_only = await runs.client.put(settings, params=scope, headers=maintainer, json={"inherit_shared": False})
+    assert project_only.status_code == 200, project_only.text
+    separate_only = await runs.client.put(settings, params=other, headers=maintainer, json={"inherit_shared": False})
+    assert separate_only.status_code == 200, separate_only.text
     preview = await runs.client.post(f"{root}/recall/preview", params=scope, headers=maintainer, json=query)
     assert preview.status_code == 200 and preview.json()["relevant"] is False
     project_result = await runs.client.get(root, params=scope | {"query": "stormrelay", "recall_mode": "1"})
@@ -102,8 +108,9 @@ async def test_project_recall_scope_applies_to_hits_preview_links_open_and_devic
     async with runs.sessions() as db:
         rows = list(await db.scalars(select(KnowledgeProjectRecallPolicy).where(
             KnowledgeProjectRecallPolicy.workspace_id == UUID(runs.workspace_id),
+            KnowledgeProjectRecallPolicy.project_id == UUID(scope["project_id"]),
         ).order_by(KnowledgeProjectRecallPolicy.id)))
-        assert [row.inherit_shared for row in rows] == [True, False]
+        assert [row.inherit_shared for row in rows] == [False, True, False]
         assert {row.updated_by for row in rows} == {UUID(runs.user_id)}
 
 
@@ -128,7 +135,7 @@ async def test_platform_knowledge_tools_use_current_project_inheritance(runs: Ru
     tool = ToolScope(run_id, actor, lease.owner, lease.fencing_token)
     gateway = runs.app.state.tool_gateway
 
-    for stage, inherit in enumerate((False, True, False)):
+    for stage, inherit in enumerate((True, False, True, False)):
         if stage:
             updated = await runs.client.put(
                 f"{root}/settings/recall-scope", params=scope, headers=runs.headers(), json={"inherit_shared": inherit},

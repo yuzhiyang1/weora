@@ -10,7 +10,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from uuid import UUID, uuid4, uuid5
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 
 from weora.modules.knowledge.code_preview import preview_delta, relation_delta
 from weora.modules.knowledge.code_wiki_pages import wiki_page_id, wiki_pages
@@ -637,6 +637,23 @@ class CodebaseIndex:
             })
         return {"topic": topic, "items": items, "truncated": len(rows) > 100}
 
+    async def module_catalog(self, identifier: UUID, query: str) -> dict[str, object]:
+        """浏览当前索引的模块证据，复用仓库连接与 Wiki 目录的读取边界。"""
+        row = await self._design_row(identifier, local=True)
+        page = KnowledgeRevision.source["wiki_page"].as_string()
+        candidates = published(self.scope).where(KnowledgeEntry.codebase_id == row.id, page.like("modules/%"))
+        if query:
+            candidates = candidates.where(or_(
+                KnowledgeRevision.title.icontains(query, autoescape=True), page.icontains(query, autoescape=True),
+            ))
+        rows = (await self.db.execute(candidates.with_only_columns(
+            KnowledgeEntry.id, KnowledgeRevision.title, page,
+        ).order_by(page, KnowledgeEntry.id).limit(101))).tuples().all()
+        return {
+            "items": [{"entry_id": str(entry), "title": title, "path": path} for entry, title, path in rows[:100]],
+            "truncated": len(rows) > 100,
+        }
+
     async def design_plan(self, identifier: UUID, *, local: bool, maximum: int) -> dict[str, object]:
         row = await self._design_row(identifier, local=local)
         overview = await self._design_overview(row)
@@ -1187,7 +1204,6 @@ class CodebaseIndex:
             source = {"repository_id": str(row.repository_id), "connection_version": row.connection_version}
         else:
             source = {
-                "codebase_id": str(row.id),
                 "source": "local_directory",
                 "name": row.local_name,
                 "freshness": "unknown",
@@ -1198,6 +1214,7 @@ class CodebaseIndex:
             source["wiki_root"] = f"teamwiki/evidence/code/{row.wiki_namespaces[0]}"
         return {
             **source,
+            "codebase_id": str(row.id),
             "revision": row.revision,
             "generation": row.generation,
             "indexed": len(row.manifest) - skipped,

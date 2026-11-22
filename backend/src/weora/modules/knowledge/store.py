@@ -311,7 +311,7 @@ class KnowledgeStore:
             policy.workspace_id == self.scope.workspace, policy.project_id == project,
         ).order_by(policy.id.desc()).limit(1))
         if latest is None:
-            return {"inherit_shared": False, "revision": 0}
+            return {"inherit_shared": True, "revision": 0}
         return {"inherit_shared": latest.inherit_shared, "revision": latest.id}
 
     async def set_project_recall_settings(self, inherit_shared: bool) -> ProjectRecallSettings:
@@ -515,6 +515,15 @@ class KnowledgeStore:
         if namespace and entry_id is not None:
             raise conflict("修订必须沿用原知识目录。")
         folders = scope.namespaces.learnings if scope.namespaces is not None else None
+        if (
+            entry_id is None and value.kind == "learning" and not namespace and folders and len(folders) == 1
+            and value.source["type"] in {"manual", "session", "run"} and "resource_path" not in value.source
+        ):
+            # 只在唯一目录可选时自动选目录，显式路径优先。请求重放仍读取原发布记录。
+            namespace = folders[0]
+            value = replace(value, source=value.source | {
+                "namespace": namespace, "resource_path": f"learnings/{namespace}/{value.operation_id}",
+            })
         if not namespace and entry_id is None and value.kind == "learning" and folders is not None:
             # 显式团队路径与 --namespace 走同一个目录门槛。
             location = entry_path(value.operation_id, value.kind, value.source)

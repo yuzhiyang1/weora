@@ -23,7 +23,9 @@ async def test_declared_wiki_namespace_controls_paths_search_and_status(runs: Ru
     async def index(name: str, key: str) -> str:
         created = await runs.client.post(f"{root}/codebases/local", params=scope, headers=auth, json={
             "name": name, "source_key": key * 64, "candidates": 1, "incremental": True,
-            "files": [{"path": "src/check.py", "text": "def verification(): return 1"}],
+            "files": [{"path": "src/check.py", "text": "\n".join(
+                f"def verification_{number}(): return {number}" for number in range(6)
+            )}],
         })
         assert created.status_code == 200, created.text
         return str(created.json()["codebase_id"])
@@ -54,6 +56,8 @@ async def test_declared_wiki_namespace_controls_paths_search_and_status(runs: Ru
     assert (await runs.client.get(f"{root}/{evidence}", params=scope)).status_code == 404
     assert (await runs.client.get(f"{root}/codebases/local/{private}", params=scope)).status_code == 404
     assert (await runs.client.get(f"{root}/codebases/local/{private}/design", params=scope)).status_code == 404
+    modules = f"{root}/codebases/{private}/modules"
+    assert (await runs.client.get(modules, params=scope)).status_code == 404
     assert (await runs.client.get(f"{root}/{note}", params=scope)).json()["relations"] == []
     listed = await runs.client.get(f"{root}/codebases", params=scope)
     assert listed.status_code == 200, listed.text
@@ -70,6 +74,14 @@ async def test_declared_wiki_namespace_controls_paths_search_and_status(runs: Ru
     assert path.status_code == 200 and path.json()["id"] == evidence
     assert (await runs.client.get(f"{root}/{note}", params=scope)).json()["relations"][0]["target"] == evidence
     assert (await runs.client.get(f"{root}/by-path", params=other | {"path": wiki_path})).status_code == 404
+    assert (await runs.client.get(modules, params=other)).status_code == 404
+    matched = await runs.client.get(modules, params=scope | {"query": "SRC.MD"})
+    assert matched.status_code == 200, matched.text
+    [module] = matched.json()["items"]
+    assert module["path"] == "modules/src.md" and not matched.json()["truncated"]
+    assert (await runs.client.get(f"{root}/{module['entry_id']}", params=scope)).status_code == 200
+    empty = await runs.client.get(modules, params=scope | {"query": "%"})
+    assert empty.json() == {"items": [], "truncated": False}
 
 
 async def test_scorer_directory_resolution_conflict_and_template_fallback(runs: RunsHarness) -> None:

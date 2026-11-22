@@ -110,6 +110,20 @@ async def test_role_and_project_directory_manifest(runs: RunsHarness) -> None:
         assert "inactive_docs" not in active.json()["effective"]
         assert active.json()["effective"]["learnings"] == ["payment"]
 
+        default_payload = {"operation_id": str(uuid4()), "title": "默认项目经验", "body": "由唯一生效目录决定落点。"}
+        default_entry = await engineer.post(path, params=scope, headers=headers(engineer), json=default_payload)
+        assert default_entry.status_code == 201, default_entry.text
+        assert default_entry.json()["source"]["resource_path"] == f"learnings/payment/{default_payload['operation_id']}"
+        replay = await engineer.post(path, params=scope, headers=headers(engineer), json=default_payload)
+        assert replay.status_code == 201 and replay.json()["id"] == default_entry.json()["id"]
+
+        root_payload = default_payload | {"operation_id": str(uuid4())}
+        root_path = f"learnings/{root_payload['operation_id']}"
+        root_entry = await engineer.post(path, params=scope, headers=headers(engineer), json=root_payload | {
+            "source": {"type": "manual", "resource_path": root_path},
+        })
+        assert root_entry.status_code == 201 and root_entry.json()["source"]["resource_path"] == root_path
+
         async def search(client, params: dict[str, str] | None = None) -> set[str]:
             response = await client.get(path, params=params)
             assert response.status_code == 200, response.text

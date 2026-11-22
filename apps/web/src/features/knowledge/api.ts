@@ -57,6 +57,18 @@ export type CodeSource = {
   freshness: "unknown" | "current" | "stale"; indexed: number; revision?: string;
   review_sources?: { url: string; revision: string; indexed_at: string }[];
 };
+export type CodeModule = { entry_id: string; title: string; path: string };
+export type NamespaceFolders = Partial<Record<"learnings" | "knowledge" | "docs" | "skills" | "wiki" | "scorers", string[]>>;
+export type NamespaceManifest = {
+  roles: Record<string, NamespaceFolders>;
+  members: Record<string, string>;
+  projects: Record<string, NamespaceFolders>;
+};
+export type NamespaceSettings = Partial<NamespaceManifest> & {
+  revision?: number;
+  effective: (NamespaceFolders & { role: string | null; revision: number }) | null;
+};
+export type RecallScope = { inherit_shared: boolean; revision: number };
 export const workflowNames = ["teamai-share-learnings", "teamai-share-session"] as const;
 export type WorkflowName = typeof workflowNames[number];
 export type WorkflowDefinition = {
@@ -99,6 +111,20 @@ export const health = (scope: Scope) =>
   consoleRequest<HealthReport>(scope.workspace, path(scope, "/health"));
 export const codeSources = (scope: Scope) =>
   consoleRequest<Page<CodeSource>>(scope.workspace, path(scope, "/codebases"));
+export const codeModules = (scope: Scope, codebase: string, query: string) =>
+  consoleRequest<Page<CodeModule> & { truncated: boolean }>(scope.workspace,
+    path(scope, `/codebases/${encodeURIComponent(codebase)}/modules`, query ? { query } : undefined));
+export const namespaceKey = (scope: Scope, user: string) =>
+  ["knowledge", scope.workspace, user, scope.project, "namespaces"];
+export const namespaceSettings = (scope: Scope) =>
+  consoleRequest<NamespaceSettings>(scope.workspace, path(scope, "/settings/resource-namespaces"));
+export const saveNamespaceSettings = (workspace: string, base_revision: number, manifest: NamespaceManifest) =>
+  consoleWrite<{ revision: number }>(workspace, "/knowledge/settings/resource-namespaces",
+    { ...manifest, base_revision }, "PUT");
+export const recallScope = (scope: Scope) =>
+  consoleRequest<RecallScope>(scope.workspace, path(scope, "/settings/recall-scope"));
+export const saveRecallScope = (scope: Scope, inherit_shared: boolean) =>
+  consoleWrite<RecallScope>(scope.workspace, path(scope, "/settings/recall-scope"), { inherit_shared }, "PUT");
 export const feedback = (scope: Scope, id: string, session: string, positive: boolean) =>
   consoleWrite<void>(scope.workspace, path(scope, `/${encodeURIComponent(id)}/feedback`), { session, positive });
 export function maintenance(scope: Scope, kind: MaintenanceType, after: string) {
@@ -146,10 +172,15 @@ export const decideWorkflow = (scope: Scope, run: string, step: string, decision
     scope.workspace, path(scope, `/workflow-runs/${encodeURIComponent(run)}/approvals/${encodeURIComponent(step)}`),
     { decision }, "PUT",
   );
-export const contribute = (scope: Scope, value: { operation_id: string; title: string; body: string; ref: string }) =>
+export const contribute = (scope: Scope, value: {
+  operation_id: string; title: string; body: string; ref: string; namespace?: string;
+}) =>
   consoleWrite<Entry>(scope.workspace, path(scope, ""), {
     operation_id: value.operation_id, title: value.title, body: value.body,
-    source: { type: "manual", ref: value.ref },
+    source: { type: "manual", ref: value.ref,
+      ...(value.namespace === "" ? { resource_path: `learnings/${value.operation_id}` }
+        : value.namespace ? { namespace: value.namespace } : {}),
+    },
   });
 export const review = async (scope: Scope, entry: Entry, decision: "accept" | "reject") => {
   // SemVer 属于 Registry 已发布版本，知识评审只处理数字版本的贡献。
