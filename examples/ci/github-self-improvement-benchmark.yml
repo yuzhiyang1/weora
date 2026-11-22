@@ -1,0 +1,48 @@
+name: Weora improvement benchmark
+
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize, closed]
+
+permissions:
+  contents: read
+  pull-requests: read
+  statuses: write
+
+concurrency:
+  group: weora-improvement-${{ github.repository }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  improvement:
+    if: >-
+      ${{ startsWith(github.event.pull_request.head.ref, 'weora/self-improvement/') &&
+          github.event.pull_request.head.repo.full_name == github.repository &&
+          github.event.pull_request.base.repo.full_name == github.repository &&
+          (github.event.action != 'closed' || github.event.pull_request.merged) }}
+    # CLI、Docker 和项目对象由可信 Runner 提供。PR 代码只进入试验沙箱。
+    runs-on: [self-hosted, linux, weora-benchmark]
+    timeout-minutes: 180
+    steps:
+      - name: Verify proposal and run benchmark
+        shell: bash
+        env:
+          REVIEW_ACTION: ${{ github.event.action }}
+          GITHUB_TOKEN: ${{ github.token }}
+          WEORA_COLLAB_URL: ${{ vars.WEORA_URL }}
+          WEORA_COLLAB_WORKSPACE: ${{ vars.WEORA_WORKSPACE_ID }}
+          WEORA_PROJECT_ID: ${{ vars.WEORA_PROJECT_ID }}
+          WEORA_COLLAB_TOKEN: ${{ secrets.WEORA_CI_DEVICE_TOKEN }}
+          BENCHMARK_CHECKOUT: ${{ vars.WEORA_BENCHMARK_CHECKOUT }}
+          BENCHMARK_IMAGE: ${{ vars.WEORA_BENCHMARK_IMAGE }}
+          BENCHMARK_NETWORK: ${{ vars.WEORA_BENCHMARK_NETWORK }}
+          BENCHMARK_GATEWAY: ${{ vars.WEORA_BENCHMARK_GATEWAY }}
+          BENCHMARK_JUDGE: ${{ vars.WEORA_BENCHMARK_JUDGE_MODEL }}
+        run: |
+          args=(--event "$GITHUB_EVENT_PATH" --project "$WEORA_PROJECT_ID")
+          if [[ "$REVIEW_ACTION" != closed ]]; then
+            args+=(--checkout "$BENCHMARK_CHECKOUT" --image "$BENCHMARK_IMAGE"
+                   --network "$BENCHMARK_NETWORK" --gateway "$BENCHMARK_GATEWAY"
+                   --judge-model "$BENCHMARK_JUDGE")
+          fi
+          weora context self-improvement ci "${args[@]}"

@@ -86,7 +86,7 @@ const sections: { label: string; items: NavigationItem[] }[] = [
     label: "探索",
     items: [
       { label: "工作流", path: "/workflows", icon: GitBranch, planned: true },
-      { label: "知识库", path: "/knowledge", icon: BookOpen, planned: true },
+      { label: "知识库", path: "/knowledge", icon: BookOpen },
       { label: "协作室", path: "/rooms", icon: Users, planned: true },
     ],
   },

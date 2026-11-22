@@ -292,6 +292,32 @@ async def _authorized_mail(
     )
 
 
+async def _reconcile_session_occupancy(
+    db: AsyncSession, session_id: UUID, members: set[UUID], *, include_wake: bool = False,
+) -> bool:
+    """复核当前会话的未完成领取，取消已失去授权的邮件，返回是否仍有合法占用。
+
+    调用方持有收件会话行锁。登记唤醒时也检查尚未过期的唤醒尝试，变更由调用方提交。
+    """
+    occupies_session = AgentMail.state.in_(_SESSION_OCCUPYING_CLAIM_STATES)
+    if include_wake:
+        occupies_session |= (
+            (AgentMail.state == "pending")
+            & AgentMail.wake_state.in_(("attempting", "accepted"))
+            & (AgentMail.wake_at > datetime.now(UTC) - WAKE_TTL)
+        )
+
+    # 即使发现合法占用，也要继续检查剩余占位，清除已经撤权的邮件。
+    has_authorized_occupant = False
+    rows = await db.scalars(select(AgentMail).where(AgentMail.recipient_id == session_id, occupies_session))
+    for row in rows:
+        if await _authorized_mail(db, row, members):
+            has_authorized_occupant = True
+        else:
+            row.state, row.resolved_at = "cancelled", datetime.now(UTC)
+    return has_authorized_occupant
+
+
 async def pending(
     db: AsyncSession,
     device: AgentDevice,
@@ -352,20 +378,7 @@ async def reserve_wake(
         return False
 
     # 未完成的领取和仍有效的唤醒尝试都占用会话，避免向原生会话重复注入通知。
-    occupied = await db.scalar(
-        select(AgentMail.id)
-        .where(
-            AgentMail.recipient_id == session_id,
-            AgentMail.state.in_(_SESSION_OCCUPYING_CLAIM_STATES)
-            | (
-                (AgentMail.state == "pending")
-                & AgentMail.wake_state.in_(("attempting", "accepted"))
-                & (AgentMail.wake_at > datetime.now(UTC) - WAKE_TTL)
-            ),
-        )
-        .limit(1)
-    )
-    if occupied:
+    if await _reconcile_session_occupancy(db, session_id, members, include_wake=True):
         return False
     row.wake_state, row.wake_at = "attempting", datetime.now(UTC)
     return True
@@ -416,9 +429,7 @@ async def claim(
             return receipt(prior_claim, body=True)
         return receipt(prior_claim) if await _authorized_mail(db, prior_claim, members) else None
 
-    if await db.scalar(
-        select(AgentMail.id).where(*scope, AgentMail.state.in_(_SESSION_OCCUPYING_CLAIM_STATES)).limit(1)
-    ):
+    if await _reconcile_session_occupancy(db, session_id, members):
         raise AgentMailError(409, "AGENT_SESSION_HAS_ACTIVE_CLAIM", "请先处理当前会话已领取的消息")
 
     # 排队期间权限可能变化。取消已撤权的消息，再选择本次领取的消息。

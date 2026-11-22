@@ -7,7 +7,7 @@ from typing import Annotated, Literal, cast
 from uuid import UUID
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
+from fastapi import APIRouter, Depends, Form, Header, HTTPException, Query, Request, Response
 from pydantic import AwareDatetime, BaseModel, Field, StringConstraints, model_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -17,14 +17,26 @@ from weora.modules.collaboration.infrastructure import agent_sessions
 from weora.modules.collaboration.infrastructure.agent_mail import AgentDevice
 from weora.modules.identity.api.dependencies import current_principal, write_principal
 from weora.modules.identity.application.ports import PrincipalRecord
-from weora.modules.skills.api.routes import PackageUpload, _actor, _raise_http_error, _service, read_skill_upload
+from weora.modules.knowledge.namespace_policy import resolve_namespaces
+from weora.modules.projects.domain import ProjectError
+from weora.modules.projects.service import ProjectService
+from weora.modules.skills.api.routes import (
+    PackageUpload,
+    SkillNamespace,
+    _raise_http_error,
+    _service,
+    read_skill_upload,
+)
 from weora.modules.skills.application.service import SkillActor
 from weora.modules.skills.domain.errors import SkillRegistryError
+from weora.modules.skills.domain.namespace import normalize_skill_namespace
 from weora.modules.skills.infrastructure import distribution
+from weora.modules.skills.infrastructure.binding import scoped_skill_registry
 from weora.modules.skills.infrastructure.models import SkillDeviceGrant
 from weora.modules.skills.infrastructure.unit_of_work import SqlAlchemySkillStore
 from weora.shared.api.request_id import get_request_id
 from weora.shared.infrastructure.database import SessionFactory
+from weora.shared.object_storage import ObjectStoragePort
 
 router = APIRouter(prefix="/workspaces/{workspace_id}", tags=["Skill distribution"])
 ReadPrincipal = Annotated[PrincipalRecord, Depends(current_principal)]
@@ -77,11 +89,14 @@ def error_response(error: distribution.DistributionError) -> HTTPException:
         "SKILL_DEVICE_NOT_AUTHORIZED": "请先在控制台授权此设备同步 Skill。",
         "SKILL_USAGE_DISABLED": "此设备的 Skill 使用统计已关闭。",
         "SKILL_NOT_FOUND": "Skill 或版本不可用。",
+        "SKILL_NAMESPACE_CONFLICT": "当前范围有多个目录提供同名 Skill，已保留当前安装。",
+        "SKILL_NAMESPACE_UNAVAILABLE": "该团队目录未在当前职能或项目中启用。",
+        "SKILL_CONTRIBUTION_ORIGIN": "已安装 Skill 的提交必须沿用原团队目录。",
     }
-    return HTTPException(
-        error.status,
-        detail={"code": error.code, "message": messages.get(error.code, "Skill 分发请求无法处理。")},
-    )
+    detail = {"code": error.code, "message": messages.get(error.code, "Skill 分发请求无法处理。")}
+    if error.slug is not None:
+        detail["slug"] = error.slug
+    return HTTPException(error.status, detail=detail)
 
 
 @asynccontextmanager
@@ -89,15 +104,25 @@ async def device(
     request: Request,
     workspace_id: UUID,
     authorization: str | None,
+    project_id: UUID | None = None,
 ) -> AsyncIterator[tuple[AsyncSession, distribution.DeviceActor]]:
     async with factory(request)() as db, db.begin():
         try:
             bound, principal = await agent_sessions.authenticate(db, workspace_id, authorization)
-            actor = distribution.DeviceActor(workspace_id, bound.id, principal.user_id, principal.display_name)
+            if project_id is not None:
+                projects = cast(ProjectService, request.app.state.project_service)
+                await projects.require_workspace_project(workspace_id, project_id, db)
+            folders = await resolve_namespaces(db, workspace_id, principal.user_id, project_id)
+            actor = distribution.DeviceActor(
+                workspace_id, bound.id, principal.user_id, principal.display_name, project_id,
+                folders.skills if folders else None,
+            )
             await distribution.lock_grant(db, actor)
             yield db, actor
         except AgentMailError as exc:
             raise HTTPException(exc.status, detail={"code": exc.code, "message": str(exc)}) from exc
+        except ProjectError as exc:
+            raise HTTPException(404, detail={"code": exc.code, "message": exc.message}) from exc
         except distribution.DistributionError as exc:
             raise error_response(exc) from exc
         except SkillRegistryError as exc:
@@ -107,28 +132,37 @@ async def device(
 @router.post("/skill-distribution/contributions", status_code=201)
 async def upload_contribution(
     workspace_id: UUID, request: Request, package: PackageUpload, authorization: Bearer = None,
+    project_id: UUID | None = None, namespace: SkillNamespace = "",
+    source_version_id: Annotated[UUID | None, Form(description="本地安装所用的原始发布版本")] = None,
 ) -> dict[str, object]:
-    """已授权设备可代表在职成员提交完整包，身份始终由服务端验证。"""
-    async with factory(request)() as db:
-        try:
-            bound, principal = await agent_sessions.authenticate(db, workspace_id, authorization)
-            await distribution.lock_grant(
-                db, distribution.DeviceActor(workspace_id, bound.id, principal.user_id, principal.display_name)
+    """设备可在共享或授权项目的指定目录提交完整 Skill 包。"""
+    async with device(request, workspace_id, authorization, project_id) as (db, identity):
+        namespace = normalize_skill_namespace(namespace)
+        folders = identity.skill_directories
+        if namespace and folders is not None and namespace.split("/", 1)[0] not in folders:
+            raise distribution.DistributionError("SKILL_NAMESPACE_UNAVAILABLE", 403)
+        package_name, archive = await read_skill_upload(package)
+        storage = cast(ObjectStoragePort | None, request.app.state.object_storage)
+        actor = SkillActor(identity.user_id, workspace_id, "member", identity.display_name)
+        request_id = get_request_id() or "unknown"
+        if source_version_id is None:
+            service = await scoped_skill_registry(db, project_id, storage)
+            skill_id, slug, contribution_id = await service.contribute(
+                actor, workspace_id, package_name, archive, request_id, namespace=namespace,
             )
-        except AgentMailError as exc:
-            raise HTTPException(exc.status, detail={"code": exc.code, "message": str(exc)}) from exc
-        except distribution.DistributionError as exc:
-            raise error_response(exc) from exc
-    package_name, archive = await read_skill_upload(package)
-    try:
-        skill_id, slug, contribution_id = await _service(request).contribute(
-            _actor(principal), workspace_id, package_name, archive, get_request_id() or "unknown",
-        )
-    except SkillRegistryError as exc:
-        _raise_http_error(exc)
+        else:
+            origin = await distribution.contribution_origin(db, identity, source_version_id)
+            if namespace and namespace != origin.namespace:
+                raise distribution.DistributionError("SKILL_CONTRIBUTION_ORIGIN")
+            service = await scoped_skill_registry(db, origin.project_id, storage)
+            skill_id, slug, contribution_id = await service.contribute_update(
+                actor, workspace_id, package_name, archive, request_id,
+                skill_id=origin.skill_id, slug=origin.slug, namespace=origin.namespace, base_version=origin.version,
+            )
+    status = "pending_review" if contribution_id else "unchanged" if source_version_id is not None else "draft"
     return {
         "skill_id": skill_id, "slug": slug, "contribution_id": contribution_id,
-        "status": "pending_review" if contribution_id else "draft",
+        "status": status,
     }
 
 
@@ -198,8 +232,13 @@ async def list_manifest(
     runtime: Runtime,
     scope: Literal["project", "user"] = "project",
     authorization: Bearer = None,
+    project_id: UUID | None = None,
 ) -> dict[str, object]:
-    async with device(request, workspace_id, authorization) as (db, actor):
+    if project_id is not None and scope != "project":
+        raise HTTPException(
+            422, detail={"code": "SKILL_PROJECT_SCOPE_REQUIRED", "message": "项目 Skill 只能绑定项目目录。"},
+        )
+    async with device(request, workspace_id, authorization, project_id) as (db, actor):
         grant = await distribution.lock_grant(db, actor)
         return {
             "items": await distribution.manifest(db, actor),
@@ -207,6 +246,7 @@ async def list_manifest(
             "device_id": actor.device_id,
             "runtime": runtime,
             "scope": scope,
+            "project_id": actor.project_id,
             "usage_enabled": grant.usage_enabled,
         }
 
@@ -218,10 +258,11 @@ async def resolve_version(
     slug: Annotated[str, Query(min_length=1, max_length=64)],
     version: Annotated[str | None, Query(max_length=64)] = None,
     authorization: Bearer = None,
+    project_id: UUID | None = None,
 ) -> dict[str, object]:
-    async with device(request, workspace_id, authorization) as (db, actor):
-        name, release = await distribution.find_release(db, actor, slug=slug, version=version)
-        return distribution.descriptor(name, release) | {
+    async with device(request, workspace_id, authorization, project_id) as (db, actor):
+        name, path, release = await distribution.find_release(db, actor, slug=slug, version=version)
+        return distribution.descriptor(name, path, release) | {
             "size": release.package_size,
             "files": release.manifest,
         }
@@ -233,8 +274,9 @@ async def download_package(
     version_id: UUID,
     request: Request,
     authorization: Bearer = None,
+    project_id: UUID | None = None,
 ) -> Response:
-    async with device(request, workspace_id, authorization) as (db, actor):
+    async with device(request, workspace_id, authorization, project_id) as (db, actor):
         record = await distribution.archive_version(db, actor, version_id)
         # 在已锁定的设备授权事务中读取固定包并写审计，避免并发下载二次借用连接。
         download = await _service(request).download_from_store(
@@ -256,8 +298,9 @@ async def installation_receipt(
     payload: ReceiptInput,
     request: Request,
     authorization: Bearer = None,
+    project_id: UUID | None = None,
 ) -> dict[str, str]:
-    async with device(request, workspace_id, authorization) as (db, actor):
+    async with device(request, workspace_id, authorization, project_id) as (db, actor):
         change = distribution.InstallationChange(
             **(payload.model_dump() | {"occurred_at": payload.occurred_at.astimezone(UTC)}),
         )
@@ -271,12 +314,13 @@ async def upload_usage(
     payload: BatchInput,
     request: Request,
     authorization: Bearer = None,
+    project_id: UUID | None = None,
 ) -> dict[str, object]:
     observations = [
         distribution.SkillObservation(**(item.model_dump() | {"occurred_at": item.occurred_at.astimezone(UTC)}))
         for item in payload.events
     ]
-    async with device(request, workspace_id, authorization) as (db, actor):
+    async with device(request, workspace_id, authorization, project_id) as (db, actor):
         return {"items": await distribution.record_usage(db, actor, observations)}
 
 
@@ -294,6 +338,7 @@ async def stats(
     version_id: UUID | None = None,
     offset: Annotated[int, Query(ge=0)] = 0,
     limit: Annotated[int, Query(ge=1, le=200)] = 100,
+    project_id: UUID | None = None,
 ) -> dict[str, object]:
     if principal.workspace_id != workspace_id:
         raise HTTPException(404)
@@ -307,8 +352,11 @@ async def stats(
         zone = ZoneInfo(timezone)
     except (ZoneInfoNotFoundError, ValueError) as exc:
         raise HTTPException(422, detail={"code": "SKILL_TIMEZONE_INVALID", "message": "时区无效。"}) from exc
-    async with factory(request)() as db:
+    async with factory(request)() as db, db.begin():
         try:
+            if project_id is not None:
+                projects = cast(ProjectService, request.app.state.project_service)
+                await projects.require_workspace_project(workspace_id, project_id, db)
             return await distribution.usage_summary(
                 db,
                 workspace_id,
@@ -321,6 +369,9 @@ async def stats(
                 version_id,
                 offset,
                 limit,
+                project_id=project_id,
             )
+        except ProjectError as exc:
+            raise HTTPException(404, detail={"code": exc.code, "message": exc.message}) from exc
         except distribution.DistributionError as exc:
             raise error_response(exc) from exc

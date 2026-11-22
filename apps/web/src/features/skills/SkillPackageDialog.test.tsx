@@ -51,3 +51,27 @@ it("成功上传后重新打开弹窗，可以再次选择和提交文件", asyn
   await user.click(screen.getByRole("button", { name: "校验并创建" }));
   expect(submit).toHaveBeenCalledTimes(2);
 });
+
+it("项目上传失败后保留文件和团队目录，重试沿用原输入", async () => {
+  const submit = vi.fn().mockRejectedValueOnce(new Error("fixture")).mockResolvedValue(undefined);
+  const user = userEvent.setup();
+  const archive = new File(["fixture"], "project.skill");
+  render(
+    <SkillPackageDialog
+      title="上传 Skill 包"
+      submitLabel="校验并创建"
+      scopeLabel="平台工程"
+      open
+      onClose={vi.fn()}
+      onSubmit={submit}
+    />,
+  );
+  const directory = screen.getByLabelText("团队目录（选填）");
+  await user.type(directory, "engineering/platform");
+  await user.upload(document.querySelector<HTMLInputElement>("input[type=file]")!, archive);
+  await user.click(screen.getByRole("button", { name: "校验并创建" }));
+  expect(await screen.findByText("上传未完成，请稍后重试")).toBeInTheDocument();
+  expect(directory).toHaveValue("engineering/platform");
+  await user.click(screen.getByRole("button", { name: "校验并创建" }));
+  expect(submit).toHaveBeenNthCalledWith(2, archive, "engineering/platform");
+});

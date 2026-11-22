@@ -52,6 +52,12 @@ const PlaceholderPage = lazy(() =>
     default: module.PlaceholderPage,
   })),
 );
+const KnowledgePage = lazy(() =>
+  import("../features/knowledge/KnowledgePage").then((module) => ({ default: module.KnowledgePage })),
+);
+const KnowledgeWorkflowPage = lazy(() =>
+  import("../features/knowledge/KnowledgeWorkflowPage").then((module) => ({ default: module.KnowledgeWorkflowPage })),
+);
 const SkillDetailPage = lazy(() =>
   import("../features/skills/SkillDetailPage").then((module) => ({
     default: module.SkillDetailPage,
@@ -224,16 +230,8 @@ export function App() {
                   />
                 }
               />
-              <Route
-                path="knowledge"
-                element={
-                  <PlaceholderPage
-                    eyebrow="Knowledge"
-                    title="知识库"
-                    description="管理文档、切片、索引、检索策略和引用来源。"
-                  />
-                }
-              />
+              <Route path="knowledge" element={<KnowledgePage />} />
+              <Route path="knowledge/workflows/:run" element={<KnowledgeWorkflowPage />} />
               <Route
                 path="rooms"
                 element={

@@ -2,6 +2,7 @@
 
 import argparse
 import asyncio
+from functools import partial
 from uuid import UUID
 
 from sqlalchemy import exists, select
@@ -21,8 +22,9 @@ async def backfill(workspace_id: UUID, *, apply: bool) -> int:
     settings = get_settings()
     engine, sessions = create_database(settings.database_url)
     storage = create_object_storage(settings) if apply else None
-    service = SkillRegistryService(uow_factory=lambda: SqlAlchemySkillsUnitOfWork(sessions), object_storage=storage)
-    versions = select(SkillVersionModel.id).where(
+    versions = select(SkillVersionModel.id, SkillModel.project_id).join(
+        SkillModel, SkillModel.id == SkillVersionModel.skill_id,
+    ).where(
         SkillVersionModel.workspace_id == workspace_id,
         SkillVersionModel.storage_key != "",
         ~exists().where(
@@ -31,7 +33,7 @@ async def backfill(workspace_id: UUID, *, apply: bool) -> int:
         ),
     )
     drafts = (
-        select(SkillDraftModel.skill_id)
+        select(SkillDraftModel.skill_id, SkillModel.project_id)
         .join(SkillModel, SkillModel.id == SkillDraftModel.skill_id)
         .where(
             SkillModel.workspace_id == workspace_id,
@@ -46,11 +48,16 @@ async def backfill(workspace_id: UUID, *, apply: bool) -> int:
     try:
         async with sessions() as db:
             for kind, query in (("version", versions), ("draft", drafts)):
-                result = await db.stream_scalars(query.execution_options(yield_per=100))
-                async for record_id in result:
+                result = await db.stream(query.execution_options(yield_per=100))
+                async for record_id, project in result:
                     count += 1
                     if not apply:
                         continue
+                    # 旧包和搜索词项使用发布时的归属，项目资产不能拿共享查询回填。
+                    service = SkillRegistryService(
+                        uow_factory=partial(SqlAlchemySkillsUnitOfWork, sessions, project_id=project),
+                        object_storage=storage,
+                    )
                     try:
                         if kind == "version":
                             await service.read_version_archive(workspace_id, record_id)

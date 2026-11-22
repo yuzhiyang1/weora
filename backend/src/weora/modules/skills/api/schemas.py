@@ -112,6 +112,7 @@ class SkillDetailResponse(BaseModel):
     description: str
     status: str
     latest_published_version: str | None
+    namespace: str = Field(default="", exclude_if=lambda directory: not directory)
     draft: SkillDraftResponse | None
     created_at: datetime
     updated_at: datetime
@@ -128,6 +129,7 @@ class SkillDetailResponse(BaseModel):
             description=skill.description,
             status=skill.status,
             latest_published_version=skill.latest_published_version,
+            namespace=skill.namespace,
             draft=SkillDraftResponse.from_record(skill.draft) if skill.draft else None,
             created_at=skill.created_at,
             updated_at=skill.updated_at,
@@ -145,6 +147,7 @@ class SkillSummaryResponse(BaseModel):
     description: str
     status: str
     latest_published_version: str | None
+    namespace: str = Field(default="", exclude_if=lambda directory: not directory)
     updated_at: datetime
     uploader_name: str | None = None
 
@@ -160,6 +163,7 @@ class SkillSummaryResponse(BaseModel):
             latest_published_version=skill.latest_published_version,
             updated_at=skill.updated_at,
             uploader_name=skill.uploader_name,
+            namespace=skill.namespace,
         )
 
 

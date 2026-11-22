@@ -32,6 +32,13 @@ class LocalRevision:
     synced_at: datetime
 
 
+@dataclass(frozen=True, slots=True)
+class SyncTarget:
+    workspace_id: UUID
+    repository_id: UUID
+    connection_version: int
+
+
 def utc(value: datetime) -> datetime:
     # SQLite 的测试事务可能返回没有时区的 UTC，生产 PostgreSQL 保留时区。
     return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
@@ -114,14 +121,24 @@ class RepositorySync:
                 except IntegrityError:
                     await session.rollback()  # 与人工校验并发时，联合主键保留先登记者。
 
-    async def run_one(self) -> bool:
-        await self.enroll_existing()
+    async def run_one(self, target: SyncTarget | None = None, *, budget_seconds: int | None = None) -> bool:
+        if target is None:
+            await self.enroll_existing()
+        timeout = min(self.timeout_seconds, budget_seconds) if budget_seconds is not None else self.timeout_seconds
         now, lease = datetime.now(UTC), uuid4()
-        due = (
-            RepositorySyncModel.next_sync_at <= now,
+        due = [
             or_(RepositorySyncModel.lease_until.is_(None), RepositorySyncModel.lease_until <= now),
             active_connection(),
-        )
+        ]
+        if target is None:
+            due.append(RepositorySyncModel.next_sync_at <= now)
+        else:
+            # 主动刷新仅领取已授权的连接，仍复用后台同步的租约和提交发布规则。
+            due.extend((
+                RepositorySyncModel.workspace_id == target.workspace_id,
+                RepositorySyncModel.repository_id == target.repository_id,
+                RepositorySyncModel.connection_version == target.connection_version,
+            ))
         async with self.sessions() as session:
             selected = await session.scalar(
                 select(RepositorySyncModel)
@@ -146,7 +163,7 @@ class RepositorySync:
                 .where(*key, *due)
                 .values(
                     lease_id=lease,
-                    lease_until=now + timedelta(seconds=self.timeout_seconds + 60),
+                    lease_until=now + timedelta(seconds=timeout + 60),
                 )
                 .execution_options(synchronize_session=False)
             )
@@ -156,8 +173,9 @@ class RepositorySync:
 
         revision = None
         error_code = None
+        cancelled = False
         try:
-            async with asyncio.timeout(self.timeout_seconds):
+            async with asyncio.timeout(timeout):
                 revision = await self.reader.sync(self.source(repo), cache_id)
         except TimeoutError:
             error_code = "REPOSITORY_SYNC_TIMEOUT"
@@ -165,6 +183,9 @@ class RepositorySync:
             error_code = error.code
         except OSError:
             error_code = "REPOSITORY_SYNC_STORAGE_FAILED"
+        except asyncio.CancelledError:
+            # 请求断开时释放自己的租约，让后台仍能重试这条连接。
+            cancelled, error_code = True, "REPOSITORY_SYNC_CANCELLED"
         finished = datetime.now(UTC)
         values: dict[str, object] = {
             "lease_id": None,
@@ -188,6 +209,8 @@ class RepositorySync:
                 .execution_options(synchronize_session=False)
             )
             await session.commit()
+        if cancelled:
+            raise asyncio.CancelledError
         return True
 
     async def binding(

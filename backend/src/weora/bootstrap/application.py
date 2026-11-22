@@ -65,6 +65,8 @@ from weora.modules.identity.application.invitations import InviteSigner
 from weora.modules.identity.application.service import IdentityService
 from weora.modules.identity.infrastructure.security import Argon2PasswordHasher, SecureTokenManager
 from weora.modules.identity.infrastructure.unit_of_work import SqlAlchemyIdentityUnitOfWork
+from weora.modules.knowledge.api import router as knowledge_router
+from weora.modules.knowledge.registry_publication import KNOWLEDGE_SKILL_PUBLICATION
 from weora.modules.projects.api import router as projects_router
 from weora.modules.projects.api import source_router
 from weora.modules.projects.code_sources import CodeSourceService
@@ -180,9 +182,10 @@ def create_app(
         ),
     )
     skill_registry_service = SkillRegistryService(
-        uow_factory=lambda: SqlAlchemySkillsUnitOfWork(session_factory),
+        uow_factory=lambda: SqlAlchemySkillsUnitOfWork(session_factory, publication=KNOWLEDGE_SKILL_PUBLICATION),
         object_storage=object_storage,
     )
+    app.state.skill_publication = KNOWLEDGE_SKILL_PUBLICATION
     app.state.skill_registry_service = skill_registry_service
     app.state.grant_cli_skill_sync = grant_cli_skill_sync
     app.state.agent_registry_service = AgentRegistryService(
@@ -439,6 +442,7 @@ def create_app(
     app.include_router(computer_router, prefix=resolved_settings.api_prefix)
     app.include_router(computer_credential_router, prefix=resolved_settings.api_prefix)
     app.include_router(context_router, prefix=resolved_settings.api_prefix)
+    app.include_router(knowledge_router, prefix=resolved_settings.api_prefix)
     app.include_router(delivery_router, prefix=resolved_settings.api_prefix)
     app.include_router(projects_router, prefix=resolved_settings.api_prefix)
     app.include_router(source_router, prefix=resolved_settings.api_prefix)

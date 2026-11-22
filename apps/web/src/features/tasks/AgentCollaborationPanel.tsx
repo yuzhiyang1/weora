@@ -1,8 +1,8 @@
-import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useEffect, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { Banner, Button, Card, Modal, Spin, Tag } from "../../components/console";
-import { errorMessage } from "../runs/api";
+import { ConsoleApiError, errorMessage } from "../runs/api";
 import { getTaskAgentMail, type AgentSession } from "./agent-collaboration-api";
 import "./agent-collaboration.css";
 
@@ -49,12 +49,25 @@ export function AgentCollaborationPanel({
 }: { workspaceId: string; taskId: string; memberId: string; canJoin: boolean }) {
   const [join, setJoin] = useState(false);
   const [target, setTarget] = useState<AgentSession>();
+  const cache = useQueryClient();
   const data = useQuery({
-    queryKey: ["task-agent-collaboration", workspaceId, taskId],
+    queryKey: ["task-agent-collaboration", workspaceId, memberId, taskId],
     queryFn: () => getTaskAgentMail(workspaceId, taskId),
     refetchInterval: 8000,
     retry: false,
   });
+  const accessLost = data.error instanceof ConsoleApiError && [401, 403, 404].includes(data.error.status);
+  useEffect(() => {
+    if (!accessLost) return;
+    // 轮询出错时 Query 保留上一次成功的数据，撤权时主动擦除私有内容。
+    cache.getQueryCache().find({
+      queryKey: ["task-agent-collaboration", workspaceId, memberId, taskId],
+      exact: true,
+    })?.setState({ data: undefined, dataUpdatedAt: 0 });
+  }, [accessLost, cache, workspaceId, memberId, taskId]);
+  if (accessLost) {
+    return <Card title="本地 Agent 协作"><Banner type="danger" description={errorMessage(data.error)} /></Card>;
+  }
   const names = new Map(data.data?.sessions.map((session) => [session.id, session.name]));
   return (
     <Card title="本地 Agent 协作" headerExtraContent={canJoin && (

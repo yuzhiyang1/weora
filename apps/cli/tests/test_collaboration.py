@@ -2,9 +2,13 @@
 
 import json
 import os
+import re
 import tempfile
 import time
+import tomllib
 import unittest
+from argparse import Namespace
+from io import StringIO
 from pathlib import Path
 from unittest.mock import Mock, patch
 from uuid import uuid4
@@ -21,7 +25,8 @@ from weora_cli.collab_client import (
     write_json,
 )
 from weora_cli.collab_native import adapter, install_hook, profile
-from weora_cli.collaboration import _resolve, wake_pending
+from weora_cli.collaboration import _resolve, hook_output, wake_pending
+from weora_cli.commands import JsonValue
 
 
 class CollaborationTests(unittest.TestCase):
@@ -99,10 +104,99 @@ class CollaborationTests(unittest.TestCase):
             install_hook("codex", auto=True)
             document = json.loads(path.read_text(encoding="utf-8"))
             self.assertEqual(document["hooks"]["SessionStart"][0], original["hooks"]["SessionStart"][0])
-            for event in ("SessionStart", "UserPromptSubmit"):
+            for event in ("SessionStart", "UserPromptSubmit", "Stop", "SubagentStart", "PostToolUse"):
                 group = document["hooks"][event][-1]
                 self.assertEqual(group["hooks"][0]["command"], "weora collab hook --runtime codex --auto")
+            self.assertEqual(document["hooks"]["PostToolUse"][0]["matcher"], "TodoWrite")
+            self.assertEqual(document["hooks"]["PostToolUse"][0]["hooks"][0]["timeout"], 3)
             self.assertEqual(len(document["hooks"]["SessionStart"]), 2)
+            agent = Path(home) / "agents/weora-recall.toml"
+            self.assertEqual(tomllib.loads(agent.read_text(encoding="utf-8"))["name"], "weora-recall")
+            agent.write_text('name = "weora-recall"\n', encoding="utf-8")
+            self.assertEqual(install_hook("codex", auto=True)["recall_agent"], str(agent))
+            self.assertEqual(agent.read_text(encoding="utf-8"), 'name = "weora-recall"\n')
+
+    def test_subagent_start_binds_native_actor_to_both_knowledge_commands(self) -> None:
+        client = Mock(spec=Client)
+        root, project = str(uuid4()), str(uuid4())
+        native = "native-agent-id-without-platform-exposure"
+        event = {"session_id": root, "hook_event_name": "SubagentStart", "agent_id": native,
+                 "agent_type": "weora-recall", "cwd": "/work/project"}
+        actors = []
+        for runtime in ("codex", "claude-code"):
+            with (
+                self.subTest(runtime=runtime),
+                patch("sys.stdin", StringIO(json.dumps(event))),
+                patch("weora_cli.collaboration.paired_client", return_value=client),
+                patch("weora_cli.collaboration.SessionSettings.effective",
+                      return_value={"enabled": True, "project": project}),
+                patch("weora_cli.collaboration._register") as register,
+            ):
+                value = hook_output(Namespace(runtime=runtime, auto=True))
+                output = value["hookSpecificOutput"]
+                assert isinstance(output, dict)
+                hint = output["additionalContext"]
+                assert isinstance(hint, str)
+                mark = re.search(r"--recall-actor ([a-f0-9-]{36})", hint)
+                assert mark is not None
+                actors.append(mark[1])
+                self.assertIn(f"--actor {mark[1]}", hint)
+                self.assertIn(f"--session {root} --project {project}", hint)
+                self.assertIn(f"--check --project {project}", hint)
+                self.assertIn("--depth context --limit 1", hint)
+                self.assertIn(f"weora context graph 主题 --session {root} --project {project}", hint)
+                self.assertNotIn("先单独调用", hint)
+                self.assertNotIn(native, hint)
+                register.assert_not_called()
+        self.assertNotEqual(actors[0], actors[1])
+
+        with (
+            tempfile.TemporaryDirectory() as home,
+            patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": home}),
+        ):
+            receipt = install_hook("claude-code", auto=False)
+            profile_path = Path(str(receipt["recall_agent"]))
+            self.assertIn("name: weora-recall", profile_path.read_text(encoding="utf-8"))
+
+    def test_plan_tool_hook_checks_policy_before_claiming_the_session_hint(self) -> None:
+        client = Mock(spec=Client, account="plan-fixture")
+        client.token = "fixture-device"
+        session = str(uuid4())
+        event = {"session_id": session, "hook_event_name": "PostToolUse", "tool_name": "TodoWrite", "cwd": "/test"}
+        policy = {"enabled": False, "language": "en", "message": "workspace plan reminder"}
+        args = Namespace(runtime="claude-code", auto=True)
+
+        def run(**overrides: object) -> dict[str, JsonValue]:
+            with patch("sys.stdin", StringIO(json.dumps(event | overrides))):
+                return hook_output(args)
+
+        with (
+            tempfile.TemporaryDirectory() as home,
+            patch.dict(os.environ, {"WEORA_COLLAB_CONFIG": str(Path(home) / "collab.json")}),
+            patch("weora_cli.collaboration.paired_client", return_value=client) as pair_client,
+            patch("weora_cli.collaboration.SessionSettings.effective", return_value={"enabled": False}) as recall,
+            patch("weora_cli.knowledge_plan_reminder.call", return_value=policy) as read_policy,
+            patch("weora_cli.knowledge_plan_reminder.time.time", return_value=200_000) as clock,
+            patch("weora_cli.collaboration._register") as register,
+        ):
+            self.assertEqual(run(tool_name="Bash"), {})
+            self.assertEqual(run(session_id="../bad-path"), {})
+            pair_client.assert_not_called()
+            self.assertEqual(run(), {})
+            read_policy.assert_not_called()
+            recall.return_value = {"enabled": True}
+            self.assertEqual(run(), {})
+            policy["enabled"] = True
+            expected = {"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": policy["message"]}}
+            self.assertEqual(run(), expected)
+            self.assertEqual(run(), {})
+            clock.return_value += 24 * 60 * 60 + 1
+            policy["message"] = None
+            value = run()["hookSpecificOutput"]
+            assert isinstance(value, dict)
+            self.assertIn("Task plan detected.", str(value["additionalContext"]))
+            self.assertNotIn("任务已规划", str(value["additionalContext"]))
+            register.assert_not_called()
 
     def test_connector_only_dispatches_reserved_wake_and_sends_no_message_body(self) -> None:
         client = Mock(spec=Client)

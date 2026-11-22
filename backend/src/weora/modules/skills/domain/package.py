@@ -23,6 +23,9 @@ from weora.modules.skills.domain.errors import (
 
 _SLUG_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 _WINDOWS_DRIVE_PATTERN = re.compile(r"^[a-zA-Z]:")
+_WINDOWS_RESERVED_NAMES = {"CON", "PRN", "AUX", "NUL"} | {
+    f"{prefix}{suffix}" for prefix in ("COM", "LPT") for suffix in "123456789¹²³"
+}
 _PRIVATE_KEY_MARKERS = (
     b"-----BEGIN PRIVATE KEY-----",  # 私钥头部检测常量，不含实际密钥。 gitleaks:allow
     b"-----BEGIN RSA PRIVATE KEY-----",
@@ -39,6 +42,12 @@ _SENSITIVE_FILE_NAMES = {
 }
 
 _MAX_INTERFACE_BYTES = 64 * 1024
+MAX_SKILL_DESCRIPTION_LENGTH = 2_000
+
+
+def is_skill_slug(value: str) -> bool:
+    """判断名称能否用作标准包目录和 Runtime 安装名。"""
+    return len(value) <= 64 and _SLUG_PATTERN.fullmatch(value) is not None
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,21 +150,33 @@ def read_skill_interface(archive: bytes) -> SkillInterface | None:
     return None
 
 
+def read_skill_markdown(archive: bytes, slug: str) -> str:
+    """从摘要已通过校验的固定包读取入口，全程不解压到文件系统。"""
+    try:
+        with ZipFile(BytesIO(archive)) as bundle:
+            entry = bundle.getinfo(f"{slug}/SKILL.md")
+            if entry.file_size > SkillPackageLimits().max_manifest_bytes:
+                raise SkillPackageTooLargeError
+            return bundle.read(entry).decode("utf-8-sig")
+    except (BadZipFile, EOFError, KeyError, OSError, RuntimeError, ValueError) as error:
+        raise SkillArchiveInvalidError from error
+
+
 class SkillPackageInspector:
     """把不可信 ZIP 输入转换为确定性、可校验的 Skill 包。"""
 
     def __init__(self, limits: SkillPackageLimits | None = None) -> None:
         self._limits = limits or SkillPackageLimits()
 
-    def inspect(self, archive_bytes: bytes) -> InspectedSkillPackage:
-        """完成路径、结构、清单、摘要、风险和兼容性校验。"""
+    def inspect(self, archive_bytes: bytes, *, installation_slug: str | None = None) -> InspectedSkillPackage:
+        """校验标准包。提交到既有安装目录的完整包可以保留清单显示名称。"""
         if len(archive_bytes) > self._limits.max_archive_bytes:
             raise SkillPackageTooLargeError
 
         try:
             with ZipFile(BytesIO(archive_bytes), mode="r") as archive:
                 entries = archive.infolist()
-                files_by_path, _ = self._read_files(archive, entries)
+                files_by_path, root = self._read_files(archive, entries)
         except SkillPackageTooLargeError:
             raise
         except (BadZipFile, EOFError, OSError, RuntimeError) as exc:
@@ -168,8 +189,8 @@ class SkillPackageInspector:
             raise SkillPackageTooLargeError
 
         name, description = self._parse_manifest(manifest_content)
-        slug = name.strip().lower()
-        if len(slug) > 64 or not _SLUG_PATTERN.fullmatch(slug):
+        slug = root if installation_slug == root else name.strip().lower()
+        if not is_skill_slug(slug):
             raise SkillManifestInvalidError
 
         files = tuple(self._describe_file(path, content) for path, content in sorted(files_by_path.items()))
@@ -257,14 +278,21 @@ class SkillPackageInspector:
 
     @staticmethod
     def _validate_path(path: str) -> None:
-        """拒绝跨平台上可能变成绝对路径或目录穿越的名字。"""
+        """校验归档路径可作为跨平台的相对路径安全安装。"""
         if not path or "\x00" in path or "\\" in path:
             raise SkillArchiveUnsafePathError
         if path.startswith("/") or _WINDOWS_DRIVE_PATTERN.match(path):
             raise SkillArchiveUnsafePathError
-        parts = PurePosixPath(path.rstrip("/")).parts
-        if not parts or any(part in {"", ".", ".."} for part in parts):
-            raise SkillArchiveUnsafePathError
+
+        # 与 CLI 解包采用同样的跨平台约束，确保发布后可下发到 Windows。
+        for part in path.rstrip("/").split("/"):
+            if part in {"", ".", ".."} or part.rstrip(" .") != part:
+                raise SkillArchiveUnsafePathError
+            if any(char in part for char in '<>:"\\|?*') or any(ord(char) < 32 for char in part):
+                raise SkillArchiveUnsafePathError
+            # Windows 设备名加扩展名后仍被保留，例如 AUX.txt。
+            if part.split(".", 1)[0].upper() in _WINDOWS_RESERVED_NAMES:
+                raise SkillArchiveUnsafePathError
 
     @staticmethod
     def _parse_manifest(content: bytes) -> tuple[str, str]:
@@ -289,7 +317,7 @@ class SkillPackageInspector:
             raise SkillManifestInvalidError
         if not isinstance(description, str) or not description.strip():
             raise SkillManifestInvalidError
-        if len(name.strip()) > 64 or len(description.strip()) > 2_000:
+        if len(name.strip()) > 64 or len(description.strip()) > MAX_SKILL_DESCRIPTION_LENGTH:
             raise SkillManifestInvalidError
         return name, description
 

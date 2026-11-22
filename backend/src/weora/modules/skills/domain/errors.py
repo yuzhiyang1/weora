@@ -50,11 +50,32 @@ class SkillManifestInvalidError(SkillRegistryError):
     message = "SKILL.md 中的 name 或 description 不合法"
 
 
+class SkillNamespaceInvalidError(SkillRegistryError):
+    """提供的 Skill 命名空间无法作为团队树的相对目录。"""
+
+    code = "SKILL_NAMESPACE_INVALID"
+    message = "Skill 命名空间必须是有效的相对目录"
+
+
 class SkillSlugConflictError(SkillRegistryError):
-    """同一工作空间中已存在相同 Skill 标识。"""
+    """同一作用域的同一目录内已存在相同 Skill 标识。"""
 
     code = "SKILL_SLUG_CONFLICT"
-    message = "当前工作空间已存在同名 Skill"
+    message = "当前作用域的目录已存在同名 Skill"
+
+
+class SkillPromotionPathConflictError(SkillRegistryError):
+    """同一逻辑路径已被团队知识晋升占用。"""
+
+    code = "SKILL_PROMOTION_PATH_CONFLICT"
+    message = "当前范围的 Skill 路径已被待审或已发布的知识晋升占用"
+
+
+class SkillPromotionSourceConflictError(SkillRegistryError):
+    """恢复时原经验已关联另一份待审或已发布的晋升。"""
+
+    code = "SKILL_PROMOTION_SOURCE_CONFLICT"
+    message = "原经验已有另一份待审或已发布的晋升，请先处理后再恢复 Skill。"
 
 
 class SkillDraftNotReadyError(SkillRegistryError):
@@ -104,6 +125,13 @@ class SkillDraftChangedError(SkillRegistryError):
 
     code = "SKILL_DRAFT_CHANGED"
     message = "当前草稿已变更，请刷新后重新查看和确认。"
+
+
+class SkillKnowledgeReviewPendingError(SkillRegistryError):
+    """晋升资产已有基于当前发布版的待审核知识修订。"""
+
+    code = "SKILL_KNOWLEDGE_REVIEW_PENDING"
+    message = "请先处理该 Skill 的待审知识版本。"
 
 
 class SkillNotFoundError(SkillRegistryError):

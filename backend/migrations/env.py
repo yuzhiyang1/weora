@@ -17,6 +17,8 @@ from weora.modules.context import store as context_models  # noqa: F401
 from weora.modules.coordination import store as coordination_models  # noqa: F401
 from weora.modules.delivery.infrastructure import persistence as delivery_models  # noqa: F401
 from weora.modules.identity.infrastructure import models as identity_models  # noqa: F401
+from weora.modules.knowledge import benchmark_models as knowledge_benchmark_models  # noqa: F401
+from weora.modules.knowledge import models as knowledge_models  # noqa: F401
 from weora.modules.projects import persistence as project_models  # noqa: F401
 from weora.modules.runs.infrastructure import models as run_models  # noqa: F401
 from weora.modules.skills.infrastructure import models as skills_models  # noqa: F401

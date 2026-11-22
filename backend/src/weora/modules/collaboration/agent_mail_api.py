@@ -18,7 +18,7 @@ from weora.modules.collaboration.infrastructure import agent_sessions as session
 from weora.modules.collaboration.infrastructure.agent_mail import AgentDevice, AgentEvidence, AgentMail
 from weora.modules.identity.api.dependencies import current_principal, write_principal
 from weora.modules.identity.application.ports import PrincipalRecord
-from weora.modules.identity.application.service import IdentityService
+from weora.modules.identity.infrastructure.unit_of_work import SqlAlchemyIdentityStore
 from weora.shared.api.request_id import get_request_id
 from weora.shared.infrastructure.database import SessionFactory
 from weora.shared.infrastructure.postgres_watch import PostgresWatch
@@ -83,10 +83,6 @@ class EvidenceInput(Input):
     content: Text
 
 
-def _identity(connection: Request | WebSocket) -> IdentityService:
-    return cast(IdentityService, connection.app.state.identity_service)
-
-
 @asynccontextmanager
 async def _db(connection: Request | WebSocket) -> AsyncIterator[AsyncSession]:
     factory = cast(SessionFactory, connection.app.state.db_session_factory)
@@ -115,8 +111,9 @@ async def _device(
         yield db, device, principal
 
 
-async def _names(connection: Request | WebSocket, owner: PrincipalRecord) -> dict[UUID, str]:
-    return dict(await _identity(connection).workspace_member_names(owner))
+async def _names(db: AsyncSession, owner: PrincipalRecord) -> dict[UUID, str]:
+    """在当前事务读取工作空间成员名册，避免持有设备锁的请求再占用连接。"""
+    return dict(await SqlAlchemyIdentityStore(db).workspace_member_names(owner.workspace_id))
 
 
 @router.get("/devices")
@@ -180,21 +177,20 @@ async def revoke_device(workspace_id: UUID, device_id: UUID, request: Request, o
 @router.get("/my-sessions")
 async def my_sessions(workspace_id: UUID, request: Request, owner: Read) -> dict[str, object]:
     _scope(owner, workspace_id)
-    names = await _names(request, owner)
     async with _db(request) as db:
+        names = await _names(db, owner)
         return {"items": await sessions.directory(db, owner, names, task_id=None, own=True)}
 
 
 @router.get("/members")
 async def member_options(workspace_id: UUID, request: Request, owner: Read) -> dict[str, object]:
     _scope(owner, workspace_id)
-    return {
-        "items": [
+    async with _db(request) as db:
+        return {"items": [
             {"id": member, "name": name}
-            for member, name in (await _names(request, owner)).items()
+            for member, name in (await _names(db, owner)).items()
             if member != owner.user_id
-        ]
-    }
+        ]}
 
 
 @router.put("/my-sessions/{session_id}/contacts", status_code=204)
@@ -206,17 +202,17 @@ async def allow_contacts(
     payload: GrantsInput,
 ) -> None:
     _scope(owner, workspace_id)
-    names = await _names(request, owner)
     async with _db(request) as db:
+        names = await _names(db, owner)
         await sessions.update_grants(db, owner, session_id, payload.member_ids, set(names))
 
 
 @router.get("/task/{task_id}")
 async def task_mail(workspace_id: UUID, task_id: UUID, request: Request, owner: Read) -> dict[str, object]:
     _scope(owner, workspace_id)
-    names = await _names(request, owner)
     async with _db(request) as db:
         await sessions.task_access(db, owner, task_id)
+        names = await _names(db, owner)
         contacts = await sessions.directory(db, owner, names, task_id=task_id)
         mails = await db.scalars(
             select(AgentMail)
@@ -264,7 +260,7 @@ async def find_sessions(
     q: Annotated[str, Query(max_length=256)] = "",
 ) -> dict[str, object]:
     async with _device(request, workspace_id, authorization) as (db, _, owner):
-        return {"items": await sessions.directory(db, owner, await _names(request, owner), task_id=task_id, query=q)}
+        return {"items": await sessions.directory(db, owner, await _names(db, owner), task_id=task_id, query=q)}
 
 
 @router.put("/sessions/{session_id}/tasks/{task_id}", status_code=204)
@@ -290,7 +286,7 @@ async def send_mail(
 ) -> dict[str, object]:
     async with _device(request, workspace_id, authorization, lock=True) as (db, device, owner):
         spec = SendRequest(key=key, **payload.model_dump())
-        return await delivery.send(db, device, set(await _names(request, owner)), spec, get_request_id() or "unknown")
+        return await delivery.send(db, device, set(await _names(db, owner)), spec, get_request_id() or "unknown")
 
 
 @router.get("/messages/{message_id}")
@@ -301,13 +297,13 @@ async def status_mail(
     authorization: Bearer = None,
 ) -> dict[str, object]:
     async with _device(request, workspace_id, authorization) as (db, device, owner):
-        return await delivery.message_status(db, device, set(await _names(request, owner)), message_id)
+        return await delivery.message_status(db, device, set(await _names(db, owner)), message_id)
 
 
 @router.get("/pending")
 async def pending_mail(workspace_id: UUID, request: Request, authorization: Bearer = None) -> dict[str, object]:
     async with _device(request, workspace_id, authorization) as (db, device, owner):
-        return {"items": await delivery.pending(db, device, set(await _names(request, owner)))}
+        return {"items": await delivery.pending(db, device, set(await _names(db, owner)))}
 
 
 @router.post("/presence", status_code=204)
@@ -326,7 +322,7 @@ async def claim_mail(
     authorization: Bearer = None,
 ) -> dict[str, object]:
     async with _device(request, workspace_id, authorization, lock=True) as (db, device, owner):
-        item = await delivery.claim(db, device, set(await _names(request, owner)), session_id, key, payload.message_id)
+        item = await delivery.claim(db, device, set(await _names(db, owner)), session_id, key, payload.message_id)
         return {"item": item}
 
 
@@ -339,7 +335,7 @@ async def acknowledge_mail(
     authorization: Bearer = None,
 ) -> dict[str, object]:
     async with _device(request, workspace_id, authorization, lock=True) as (db, device, owner):
-        return await delivery.acknowledge(db, device, set(await _names(request, owner)), session_id, message_id)
+        return await delivery.acknowledge(db, device, set(await _names(db, owner)), session_id, message_id)
 
 
 @router.post("/sessions/{session_id}/messages/{message_id}/cancel")
@@ -363,7 +359,7 @@ async def reserve_wake(
     authorization: Bearer = None,
 ) -> dict[str, bool]:
     async with _device(request, workspace_id, authorization, lock=True) as (db, device, owner):
-        accepted = await delivery.reserve_wake(db, device, set(await _names(request, owner)), session_id, message_id)
+        accepted = await delivery.reserve_wake(db, device, set(await _names(db, owner)), session_id, message_id)
         return {"reserved": accepted}
 
 
@@ -408,7 +404,7 @@ async def wake_events(workspace_id: UUID, socket: WebSocket) -> None:
                 changed.clear()
                 async with _device(socket, workspace_id, bearer, lock=True) as (db, device, owner):
                     device.seen_at = datetime.now(UTC)
-                    items = await delivery.pending(db, device, set(await _names(socket, owner)))
+                    items = await delivery.pending(db, device, set(await _names(db, owner)))
                 await socket.send_json({"type": "pending", "message_ids": [str(item["message_id"]) for item in items]})
                 disconnected = asyncio.create_task(socket.receive())
                 signaled = asyncio.create_task(changed.wait())

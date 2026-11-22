@@ -31,6 +31,7 @@ from weora.modules.projects.domain import (
     DEFAULT_REPOSITORY_ARCHIVE_BYTES,
     ProjectError,
     RepositoryArchive,
+    RepositoryBlob,
     RepositorySource,
     git_address,
     validate_repository_directory_path,
@@ -391,6 +392,50 @@ class GitRepositoryReader:
         except (UnicodeError, ProjectError):
             return None
         return path
+
+    async def index_blobs(
+        self, cache_id: UUID, revision: str, paths: tuple[str, ...] = (),
+    ) -> list[RepositoryBlob]:
+        """只返回允许读取的普通对象标识和大小。内容没变时无需读取对象正文。"""
+        revision_id(revision.encode())
+        for path in paths:
+            validate_repository_file_path(path)
+        root = self._path(cache_id)
+        env = await self._environment(root)
+        args = ("--literal-pathspecs", "ls-tree", "-rzl", "--full-tree", revision, "--", *paths)
+        raw = bytearray()
+        try:
+            if isinstance(self.runner, StreamingGitRunner):
+                await self.runner.stream(root, env, *args, consumer=raw.extend, max_bytes=16 * 1024 * 1024)
+            else:
+                raw.extend(await self._run(root, env, *args))
+        except TimeoutError:
+            raise ProjectError("REPOSITORY_TIMEOUT", "代码目录读取超时") from None
+        except DeliveryError:
+            raise ProjectError("REPOSITORY_INDEX_CATALOG_UNAVAILABLE", "固定提交目录无法读取或超过索引预算") from None
+        blobs: list[RepositoryBlob] = []
+        for record in filter(None, bytes(raw).split(b"\0")):
+            meta, name = record.split(b"\t", 1)
+            mode, kind, oid, size = meta.split()
+            if mode in {b"100644", b"100755"} and kind == b"blob" and (visible := self._visible_path(name)):
+                blobs.append(RepositoryBlob(visible, revision_id(oid), int(size)))
+        return blobs
+
+    async def index_text(self, cache_id: UUID, blob: RepositoryBlob) -> str | None:
+        """只接收来自 index_blobs 的对象，文本不上送客户端。"""
+        validate_repository_file_path(blob.path)
+        if blob.size > 256 * 1024:
+            return None
+        root = self._path(cache_id)
+        raw = await self._run(root, await self._environment(root), "cat-file", "blob", revision_id(blob.oid.encode()))
+        if len(raw) != blob.size:
+            raise ProjectError("REPOSITORY_PROTOCOL_ERROR", "固定提交对象长度不一致")
+        if b"\x00" in raw or raw.startswith(b"version https://git-lfs.github.com/spec/v1"):
+            return None
+        try:
+            return raw.decode("utf-8-sig")
+        except UnicodeError:
+            return None
 
     async def find(self, cache_id: UUID, revision: str, path: str, pattern: str) -> dict[str, object]:
         revision_id(revision.encode())

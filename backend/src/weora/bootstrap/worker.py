@@ -30,6 +30,7 @@ from weora.modules.delivery.application.service import DeliveryService
 from weora.modules.delivery.domain.models import DeliveryError
 from weora.modules.delivery.infrastructure.docker import DockerSandbox
 from weora.modules.identity.application.service import IdentityService
+from weora.modules.knowledge.recall_journal import purge_recall_journal
 from weora.modules.runs.application.execution import (
     RunExecutor,
     RunLease,
@@ -50,7 +51,7 @@ from weora.modules.runs.infrastructure.pi_runtime import PiTextRuntime
 from weora.modules.runs.infrastructure.unit_of_work import SqlAlchemyRunsUnitOfWork
 from weora.modules.tools.application.gateway import ToolGateway, ToolScope
 from weora.modules.tools.infrastructure.store import SqlAlchemyToolStore
-from weora.shared.infrastructure.database import SessionFactory
+from weora.shared.infrastructure.database import SessionFactory, create_database
 
 celery_app = Celery("weora", broker=get_settings().celery_broker_url)
 celery_app.conf.update(
@@ -78,6 +79,11 @@ celery_app.conf.update(
             "schedule": 2.0,
             "options": {"queue": "weora.coordination.control"},
         },
+        "purge-knowledge-recall-journal": {
+            "task": "weora.knowledge.purge_recall_journal",
+            "schedule": 3600.0,
+            "options": {"expires": 900},
+        },
     },
 )
 if get_settings().repository_sync_enabled:
@@ -101,6 +107,15 @@ async def _sync_repository(*, purge: bool = False) -> bool:
     async with app.router.lifespan_context(app):
         sync = app.state.project_service.repository_sync
         return bool(sync and (await sync.purge_retired() if purge else await sync.run_one()))
+
+
+async def _purge_recall_journal() -> int:
+    engine, sessions = create_database(get_settings().database_url)
+    try:
+        async with sessions() as db, db.begin():
+            return await purge_recall_journal(db)
+    finally:
+        await engine.dispose()
 
 
 async def _generate_title() -> bool:
@@ -660,6 +675,13 @@ def purge_retired_repositories() -> bool:
         raise RuntimeError("REPOSITORY_SYNC_CLEANUP_ERROR") from None
 
 
+def purge_knowledge_recall_journal() -> int:
+    try:
+        return asyncio.run(_purge_recall_journal())
+    except Exception:
+        raise RuntimeError("KNOWLEDGE_RECALL_CLEANUP_ERROR") from None
+
+
 # 保留普通函数的类型，避免无类型 Celery 装饰器污染应用层签名。
 celery_app.task(name="weora.runs.execute")(execute_run)
 
@@ -669,3 +691,4 @@ celery_app.task(name="weora.runs.dispatch")(dispatch_runs)
 celery_app.task(name="weora.runs.generate_title")(generate_task_title)
 celery_app.task(name="weora.projects.sync_repository")(sync_repository)
 celery_app.task(name="weora.projects.purge_retired_repositories")(purge_retired_repositories)
+celery_app.task(name="weora.knowledge.purge_recall_journal")(purge_knowledge_recall_journal)

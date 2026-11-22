@@ -274,7 +274,7 @@ async def test_device_download_and_versioned_usage(sharing_client: tuple[AsyncCl
     assert downloaded.status_code == 200
     assert hashlib.sha256(downloaded.content).hexdigest() == release["package_sha256"]
 
-    observed = datetime.now(UTC)
+    observed = datetime.now(UTC) - timedelta(minutes=1)
     install = {
         "operation_id": str(uuid4()),
         "slot_id": str(uuid4()),
@@ -409,9 +409,17 @@ async def test_device_download_and_versioned_usage(sharing_client: tuple[AsyncCl
         assert [row["key"] for row in own["groups"]] == [member_id]
         denied = await member.get(stats, params=period | {"user_id": principal["user"]["id"]})
         assert denied.status_code == 403
+        member_digest = (await member.get(f"{root}/knowledge/digest")).json()
+        assert member_digest["team_activity"]["current"]["skill_usage"] is None
     all_users = (await client.get(stats, params=period | {"group_by": "user"})).json()
     assert {row["key"] for row in all_users["groups"]} == {principal["user"]["id"], member_id}
     assert all_users["totals"]["users"] == 2 and all_users["totals"]["uses"] == 3
+    digest = (await client.get(f"{root}/knowledge/digest")).json()["team_activity"]
+    assert digest["current"]["skill_usage"] == {
+        "uses": 3, "members": 2, "skills": 1,
+        "top": [{"id": skill_id, "slug": created.json()["slug"], "name": created.json()["display_name"], "uses": 3}],
+    }
+    assert digest["previous"]["skill_usage"] == {"uses": 0, "members": 0, "skills": 0, "top": []}
 
     archived = await client.post(f"{root}/skills/{skill_id}/archive", headers=csrf)
     assert archived.status_code == 200

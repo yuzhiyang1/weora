@@ -2,6 +2,9 @@
 
 import json
 import os
+import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import NamedTemporaryFile
@@ -20,10 +23,11 @@ SERVICE = "Weora Agent Collaboration"
 class CollabError(Exception):
     """可直接交给 Agent 或人类查看的业务错误。"""
 
-    def __init__(self, code: str, message: str, data: JsonValue = None) -> None:
+    def __init__(self, code: str, message: str, data: JsonValue = None, *, status: int | None = None) -> None:
         super().__init__(message)
         self.code = code
         self.data = data
+        self.status = status
 
 
 def config_path() -> Path:
@@ -42,6 +46,24 @@ def write_json(path: Path, value: dict[str, JsonValue]) -> None:
         staged.replace(path)
     finally:
         staged.unlink(missing_ok=True)
+
+
+@contextmanager
+def lock_file(path: Path) -> Iterator[None]:
+    """本机多个进程对同一文件进行读改写时，竞争方可以稍后重试。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.with_suffix(".lock").open("a+b") as lock:
+        if sys.platform == "win32":
+            import msvcrt
+
+            lock.seek(0)
+            msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        # 保留锁文件的身份，让已打开文件的进程始终竞争同一个锁。
+        yield
 
 
 class _NoRedirect(HTTPRedirectHandler):
@@ -112,6 +134,7 @@ def request_json(
         raise CollabError(
             str(code or f"HTTP_{error.code}"),
             str(message or f"Weora 请求失败（HTTP {error.code}）。"),
+            status=error.code,
         ) from error
     except (URLError, TimeoutError, OSError) as error:
         raise CollabError("WEORA_UNREACHABLE", "暂时无法连接 Weora。") from error

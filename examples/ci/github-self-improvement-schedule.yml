@@ -1,0 +1,55 @@
+name: Weora self-improvement
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+    inputs:
+      scorer:
+        description: Registered Weora scorer
+        required: false
+        default: review-quality
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: weora-improvement-schedule-${{ github.repository }}-${{ inputs.scorer || vars.WEORA_IMPROVEMENT_SCORER || 'review-quality' }}
+  cancel-in-progress: false
+
+jobs:
+  improve:
+    if: ${{ github.ref_name == github.event.repository.default_branch }}
+    # 使用可信 Runner 上预装的 CLI、Docker 与项目对象缓存。
+    runs-on: [self-hosted, linux, weora-benchmark]
+    timeout-minutes: 45
+    steps:
+      - name: Create repository installation token
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.WEORA_IMPROVEMENT_APP_ID }}
+          private-key: ${{ secrets.WEORA_IMPROVEMENT_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+      - name: Propose and deliver a scoped revision
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+          WEORA_COLLAB_URL: ${{ vars.WEORA_URL }}
+          WEORA_COLLAB_WORKSPACE: ${{ vars.WEORA_WORKSPACE_ID }}
+          WEORA_PROJECT_ID: ${{ vars.WEORA_PROJECT_ID }}
+          WEORA_COLLAB_TOKEN: ${{ secrets.WEORA_CI_DEVICE_TOKEN }}
+          SCORER: ${{ inputs.scorer || vars.WEORA_IMPROVEMENT_SCORER || 'review-quality' }}
+          SUITE: ${{ vars.WEORA_IMPROVEMENT_SUITE || 'benchmarks/regressions' }}
+          CHECKOUT: ${{ vars.WEORA_BENCHMARK_CHECKOUT }}
+          IMAGE: ${{ vars.WEORA_BENCHMARK_IMAGE }}
+          NETWORK: ${{ vars.WEORA_BENCHMARK_NETWORK }}
+          GATEWAY: ${{ vars.WEORA_BENCHMARK_GATEWAY }}
+          MODEL: ${{ vars.WEORA_IMPROVEMENT_MODEL }}
+        run: |
+          weora context self-improvement scheduled "$SCORER" --project "$WEORA_PROJECT_ID" \
+            --suite "$SUITE" --checkout "$CHECKOUT" --repository "$GITHUB_REPOSITORY" \
+            --base-branch "$GITHUB_REF_NAME" --image "$IMAGE" --network "$NETWORK" \
+            --gateway "$GATEWAY" --model "$MODEL"

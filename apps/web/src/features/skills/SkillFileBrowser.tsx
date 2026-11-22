@@ -67,9 +67,10 @@ function FileFolder({ name, ...tree }: FileTreeProps & { name: string }) {
 }
 
 /** 默认阅读 SKILL.md，切换包来源时由调用方重建选中路径和原文模式。 */
-export function SkillFileBrowser({ workspaceId, skillId, source, files }: {
+export function SkillFileBrowser({ workspaceId, skillId, projectId, source, files }: {
   workspaceId: string;
   skillId: string;
+  projectId: string | undefined;
   source: SkillFileSource;
   files: SkillFile[];
 }) {
@@ -78,8 +79,8 @@ export function SkillFileBrowser({ workspaceId, skillId, source, files }: {
   const [desktopFiles, setDesktopFiles] = useState(true);
   const [mobileFiles, setMobileFiles] = useState(false);
   const preview = useQuery({
-    queryKey: ["skill-file", workspaceId, skillId, source, path],
-    queryFn: ({ signal }) => previewSkillFile(workspaceId, skillId, source, path, signal),
+    queryKey: ["skill-file", workspaceId, skillId, projectId, source, path],
+    queryFn: ({ signal }) => previewSkillFile(workspaceId, skillId, source, path, signal, projectId),
     enabled: !!path,
   });
   const markdown = /\.md(?:own)?$/i.test(path);

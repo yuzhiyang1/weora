@@ -1,0 +1,39 @@
+name: Weora project knowledge review
+
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize, ready_for_review, closed]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: weora-knowledge-pr-${{ github.event.pull_request.number }}
+  queue: max
+
+jobs:
+  knowledge:
+    if: ${{ github.event.action != 'closed' || github.event.pull_request.merged }}
+    # 使用已安装 Weora CLI 和 Codex 的可信 Linux Runner。该任务不会检出或执行 PR 分支代码。
+    runs-on: [self-hosted, linux, weora-ci]
+    timeout-minutes: 20
+    steps:
+      - name: Evaluate knowledge review
+        shell: bash
+        env:
+          REVIEW_URL: ${{ github.event.pull_request.html_url }}
+          REVIEW_ACTION: ${{ github.event.action }}
+          REVIEW_HEAD: ${{ github.event.pull_request.head.sha }}
+          GITHUB_TOKEN: ${{ github.token }}
+          WEORA_COLLAB_URL: ${{ vars.WEORA_URL }}
+          WEORA_COLLAB_WORKSPACE: ${{ vars.WEORA_WORKSPACE_ID }}
+          WEORA_PROJECT_ID: ${{ vars.WEORA_PROJECT_ID }}
+          WEORA_COLLAB_TOKEN: ${{ secrets.WEORA_CI_DEVICE_TOKEN }}
+        run: |
+          mode=comment
+          if [[ "$REVIEW_ACTION" == closed ]]; then
+            mode=write
+          fi
+          weora ci extract-mr --url "$REVIEW_URL" --project "$WEORA_PROJECT_ID" \
+            --mode "$mode" --event-head "$REVIEW_HEAD" --individual-comments --via codex

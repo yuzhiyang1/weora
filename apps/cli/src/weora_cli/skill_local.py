@@ -1,6 +1,7 @@
 """Skill 本机目录归属、恢复日志与 SQLite 上报队列。"""
 
 import hashlib
+import hmac
 import json
 import os
 import re
@@ -14,8 +15,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from zipfile import BadZipFile, ZipFile
 
-from weora_cli.collab_client import CollabError, as_object, write_json
+from weora_cli.collab_client import CollabError, as_object, read_config, write_json
 from weora_cli.commands import JsonValue
+from weora_cli.skill_adapters import tool_home
 
 
 def state_root() -> Path:
@@ -29,6 +31,29 @@ def now() -> str:
 
 def digest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def is_current_binding(binding: sqlite3.Row, config: dict[str, JsonValue]) -> bool:
+    """本地安装和队列只供创建绑定的配对设备使用。"""
+    return (binding["base"], binding["workspace"], binding["device"]) == (
+        config.get("base"), config.get("workspace"), config.get("device_id"),
+    )
+
+
+def current_bindings(db: sqlite3.Connection, runtime: str, cwd: Path) -> list[sqlite3.Row]:
+    config = read_config()
+    return [
+        row
+        for row in db.execute(
+            "SELECT * FROM binding WHERE runtime=? AND profile=? ORDER BY length(root) DESC",
+            (runtime, str(tool_home(runtime))),
+        )
+        if is_current_binding(row, config) and (row["scope"] == "user" or cwd.is_relative_to(Path(row["root"])))
+    ]
+
+
+def usage_session_key(secret: bytes, runtime: str, profile: str, value: str) -> str:
+    return hmac.new(secret, f"{runtime}:{profile}:{value}".encode(), hashlib.sha256).hexdigest()
 
 
 def conflict(target: Path) -> CollabError:
@@ -127,7 +152,7 @@ def database() -> Iterator[sqlite3.Connection]:
             CREATE TABLE IF NOT EXISTS binding (
                 id TEXT PRIMARY KEY, root TEXT NOT NULL, runtime TEXT NOT NULL, scope TEXT NOT NULL,
                 profile TEXT NOT NULL, base TEXT NOT NULL, workspace TEXT NOT NULL, device TEXT NOT NULL, checked TEXT,
-                usage INTEGER NOT NULL DEFAULT 0,
+                usage INTEGER NOT NULL DEFAULT 0, project_id TEXT,
                 UNIQUE(root, runtime, scope, profile)
             );
             CREATE TABLE IF NOT EXISTS installation (
@@ -152,6 +177,12 @@ def database() -> Iterator[sqlite3.Connection]:
             CREATE TABLE IF NOT EXISTS secret (id INTEGER PRIMARY KEY CHECK (id=1), value TEXT NOT NULL);
             INSERT OR IGNORE INTO secret(id, value) VALUES (1, lower(hex(randomblob(32))));
         """)
+        # 旧版绑定已有安装代次和待上报收据。只追加项目范围，保留原记录。
+        if not any(column["name"] == "project_id" for column in db.execute("PRAGMA table_info(binding)")):
+            with db:
+                db.execute("BEGIN IMMEDIATE")
+                if not any(column["name"] == "project_id" for column in db.execute("PRAGMA table_info(binding)")):
+                    db.execute("ALTER TABLE binding ADD COLUMN project_id TEXT")
         yield db
     finally:
         db.close()

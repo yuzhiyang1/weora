@@ -5,17 +5,30 @@ import json
 import subprocess
 import sys
 import time
+from contextlib import suppress
 from getpass import getpass
 from pathlib import Path
 from urllib.parse import urlencode
-from uuid import UUID, uuid4
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 from websockets.exceptions import WebSocketException
 from websockets.sync.client import connect
 
 from weora_cli.collab_client import Client, CollabError, as_object, items, pair, paired_client
-from weora_cli.collab_native import adapter, install_hook, profile
+from weora_cli.collab_native import PLAN_WRITE_TOOL, RECALL_AGENT, adapter, install_hook, profile, recall_agent_path
 from weora_cli.commands import JsonValue
+from weora_cli.knowledge import session_recall_hint, sync_queued_after_start
+from weora_cli.knowledge_activity import observe as observe_activity
+from weora_cli.knowledge_finished_sessions import observe as observe_archive
+from weora_cli.knowledge_mr_hint import start as start_mr_hint
+from weora_cli.knowledge_mr_hint import take as take_mr_hint
+from weora_cli.knowledge_plan_reminder import observe as observe_plan_reminder
+from weora_cli.knowledge_run_mode import is_unattended
+from weora_cli.knowledge_score_work import score_offer_hint
+from weora_cli.knowledge_session_origin import observe_start
+from weora_cli.knowledge_session_share import observe as observe_session_share
+from weora_cli.knowledge_settings import SessionSettings
+from weora_cli.knowledge_unattended import observe as observe_unattended
 
 
 def arguments(parser: argparse.ArgumentParser) -> None:
@@ -163,13 +176,56 @@ def hook_output(args: argparse.Namespace) -> dict[str, JsonValue]:
     try:
         event = as_object(json.load(sys.stdin))
         native, cwd_text, name = (event.get("session_id"), event.get("cwd"), event.get("hook_event_name"))
-        if name not in ("SessionStart", "UserPromptSubmit") or not isinstance(native, str):
+        if name not in (
+            "SessionStart", "UserPromptSubmit", "Stop", "SubagentStart", "PostToolUse",
+        ) or not isinstance(native, str):
             return {}
         cwd = Path(cwd_text) if isinstance(cwd_text, str) else Path.cwd()
+        if name == "PostToolUse":
+            if event.get("tool_name") != PLAN_WRITE_TOOL:
+                return {}
+            root_session = UUID(native)
+            settings = SessionSettings(paired_client(timeout=1), cwd)
+            hint = observe_plan_reminder(settings, args.runtime, profile(args.runtime), root_session)
+            return {"hookSpecificOutput": {"hookEventName": name, "additionalContext": hint}} if hint else {}
+        if name == "SubagentStart":
+            agent = event.get("agent_id")
+            if not isinstance(agent, str) or not 1 <= len(agent) <= 256:
+                return {}
+            # 宿主原始标识留在设备，传给命令的 UUID 仅用于同一根会话内的归因。
+            root = str(UUID(native))
+            actor = uuid5(NAMESPACE_URL, f"weora/recall/{args.runtime}/{root}/{agent}")
+            settings = SessionSettings(paired_client(timeout=2), cwd)
+            hint = session_recall_hint(
+                settings, root, actor=actor, recall_agent=event.get("agent_type") == RECALL_AGENT,
+            )
+            return {"hookSpecificOutput": {"hookEventName": name, "additionalContext": hint}} if hint else {}
+        if is_unattended(args.runtime, event):
+            event["is_headless"] = True
+        client = paired_client(timeout=2)
+        settings = SessionSettings(client, cwd)
+        with suppress(CollabError, OSError, ValueError):
+            observe_start(client, cwd, args.runtime, event)
+        with suppress(CollabError, OSError, ValueError):
+            observe_activity(client, cwd, args.runtime, event)
+        archive_hint = ""
+        # 归档只使用已经绑定的根会话，本机配置错误不影响协作及其他提示。
+        with suppress(CollabError, OSError, ValueError):
+            archive_hint = observe_archive(client, cwd, args.runtime, event)
+        with suppress(CollabError, OSError, ValueError):
+            observe_unattended(client, cwd, args.runtime, event)
+        if name == "Stop":
+            reminder = observe_session_share(settings, args.runtime, event)
+            if reminder:
+                with suppress(CollabError, OSError, ValueError):
+                    reminder += score_offer_hint(client, cwd, args.runtime, native)
+            return {"systemMessage": reminder} if reminder else {}
+        if name == "UserPromptSubmit":
+            with suppress(CollabError, OSError, ValueError):
+                observe_session_share(settings, args.runtime, event)
         root = _git(cwd, "rev-parse", "--show-toplevel")
         repo = Path(root).name if root else cwd.name
         branch = _git(cwd, "branch", "--show-current")
-        client = paired_client(timeout=2)
         row = _register(
             client,
             args.runtime,
@@ -191,6 +247,26 @@ def hook_output(args: argparse.Namespace) -> dict[str, JsonValue]:
         mail = next((item for item in pending if item.get("session_id") == session_id), None)
         if mail:
             context += " " + _hint(session_id, _id(mail["message_id"]))
+        if archive_hint:
+            context += " " + archive_hint
+        # 宿主已经使用这条受信任 Hook，知识召回配置失败时仍返回协作消息。
+        with suppress(CollabError, OSError, ValueError):
+            # 知识召回、转录与 Stop 的质量统计共用宿主根会话 ID。
+            delegate_to = RECALL_AGENT if recall_agent_path(args.runtime).is_file() else None
+            recall = session_recall_hint(settings, native, delegate_to=delegate_to)
+            if recall:
+                context += " " + recall
+            if name == "SessionStart":
+                sync_queued_after_start(settings)
+        # MR 提示独立于召回，任何第三方读取失败都不影响已有协作内容。
+        with suppress(CollabError, OSError, ValueError):
+            if name == "SessionStart":
+                if root:
+                    start_mr_hint(client, cwd, session_id, lambda: _git(cwd, "remote", "get-url", "origin"))
+            else:
+                hint = take_mr_hint(client, cwd, session_id, lambda: _git(cwd, "remote", "get-url", "origin"))
+                if hint:
+                    context += "\n" + hint
         return {"hookSpecificOutput": {"hookEventName": name, "additionalContext": context}}
     except (CollabError, OSError, ValueError):
         return {}

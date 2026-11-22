@@ -45,6 +45,7 @@ class SkillRecord:
     draft: SkillDraftRecord | None = None
     uploader_name: str | None = None
     interface: SkillInterface | None = None
+    namespace: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,6 +127,8 @@ class SkillListPage:
 class SkillStore(Protocol):
     """一次 Skills 事务内需要的聚合读写操作。"""
 
+    async def lock_publication_scope(self, workspace_id: UUID) -> None: ...
+
     async def put_package(self, workspace_id: UUID, digest: str, archive: bytes) -> None: ...
 
     async def read_package(self, workspace_id: UUID, digest: str) -> bytes | None: ...
@@ -137,7 +140,7 @@ class SkillStore(Protocol):
         interface: SkillInterface,
     ) -> None: ...
 
-    async def lock_skill_by_slug(self, workspace_id: UUID, slug: str) -> UUID | None: ...
+    async def lock_skill_by_slug(self, workspace_id: UUID, slug: str, namespace: str) -> UUID | None: ...
 
     async def add_contribution(self, workspace_id: UUID, item: SkillContribution) -> None: ...
 
@@ -200,9 +203,12 @@ class SkillStore(Protocol):
         *,
         skill: SkillRecord,
         version: SkillVersionRecord,
+        markdown: str,
         actor_name: str | None,
         request_id: str,
     ) -> None: ...
+
+    async def index_cached_version(self, version: SkillVersionRecord, archive: bytes) -> None: ...
 
     async def list_versions(
         self,

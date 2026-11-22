@@ -1,6 +1,7 @@
 """Skills SQLAlchemy Repository 与 Unit of Work。"""
 
-from dataclasses import asdict
+from collections.abc import Awaitable, Callable
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from types import TracebackType
 from uuid import UUID, uuid4
@@ -23,7 +24,14 @@ from weora.modules.skills.application.ports import (
     SkillVersionRecord,
 )
 from weora.modules.skills.domain.errors import SkillRegistryError, SkillSlugConflictError, SkillVersionConflictError
-from weora.modules.skills.domain.package import SkillCompatibility, SkillFile, SkillInterface, SkillWarning
+from weora.modules.skills.domain.package import (
+    SkillCompatibility,
+    SkillFile,
+    SkillInterface,
+    SkillWarning,
+    read_skill_markdown,
+)
+from weora.modules.skills.infrastructure.knowledge_index import index_skill_version
 from weora.modules.skills.infrastructure.models import (
     SkillContributionModel,
     SkillDraftModel,
@@ -116,6 +124,7 @@ def _skill_from_model(
         id=model.id,
         workspace_id=model.workspace_id,
         slug=model.slug,
+        namespace=model.namespace,
         display_name=(interface.display_name or model.display_name)
         if interface and not model.metadata_edited
         else model.display_name,
@@ -152,11 +161,35 @@ def _draft_model(skill_id: UUID, draft: SkillDraftRecord, actor_id: UUID) -> Ski
     )
 
 
+@dataclass(frozen=True, slots=True)
+class RegistryPublicationHooks:
+    """同事务协调目标路径与发布结果，Skill Registry 不依赖知识模型。"""
+
+    lock_scope: Callable[[AsyncSession, UUID, UUID | None], Awaitable[None]]
+    validate_path: Callable[[AsyncSession, UUID | None, SkillRecord], Awaitable[None]]
+    record_release: Callable[[AsyncSession, UUID | None, SkillVersionRecord, str], Awaitable[None]]
+    record_status: Callable[[AsyncSession, UUID | None, SkillRecord, UUID, datetime], Awaitable[None]]
+
+
 class SqlAlchemySkillStore:
     """把 Skills 持久化端口映射到 SQLAlchemy ORM。"""
 
-    def __init__(self, session: AsyncSession) -> None:
+    def __init__(
+        self, session: AsyncSession, *, project_id: UUID | None = None,
+        publication: RegistryPublicationHooks | None = None,
+    ) -> None:
         self._session = session
+        self._project_id = project_id
+        self._publication = publication
+
+    async def lock_publication_scope(self, workspace_id: UUID) -> None:
+        """先于资产行加锁，与知识审核保持相同顺序。"""
+        if self._publication is not None:
+            await self._publication.lock_scope(self._session, workspace_id, self._project_id)
+
+    def _scope(self, workspace_id: UUID) -> ColumnElement[bool]:
+        # 管理和运行绑定查询默认只读共享资产。知识发布使用已授权的单一项目事务。
+        return and_(SkillModel.workspace_id == workspace_id, SkillModel.project_id == self._project_id)
 
     async def put_package(self, workspace_id: UUID, digest: str, archive: bytes) -> None:
         """重复上传复用同一包，并发冲突不回滚外层发布事务。"""
@@ -182,12 +215,12 @@ class SqlAlchemySkillStore:
             )
         ).one_or_none()
 
-    async def lock_skill_by_slug(self, workspace_id: UUID, slug: str) -> UUID | None:
-        """串行处理同名包的提交、接受及草稿更新。"""
+    async def lock_skill_by_slug(self, workspace_id: UUID, slug: str, namespace: str) -> UUID | None:
+        """在指定目录内串行处理同名包提交和草稿更新。"""
         return (
             await self._session.scalars(
                 select(SkillModel.id)
-                .where(SkillModel.workspace_id == workspace_id, SkillModel.slug == slug)
+                .where(self._scope(workspace_id), SkillModel.slug == slug, SkillModel.namespace == namespace)
                 .with_for_update()
             )
         ).one_or_none()
@@ -210,7 +243,7 @@ class SqlAlchemySkillStore:
                 .values(interface=asdict(interface))
             )
         else:
-            workspace_skills = select(SkillModel.id).where(SkillModel.workspace_id == workspace_id)
+            workspace_skills = select(SkillModel.id).where(self._scope(workspace_id))
             await self._session.execute(
                 update(SkillDraftModel)
                 .where(
@@ -269,7 +302,9 @@ class SqlAlchemySkillStore:
             SkillModel(
                 id=skill.id,
                 workspace_id=skill.workspace_id,
+                project_id=self._project_id,
                 slug=skill.slug,
+                namespace=skill.namespace,
                 display_name=skill.display_name,
                 description=skill.description,
                 status=skill.status,
@@ -291,7 +326,7 @@ class SqlAlchemySkillStore:
                     actor_id=actor_id,
                     event_type="SKILL_CREATED",
                     request_id=request_id,
-                    event_data={"content_sha256": draft.content_sha256},
+                    event_data={"content_sha256": draft.content_sha256, "namespace": skill.namespace},
                     occurred_at=skill.created_at,
                 ),
             ]
@@ -315,7 +350,7 @@ class SqlAlchemySkillStore:
             )
             .outerjoin(SkillDraftModel, SkillDraftModel.skill_id == SkillModel.id)
         )
-        conditions = [SkillModel.workspace_id == workspace_id]
+        conditions = [self._scope(workspace_id)]
         if search:
             # 搜索与展示使用同一版本的别名及简介。
             published = SkillModel.latest_published_version_id.is_not(None)
@@ -323,6 +358,7 @@ class SqlAlchemySkillStore:
                 or_(
                     SkillModel.display_name.contains(search, autoescape=True),
                     SkillModel.slug.contains(search, autoescape=True),
+                    SkillModel.namespace.contains(search, autoescape=True),
                     SkillModel.description.contains(search, autoescape=True),
                     and_(published, _matches_interface(SkillVersionModel.interface, search)),
                     and_(~published, _matches_interface(SkillDraftModel.interface, search)),
@@ -360,7 +396,7 @@ class SqlAlchemySkillStore:
             # 先锁资产行，再读草稿。等待并发替换后需要读到新的快照。
             locked = await self._session.scalar(
                 select(SkillModel.id)
-                .where(SkillModel.workspace_id == workspace_id, SkillModel.id == skill_id)
+                .where(self._scope(workspace_id), SkillModel.id == skill_id)
                 .with_for_update()
             )
             if locked is None:
@@ -369,7 +405,7 @@ class SqlAlchemySkillStore:
             select(SkillModel, SkillDraftModel, SkillVersionModel.version, SkillVersionModel.interface)
             .outerjoin(SkillDraftModel, SkillDraftModel.skill_id == SkillModel.id)
             .outerjoin(SkillVersionModel, SkillVersionModel.id == SkillModel.latest_published_version_id)
-            .where(SkillModel.workspace_id == workspace_id, SkillModel.id == skill_id)
+            .where(self._scope(workspace_id), SkillModel.id == skill_id)
         )
         row = (await self._session.execute(statement)).one_or_none()
         if row is None:
@@ -395,7 +431,7 @@ class SqlAlchemySkillStore:
     ) -> SkillRecord | None:
         skill = await self._session.scalar(
             select(SkillModel).where(
-                SkillModel.workspace_id == workspace_id,
+                self._scope(workspace_id),
                 SkillModel.id == skill_id,
             )
         )
@@ -428,7 +464,7 @@ class SqlAlchemySkillStore:
     ) -> None:
         skill = await self._session.scalar(
             select(SkillModel).where(
-                SkillModel.workspace_id == workspace_id,
+                self._scope(workspace_id),
                 SkillModel.id == skill_id,
             )
         )
@@ -452,17 +488,20 @@ class SqlAlchemySkillStore:
         *,
         skill: SkillRecord,
         version: SkillVersionRecord,
+        markdown: str,
         actor_name: str | None,
         request_id: str,
     ) -> None:
         model = await self._session.scalar(
             select(SkillModel).where(
-                SkillModel.workspace_id == skill.workspace_id,
+                self._scope(skill.workspace_id),
                 SkillModel.id == skill.id,
             )
         )
         if model is None:
             return
+        if self._publication is not None and model.latest_published_version_id is None:
+            await self._publication.validate_path(self._session, self._project_id, skill)
         # 先安排草稿删除，再加入新版本，避免后续 DELETE 触发提前 autoflush，
         # 从而保证唯一键冲突统一在 Unit of Work 的 commit 中映射为领域错误。
         await self._session.execute(delete(SkillDraftModel).where(SkillDraftModel.skill_id == skill.id))
@@ -503,6 +542,24 @@ class SqlAlchemySkillStore:
             },
             occurred_at=version.published_at,
         )
+        await self._session.flush()
+        await index_skill_version(self._session, skill.workspace_id, version.id, skill.slug, markdown)
+        if self._publication is not None:
+            await self._publication.record_release(self._session, self._project_id, version, markdown)
+
+    async def index_cached_version(self, version: SkillVersionRecord, archive: bytes) -> None:
+        # 已获得发布包读取授权，索引只绑定此有摘要校验的版本。
+        slug = await self._session.scalar(select(SkillModel.slug).where(
+            SkillModel.id == version.skill_id, SkillModel.workspace_id == version.workspace_id,
+        ))
+        if slug is None:
+            return
+        try:
+            markdown = read_skill_markdown(archive, slug)
+        except SkillRegistryError:
+            # 历史包的原始下载契约仍有效。只有能校验并提取的入口才进入搜索。
+            return
+        await index_skill_version(self._session, version.workspace_id, version.id, slug, markdown)
 
     async def list_versions(
         self,
@@ -512,7 +569,9 @@ class SqlAlchemySkillStore:
     ) -> list[SkillVersionRecord]:
         statement = (
             select(SkillVersionModel)
+            .join(SkillModel, SkillModel.id == SkillVersionModel.skill_id)
             .where(
+                self._scope(workspace_id),
                 SkillVersionModel.workspace_id == workspace_id,
                 SkillVersionModel.skill_id == skill_id,
             )
@@ -528,7 +587,10 @@ class SqlAlchemySkillStore:
         version: str,
     ) -> SkillVersionRecord | None:
         model = await self._session.scalar(
-            select(SkillVersionModel).where(
+            select(SkillVersionModel)
+            .join(SkillModel, SkillModel.id == SkillVersionModel.skill_id)
+            .where(
+                self._scope(workspace_id),
                 SkillVersionModel.workspace_id == workspace_id,
                 SkillVersionModel.skill_id == skill_id,
                 SkillVersionModel.version == version,
@@ -549,6 +611,7 @@ class SqlAlchemySkillStore:
             select(SkillVersionModel, SkillModel.slug, SkillModel.display_name)
             .join(SkillModel, SkillModel.id == SkillVersionModel.skill_id)
             .where(
+                self._scope(workspace_id),
                 SkillVersionModel.workspace_id == workspace_id,
                 SkillVersionModel.id.in_(version_ids),
             )
@@ -576,23 +639,34 @@ class SqlAlchemySkillStore:
     ) -> SkillRecord | None:
         model = await self._session.scalar(
             select(SkillModel).where(
-                SkillModel.workspace_id == workspace_id,
+                self._scope(workspace_id),
                 SkillModel.id == skill_id,
-            )
+            ).with_for_update()
         )
         if model is None:
             return None
-        model.status = new_status
-        model.updated_at = occurred_at
-        await self.add_event(
-            workspace_id=workspace_id,
-            skill_id=skill_id,
-            event_type=event_type,
-            actor_id=actor_id,
-            request_id=request_id,
-            data={},
-            occurred_at=occurred_at,
-        )
+        # 恢复已有版本会使路径重新可见，沿用首次发布的检查。
+        if (
+            self._publication is not None and new_status == "active"
+            and model.latest_published_version_id is not None
+        ):
+            await self._publication.validate_path(self._session, self._project_id, _skill_from_model(model))
+        if model.status != new_status:
+            model.status = new_status
+            model.updated_at = occurred_at
+            await self.add_event(
+                workspace_id=workspace_id,
+                skill_id=skill_id,
+                event_type=event_type,
+                actor_id=actor_id,
+                request_id=request_id,
+                data={},
+                occurred_at=occurred_at,
+            )
+        if self._publication is not None and model.latest_published_version_id is not None:
+            await self._publication.record_status(
+                self._session, self._project_id, _skill_from_model(model), actor_id, occurred_at,
+            )
         return await self.get_skill(workspace_id=workspace_id, skill_id=skill_id)
 
     async def add_event(
@@ -652,13 +726,20 @@ class SqlAlchemySkillsUnitOfWork:
 
     store: SkillStore
 
-    def __init__(self, session_factory: SessionFactory) -> None:
+    def __init__(
+        self, session_factory: SessionFactory, *, project_id: UUID | None = None,
+        publication: RegistryPublicationHooks | None = None,
+    ) -> None:
         self._session_factory = session_factory
+        self._project_id = project_id
+        self._publication = publication
         self._session: AsyncSession | None = None
 
     async def __aenter__(self) -> "SqlAlchemySkillsUnitOfWork":
         self._session = self._session_factory()
-        self.store = SqlAlchemySkillStore(self._session)
+        self.store = SqlAlchemySkillStore(
+            self._session, project_id=self._project_id, publication=self._publication,
+        )
         return self
 
     async def __aexit__(
@@ -696,6 +777,10 @@ def _integrity_conflict(error: IntegrityError) -> SkillRegistryError | None:
     details = str(error.orig)
     if "uq_skill_versions_skill_version" in details or "skill_versions.skill_id, skill_versions.version" in details:
         return SkillVersionConflictError()
-    if "uq_skills_workspace_slug" in details or "skills.workspace_id, skills.slug" in details:
+    if any(key in details for key in (
+        "uq_skills_shared_namespace_slug", "uq_skills_project_namespace_slug",
+        "skills.workspace_id, skills.namespace, skills.slug",
+        "skills.workspace_id, skills.project_id, skills.namespace, skills.slug",
+    )):
         return SkillSlugConflictError()
     return None
