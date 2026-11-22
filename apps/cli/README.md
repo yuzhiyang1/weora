@@ -22,7 +22,15 @@ uv run --project apps/cli weora schema version
 uv tool install --python 3.12 ./apps/cli
 ```
 
-当前尚未发布到包仓库；开发验证使用 `uv run` 即可，不要求全局安装。
+知识库需要 Weora CLI 0.2.0 或更新版本。在已有安装的设备上，从包含知识库功能的仓库检出目录重新安装，并检查知识库命令是否可用：
+
+```powershell
+uv tool install --reinstall --python 3.12 ./apps/cli
+weora version
+weora context search --help
+```
+
+当前从源码或测试 wheel 分发。开发验证也可以直接使用 `uv run`。
 
 ## 登录 Weora
 
