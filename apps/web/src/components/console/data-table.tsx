@@ -46,7 +46,7 @@ export function Table<T extends object>({
           <HeroTable.Header>
             {columns.map((column, index) => (
               <HeroTable.Column
-                id={String(index)}
+                id={`column-${index}`}
                 key={index}
                 isRowHeader={index === 0}
                 {...(column.width ? { style: { width: column.width } } : {})}
@@ -72,7 +72,8 @@ export function Table<T extends object>({
                 ))
               : dataSource.map((record, index) => (
                   <HeroTable.Row
-                    id={String(record[rowKey] ?? index)}
+                    // HeroUI 的行和列共享键空间，数字型业务主键也必须保持唯一。
+                    id={`row-${String(record[rowKey] ?? index)}`}
                     key={String(record[rowKey] ?? index)}
                     textValue={String(record[rowKey] ?? index)}
                   >

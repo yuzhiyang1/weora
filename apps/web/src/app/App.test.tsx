@@ -2,6 +2,7 @@ import { cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import type { HealthReport } from "../features/knowledge/api";
 import { App } from "./App";
 
 const principal = {
@@ -42,6 +43,56 @@ describe("Weora application shell", () => {
     vi.restoreAllMocks();
     window.history.replaceState({}, "", "/");
     document.cookie = "weora_csrf=; Max-Age=0; Path=/";
+  });
+
+  it("默认展示知识库健康报告，提交关键词后才检索 Skill", async () => {
+    window.history.replaceState({}, "", "/knowledge");
+    const user = userEvent.setup();
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const path = String(input);
+      if (path.endsWith("/auth/me")) return jsonResponse(principal);
+      if (path.endsWith("/knowledge/health")) return jsonResponse({
+        generated_at: "2026-11-24T00:00:00Z",
+        summary: { entries: 0, recalls: 0, upvotes: 0, coverage: 0, contributors: 0, hot: 0, cold: 0, silent: 0 },
+        maintenance: { promote: { total: 0, items: [] }, prune: { total: 0, items: [] }, quality: { total: 0, items: [] } },
+        graph: { relations: 0, unresolved: 0, without_relations: 0, silent_without_relations: 0 },
+        coverage: [], top_recalled: [], silent: [], last_recall_months: [], authors: [], code_sources: [],
+      } satisfies HealthReport);
+      if (path.includes("/knowledge?query=")) return jsonResponse({
+        items: [{ id: "release-skill", kind: "skill", title: "发布校验", source: { type: "skill_registry" } }],
+      });
+      return jsonResponse({ items: [] });
+    });
+
+    render(<App />);
+
+    expect(await screen.findByText("召回覆盖率")).toBeInTheDocument();
+    await user.click(screen.getByRole("tab", { name: "检索" }));
+    const searchBox = await screen.findByRole("textbox", { name: "搜索知识" });
+    await user.type(searchBox, "   {Enter}");
+    // 空关键词不会将整个资源索引当作知识目录展示。
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/knowledge?"))).toBe(false);
+    expect(window.location.search).toBe("?view=search");
+    await user.type(searchBox, "发布{Enter}");
+    expect(await screen.findByRole("button", { name: "发布校验" })).toBeInTheDocument();
+    expect(await screen.findByText("Skill · 工作空间共享")).toBeInTheDocument();
+  });
+
+  it("普通成员打开健康报告链接时回到检索且不查询报告", async () => {
+    window.history.replaceState({}, "", "/knowledge?view=health");
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      if (String(input).endsWith("/auth/me")) return jsonResponse({
+        ...principal,
+        workspace: { ...principal.workspace, role: "member" },
+      });
+      return jsonResponse({ items: [] });
+    });
+
+    render(<App />);
+
+    expect(await screen.findByRole("textbox", { name: "搜索知识" })).toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: "健康报告" })).not.toBeInTheDocument();
+    expect(fetchMock.mock.calls.some(([input]) => /\/knowledge(?:\?|\/health)/.test(String(input)))).toBe(false);
   });
 
   it("redirects guests to the login page", async () => {
@@ -129,7 +180,7 @@ describe("Weora application shell", () => {
   });
 
   it("登录后返回原来的受保护页面，不被访客路由再次跳转到首页", async () => {
-    window.history.replaceState({}, "", "/skills");
+    window.history.replaceState({}, "", "/skills?project=example-project#results");
     const user = userEvent.setup();
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
       const path = String(input);
@@ -156,6 +207,8 @@ describe("Weora application shell", () => {
       await screen.findByRole("heading", { name: "Skills" }),
     ).toBeInTheDocument();
     expect(window.location.pathname).toBe("/skills");
+    expect(window.location.search).toBe("?project=example-project");
+    expect(window.location.hash).toBe("#results");
   });
 
   it("creates an account and its first workspace", async () => {

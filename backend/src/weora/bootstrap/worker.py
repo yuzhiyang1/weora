@@ -97,6 +97,11 @@ if get_settings().repository_sync_enabled:
         "schedule": 300.0,
         "options": {"queue": "weora.repositories.sync", "expires": 60},
     }
+    celery_app.conf.beat_schedule["sync-workflow-scores"] = {
+        "task": "weora.knowledge.sync_workflow_scores",
+        "schedule": 5.0,
+        "options": {"queue": "weora.repositories.sync", "expires": 10},
+    }
 
 
 async def _sync_repository(*, purge: bool = False) -> bool:
@@ -107,6 +112,16 @@ async def _sync_repository(*, purge: bool = False) -> bool:
     async with app.router.lifespan_context(app):
         sync = app.state.project_service.repository_sync
         return bool(sync and (await sync.purge_retired() if purge else await sync.run_one()))
+
+
+async def _sync_workflow_scores() -> bool:
+    settings = get_settings()
+    if not settings.repository_sync_enabled:
+        return False
+    app = create_app(settings)
+    async with app.router.lifespan_context(app):
+        sync = app.state.workflow_score_sync
+        return bool(sync and await sync.run_one())
 
 
 async def _purge_recall_journal() -> int:
@@ -675,6 +690,13 @@ def purge_retired_repositories() -> bool:
         raise RuntimeError("REPOSITORY_SYNC_CLEANUP_ERROR") from None
 
 
+def sync_workflow_scores() -> bool:
+    try:
+        return asyncio.run(_sync_workflow_scores())
+    except Exception:
+        raise RuntimeError("WORKFLOW_SCORE_SYNC_INFRASTRUCTURE_ERROR") from None
+
+
 def purge_knowledge_recall_journal() -> int:
     try:
         return asyncio.run(_purge_recall_journal())
@@ -691,4 +713,5 @@ celery_app.task(name="weora.runs.dispatch")(dispatch_runs)
 celery_app.task(name="weora.runs.generate_title")(generate_task_title)
 celery_app.task(name="weora.projects.sync_repository")(sync_repository)
 celery_app.task(name="weora.projects.purge_retired_repositories")(purge_retired_repositories)
+celery_app.task(name="weora.knowledge.sync_workflow_scores")(sync_workflow_scores)
 celery_app.task(name="weora.knowledge.purge_recall_journal")(purge_knowledge_recall_journal)

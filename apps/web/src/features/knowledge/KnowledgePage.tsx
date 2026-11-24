@@ -23,7 +23,7 @@ import { KnowledgeWorkflowSettings } from "./KnowledgeWorkflowSettings";
 import "./knowledge.css";
 
 const types: Record<string, string> = knowledgeTypes;
-const tabs = ["search", "review", "maintenance", "sources", "directories", "workflows", "health"];
+const tabs = ["health", "search", "review", "maintenance", "sources", "directories", "workflows"];
 const reviewerTabs = ["review", "health"];
 const kindOptions = [
   { value: "all", label: "全部类型" },
@@ -50,9 +50,10 @@ export function KnowledgePage() {
 
   // 直接访问链接时也应用页签权限，避免发起当前角色无法使用的查询。
   const reviewer = ["owner", "admin"].includes(workspace.role);
-  const requestedTab = params.get("view") ?? "search";
+  const defaultTab = reviewer ? "health" : "search";
+  const requestedTab = params.get("view") ?? defaultTab;
   const canOpenTab = tabs.includes(requestedTab) && (reviewer || !reviewerTabs.includes(requestedTab));
-  const tab = canOpenTab ? requestedTab : "search";
+  const tab = canOpenTab ? requestedTab : defaultTab;
 
   function updateLocation(name: "project" | "view", value?: string) {
     const next = new URLSearchParams(params);
@@ -82,7 +83,7 @@ export function KnowledgePage() {
     <KnowledgePanel key={`${workspace.id}:${user.id}:${project}`} scope={{ workspace: workspace.id, project }}
       scopeLabel={options.find((option) => option.value === selectedScope)?.label ?? project}
       user={user.id} reviewer={reviewer} tab={tab}
-      setTab={(value) => updateLocation("view", value === "search" ? undefined : value)}
+      setTab={(value) => updateLocation("view", value === defaultTab ? undefined : value)}
       editing={editing} closeEditing={() => setEditing(false)} />
   </section>;
 }
@@ -100,10 +101,12 @@ function KnowledgePanel({ scope, scopeLabel, user, reviewer, tab, setTab, editin
   const cache = useQueryClient();
   const key = ["knowledge", scope.workspace, user, scope.project];
   const isReview = tab === "review";
+  // 统一检索包含 Skill。空关键词只用于用户主动打开的 GitHub 评审来源。
+  const canSearch = Boolean(searchQuery || githubOnly);
   const rows = useQuery({
     queryKey: [...key, tab, searchQuery, kind, githubOnly],
     queryFn: () => list(scope, isReview, searchQuery, kind, githubOnly),
-    enabled: tab === "search" || isReview,
+    enabled: isReview || (tab === "search" && canSearch),
   });
   const report = useQuery({ queryKey: [...key, "health"], queryFn: () => health(scope), enabled: tab === "health" });
   const refresh = () => cache.invalidateQueries({ queryKey: key });
@@ -114,7 +117,7 @@ function KnowledgePanel({ scope, scopeLabel, user, reviewer, tab, setTab, editin
   );
   const results = rows.isPending ? <Skeleton active /> : rows.isError ? (
     <AssetLoadError title="知识暂时无法加载" description={errorMessage(rows.error)} onRetry={() => void rows.refetch()} />
-  ) : <KnowledgeRows title={isReview ? "待审核版本" : "知识条目"}
+  ) : <KnowledgeRows title={isReview ? "待审核版本" : "检索结果"}
     empty={isReview ? "没有待审核版本" : "没有匹配的知识"}
     rows={rows.data.items.map((entry) => ({
       id: entry.id,
@@ -141,6 +144,12 @@ function KnowledgePanel({ scope, scopeLabel, user, reviewer, tab, setTab, editin
       setSelectedModule(null);
       setTab(value);
     }}>
+      {reviewer && <TabPane itemKey="health" tab="健康报告">
+        {report.isPending ? <Skeleton active /> : report.isError ? (
+          <AssetLoadError title="报告暂时无法加载" description={errorMessage(report.error)}
+            onRetry={() => void report.refetch()} />
+        ) : <KnowledgeHealthReport report={report.data} labels={types} />}
+      </TabPane>}
       <TabPane itemKey="search" tab="检索">
         <form className="knowledge-searchbar" onSubmit={(event) => {
           event.preventDefault();
@@ -155,7 +164,7 @@ function KnowledgePanel({ scope, scopeLabel, user, reviewer, tab, setTab, editin
         </form>
         {githubOnly && <div className="knowledge-actions"><span>来源 · GitHub 评审</span>
           <Button size="small" onClick={() => setGithubOnly(false)}>清除来源筛选</Button></div>}
-        {results}
+        {canSearch && results}
       </TabPane>
       {reviewer && <TabPane itemKey="review" tab="待审核">
         <div className="knowledge-stack">{results}
@@ -177,12 +186,6 @@ function KnowledgePanel({ scope, scopeLabel, user, reviewer, tab, setTab, editin
       <TabPane itemKey="workflows" tab="工作流">
         {tab === "workflows" && <KnowledgeWorkflowSettings scope={scope} user={user} reviewer={reviewer} />}
       </TabPane>
-      {reviewer && <TabPane itemKey="health" tab="健康报告">
-        {report.isPending ? <Skeleton active /> : report.isError ? (
-          <AssetLoadError title="报告暂时无法加载" description={errorMessage(report.error)}
-            onRetry={() => void report.refetch()} />
-        ) : <KnowledgeHealthReport report={report.data} labels={types} />}
-      </TabPane>}
     </Tabs>
     {editing && <ContributionDialog scope={scope} user={user} scopeLabel={scopeLabel} onClose={closeEditing} refresh={refresh} />}
     {preview && <EntryDialog scope={scope} entry={preview} key={preview.id} user={user} onClose={() => {

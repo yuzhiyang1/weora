@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy import SQLColumnExpression, and_, case, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.selectable import Subquery
 
 from weora.modules.skills.application.ports import SkillVersionRecord
 from weora.modules.skills.infrastructure.models import (
@@ -379,13 +380,13 @@ async def record_usage(
     return results
 
 
-async def team_usage_digest(
-    db: AsyncSession, workspace_id: UUID, project_id: UUID | None, start: datetime, end: datetime,
-) -> dict[str, object]:
-    """供已校验管理员权限的报告读取。沿用分发的轮次去重和 Skill 所属范围。"""
+def _team_usage_observations(
+    workspace_id: UUID, project_id: UUID | None, start: datetime, end: datetime,
+) -> Subquery:
+    """复用分发记录的轮次去重和 Skill 所属范围。"""
     turn, version, skill = SkillUsageTurn, SkillVersionModel, SkillModel
-    observed = (
-        select(turn.user_id, skill.id.label("skill_id"), skill.slug, skill.display_name)
+    return (
+        select(turn.user_id, skill.id.label("skill_id"), skill.slug, skill.display_name, turn.used_at)
         .select_from(turn)
         .join(version, version.id == turn.version_id)
         .join(skill, skill.id == version.skill_id)
@@ -396,6 +397,13 @@ async def team_usage_digest(
         )
         .subquery()
     )
+
+
+async def team_usage_digest(
+    db: AsyncSession, workspace_id: UUID, project_id: UUID | None, start: datetime, end: datetime,
+) -> dict[str, object]:
+    """供已校验管理员权限的团队周报读取。"""
+    observed = _team_usage_observations(workspace_id, project_id, start, end)
     totals = (await db.execute(select(
         func.count(), func.count(func.distinct(observed.c.user_id)), func.count(func.distinct(observed.c.skill_id)),
     ).select_from(observed))).one()
@@ -410,6 +418,44 @@ async def team_usage_digest(
             {"id": str(identifier), "slug": slug, "name": title, "uses": count}
             for identifier, slug, title, count in ranked.tuples()
         ],
+    }
+
+
+async def team_skill_adoption(
+    db: AsyncSession, workspace_id: UUID, project_id: UUID | None, start: datetime, end: datetime, limit: int,
+) -> dict[str, object]:
+    """按已发布资产对照窗口内的实际使用记录，包括仍被使用的已归档资产。"""
+    skill = SkillModel
+    observed = _team_usage_observations(workspace_id, project_id, start, end)
+    usage = (
+        select(
+            observed.c.skill_id, func.count().label("uses"),
+            func.count(func.distinct(observed.c.user_id)).label("members"),
+            func.max(observed.c.used_at).label("last_used_at"),
+        ).group_by(observed.c.skill_id).subquery()
+    )
+    statement = select(
+        skill.id, skill.slug, skill.display_name, skill.status,
+        func.coalesce(usage.c.uses, 0), func.coalesce(usage.c.members, 0), usage.c.last_used_at,
+    ).outerjoin(usage, usage.c.skill_id == skill.id).where(
+        skill.workspace_id == workspace_id, skill.project_id == project_id,
+        (skill.latest_published_version_id.is_not(None) & (skill.status == "active"))
+        | usage.c.uses.is_not(None),
+    ).order_by(usage.c.members.desc().nulls_last(), usage.c.last_used_at.desc().nulls_last(), skill.slug, skill.id)
+    groups: dict[str, list[dict[str, object]]] = {"adopted": [], "unused": [], "archived_in_use": []}
+    totals = dict.fromkeys(groups, 0)
+    rows = await db.stream(statement)
+    async for identity, slug, title, status, uses, members, last in rows.tuples():
+        group = "archived_in_use" if status == "archived" else "adopted" if uses else "unused"
+        totals[group] += 1
+        if len(groups[group]) < limit:
+            groups[group].append({
+                "id": str(identity), "slug": slug, "name": title, "uses": uses, "members": members,
+                "last_used_at": utc(last).isoformat() if last is not None else None,
+            })
+    return {
+        "since": start.isoformat(), "until": end.isoformat(),
+        **{group: {"total": totals[group], "items": items} for group, items in groups.items()},
     }
 
 

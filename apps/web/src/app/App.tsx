@@ -58,6 +58,9 @@ const KnowledgePage = lazy(() =>
 const KnowledgeWorkflowPage = lazy(() =>
   import("../features/knowledge/KnowledgeWorkflowPage").then((module) => ({ default: module.KnowledgeWorkflowPage })),
 );
+const DashboardReportsPage = lazy(() =>
+  import("../features/dashboard-reports/DashboardReportsPage").then((module) => ({ default: module.DashboardReportsPage })),
+);
 const SkillDetailPage = lazy(() =>
   import("../features/skills/SkillDetailPage").then((module) => ({
     default: module.SkillDetailPage,
@@ -232,6 +235,10 @@ export function App() {
               />
               <Route path="knowledge" element={<KnowledgePage />} />
               <Route path="knowledge/workflows/:run" element={<KnowledgeWorkflowPage />} />
+              <Route path="improvement" element={<DashboardReportsPage kind="improvement" />} />
+              <Route path="self-improvement" element={<DashboardReportsPage kind="self-improvement" />} />
+              <Route path="scorers" element={<DashboardReportsPage kind="scorers" />} />
+              <Route path="benchmarks" element={<DashboardReportsPage kind="benchmarks" />} />
               <Route
                 path="rooms"
                 element={

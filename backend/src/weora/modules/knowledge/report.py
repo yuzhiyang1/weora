@@ -34,7 +34,7 @@ from weora.modules.knowledge.store import (
     published,
 )
 from weora.modules.knowledge.workflow_activity import workflow_digest
-from weora.modules.skills.infrastructure.distribution import team_usage_digest
+from weora.modules.skills.infrastructure.distribution import team_skill_adoption, team_usage_digest
 
 _KINDS = ("learning", "doc", "rule", "skill")
 
@@ -270,6 +270,20 @@ async def health(
         ],
         "graph": await _graph(db, scope, rows),
         "maintenance": await _maintenance(db, scope, rows, now, limit, include_shared=include_shared),
+    }
+
+
+async def improvement_dashboard(db: AsyncSession, scope: Scope, days: int, limit: int) -> dict[str, object]:
+    """用已授权的团队统计和维护依据生成控制台只读报告。"""
+    now = datetime.now(UTC)
+    resources = await _resources(db, scope, include_shared=False)
+    trends = await session_trends(db, scope, now, days=days, daily=True)
+    return {
+        "generated_at": now.isoformat(), "days": days, **trends,
+        "skill_adoption": await team_skill_adoption(
+            db, scope.workspace, scope.project, now - timedelta(days=30), now, limit,
+        ),
+        "maintenance": await _maintenance(db, scope, resources, now, limit, include_shared=False),
     }
 
 

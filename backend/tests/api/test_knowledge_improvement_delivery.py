@@ -246,6 +246,14 @@ async def exercise_delivery(
     assert merged.status_code == 200 and merged.json()["merge_commit"] == remote["merge_commit_sha"], merged.text
     repeated = await runs.client.put(path, params=scope, headers=h, json=confirmation | {"benchmark_id": whole})
     assert repeated.json() == merged.json()
+    dashboard = await runs.client.get(f"{root}/dashboard/self-improvement", params=scope)
+    assert dashboard.status_code == 200, dashboard.text
+    summary = dashboard.json()
+    assert summary["summary"]["merged"] == 1
+    delivered = summary["items"][0]
+    assert delivered["id"] == proposal and delivered["pr_number"] == 17
+    assert delivered["proof"]["run_id"] == whole and delivered["proof"]["verified"] is True
+    assert delivered["effect"]["status"] == "insufficient_evidence"
     default = (await runs.client.get(f"{root}/benchmark/suites", params=scope)).json()
     assert {item["title"] for item in default["tasks"]} == {"Regression"}
     assert len(default["tasks"]) == 3

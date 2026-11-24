@@ -1,4 +1,4 @@
-"""按 UTC 首次 Stop 和请求发生日读取两个七天窗口。"""
+"""按 UTC 首次 Stop 和请求发生日读取相邻的团队活动窗口。"""
 
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -62,6 +62,10 @@ class Period:
     cache_eligible: int = 0
     priced: int = 0
     cost: int = 0
+    interrupts: int = 0
+    tool_rejections: int = 0
+    corrections: int = 0
+    affected: int = 0
 
     def view(self, first: date, last: date) -> dict[str, object]:
         return {
@@ -76,11 +80,30 @@ class Period:
         }
 
 
-async def session_trends(db: AsyncSession, scope: Scope, now: datetime) -> dict[str, object]:
+    def dashboard(self, first: date, last: date) -> dict[str, object]:
+        """未采集到定价时保留未知值，零美元只用于实际采集到的零成本。"""
+        length = (last - first).days + 1
+        return self.view(first, last) | {
+            "sessions_with_correction": self.corrected,
+            "prompts": self.prompts,
+            "known_cost_micros": self.cost if self.priced else None,
+            "daily_known_cost_micros": self.cost / length if self.priced else None,
+            "interrupts": self.interrupts,
+            "tool_rejections": self.tool_rejections,
+            "corrections": self.corrections,
+            "sessions_with_intervention": self.affected,
+        }
+
+
+async def session_trends(
+    db: AsyncSession, scope: Scope, now: datetime, *, days: int = 7, daily: bool = False,
+) -> dict[str, object]:
     today = now.date()
-    current_start = today - timedelta(days=6)
-    previous_start = current_start - timedelta(days=7)
+    current_start = today - timedelta(days=days - 1)
+    previous_start = current_start - timedelta(days=days)
     current, previous = Period(), Period()
+    by_day = {current_start + timedelta(days=offset): Period() for offset in range(days)} if daily else {}
+    members: dict[date, int] = {}
     activity, cost = KnowledgeSessionActivity, KnowledgeSessionRequestDay
     where = (activity.workspace_id == scope.workspace, activity.project_id == scope.project)
     groups = (await db.execute(select(
@@ -91,20 +114,33 @@ async def session_trends(db: AsyncSession, scope: Scope, now: datetime) -> dict[
         func.sum(case((activity.corrections > 0, 1), else_=0)),
         func.sum(activity.cache_read_tokens),
         func.sum(activity.input_tokens + activity.cache_read_tokens + activity.cache_creation_tokens),
+        func.sum(activity.interrupts), func.sum(activity.tool_rejections), func.sum(activity.corrections),
+        func.sum(case((activity.interrupts + activity.tool_rejections + activity.corrections > 0, 1), else_=0)),
+        func.count(func.distinct(activity.user_id)),
     ).where(
         *where, activity.first_stop_day.between(previous_start, today),
     ).group_by(activity.first_stop_day))).tuples()
-    for day, count, succeeded, prompts, duration, corrected, cached, eligible in groups:
+    for group in groups:
+        (day, count, succeeded, prompts, duration, corrected, cached, eligible,
+         interrupts, rejects, corrections, affected, active) = group
         if day is None:
             continue
         period = current if day >= current_start else previous
-        period.sessions += count
-        period.succeeded += succeeded
-        period.prompts += prompts or 0
-        period.duration += int(duration or 0)
-        period.corrected += corrected
-        period.cached += int(cached or 0)
-        period.cache_eligible += int(eligible or 0)
+        members[day] = active
+        for target in (period, by_day.get(day)):
+            if target is None:
+                continue
+            target.sessions += count
+            target.succeeded += succeeded
+            target.prompts += prompts or 0
+            target.duration += int(duration or 0)
+            target.corrected += corrected
+            target.cached += int(cached or 0)
+            target.cache_eligible += int(eligible or 0)
+            target.interrupts += int(interrupts or 0)
+            target.tool_rejections += int(rejects or 0)
+            target.corrections += int(corrections or 0)
+            target.affected += int(affected or 0)
 
     # 成本按请求发生日汇总，跨午夜或跨周恢复的会话不把费用挪回首次 Stop。
     request_groups = (await db.execute(select(
@@ -114,9 +150,21 @@ async def session_trends(db: AsyncSession, scope: Scope, now: datetime) -> dict[
     ).group_by(cost.day))).tuples()
     for day, requests, micros in request_groups:
         period = current if day >= current_start else previous
-        period.priced += int(requests or 0)
-        period.cost += int(micros or 0)
+        for target in (period, by_day.get(day)):
+            if target is not None:
+                target.priced += int(requests or 0)
+                target.cost += int(micros or 0)
+    previous_end = current_start - timedelta(days=1)
+    if daily:
+        return {
+            "current": current.dashboard(current_start, today),
+            "previous": previous.dashboard(previous_start, previous_end),
+            "daily": [
+                {"day": day.isoformat(), "active_members": members.get(day, 0), **values.dashboard(day, day)}
+                for day, values in by_day.items()
+            ],
+        }
     return {
         "current": current.view(current_start, today),
-        "previous": previous.view(previous_start, current_start - timedelta(days=1)),
+        "previous": previous.view(previous_start, previous_end),
     }

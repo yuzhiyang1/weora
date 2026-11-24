@@ -421,8 +421,17 @@ async def test_device_download_and_versioned_usage(sharing_client: tuple[AsyncCl
     }
     assert digest["previous"]["skill_usage"] == {"uses": 0, "members": 0, "skills": 0, "top": []}
 
+    dashboard = f"{root}/knowledge/dashboard/improvement"
+    adoption = (await client.get(dashboard)).json()["skill_adoption"]
+    assert adoption["adopted"]["total"] == 1
+    observed = adoption["adopted"]["items"][0]
+    assert observed["id"] == skill_id and observed["members"] == 2 and observed["uses"] == 3
+    assert observed["last_used_at"].endswith("+00:00")
+
     archived = await client.post(f"{root}/skills/{skill_id}/archive", headers=csrf)
     assert archived.status_code == 200
+    adoption = (await client.get(dashboard)).json()["skill_adoption"]
+    assert adoption["adopted"]["total"] == 0 and adoption["archived_in_use"]["items"] == [observed]
     assert (await client.get(distribution + "/manifest", params=query, headers=authorization)).json()["items"] == []
     assert (
         await client.get(

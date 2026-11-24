@@ -91,3 +91,20 @@ async def exercise_trends(runs: RunsHarness, *, postgres: bool = False) -> None:
         assert "a" * 64 not in response.text
         unseen = (await teammate.get(digest, params=other)).json()["session_trends"]
         assert unseen["current"]["sessions_ended"] == unseen["previous"]["priced_requests"] == 0
+        assert (await teammate.get(f"{root}/dashboard/improvement", params=scope)).status_code == 403
+
+    dashboard = f"{root}/dashboard/improvement"
+    response = await runs.client.get(dashboard, params=scope | {"days": "7"})
+    assert response.status_code == 200, response.text
+    report = response.json()
+    assert len(report["daily"]) == 7
+    assert report["current"]["known_cost_micros"] == 500
+    assert report["previous"]["known_cost_micros"] == 200
+    assert report["current"]["sessions_with_intervention"] == 1
+    assert report["daily"][0]["sessions_ended"] == report["daily"][0]["active_members"] == 1
+    assert report["daily"][0]["known_cost_micros"] is None
+    assert report["daily"][-1]["known_cost_micros"] == 500 and report["daily"][-1]["sessions_ended"] == 0
+    assert "a" * 64 not in response.text
+    assert (await runs.client.get(dashboard, params=scope | {"days": "9"})).status_code == 422
+    isolated = (await runs.client.get(dashboard, params=other | {"days": "90"})).json()
+    assert len(isolated["daily"]) == 90 and isolated["current"]["known_cost_micros"] is None

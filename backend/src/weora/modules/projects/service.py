@@ -21,6 +21,7 @@ from weora.modules.projects.domain import (
     ProjectError,
     ProjectMembers,
     ProjectSecrets,
+    ReportRepository,
     RepositoryArchive,
     RepositoryArchiveExporter,
     RepositoryDirectoryReader,
@@ -168,6 +169,26 @@ class ProjectService:
             ProjectRepositoryModel.status == "active",
         ))
         return dict(rows.tuples().all())
+
+    async def report_repository(
+        self, session: AsyncSession, workspace_id: UUID, project_id: UUID, repository_id: UUID, *,
+        lock: bool = False, credentials: bool = False, connection_version: int | None = None,
+    ) -> ReportRepository | None:
+        """只允许同步已登记并检查通过的活动仓库，调用方负责目标报表范围的权限。"""
+        repo = ProjectRepositoryModel
+        query = select(repo).join(ProjectModel, ProjectModel.id == repo.project_id).where(
+            repo.id == repository_id, repo.workspace_id == workspace_id, repo.project_id == project_id,
+            repo.status == "active", repo.connection_check["status"].as_string() == "connected",
+            ProjectModel.workspace_id == workspace_id, ProjectModel.status == "active",
+        )
+        if connection_version is not None:
+            query = query.where(repo.connection_version == connection_version)
+        if lock:
+            query = query.with_for_update(of=(ProjectModel, repo), read=True)
+        row = await session.scalar(query)
+        if row is None:
+            return None
+        return ReportRepository(row.name, row.connection_version, self.repository_source(row) if credentials else None)
 
     async def lock_repository_connection(
         self, actor: ProjectActor, project_id: UUID, fixed: FixedRepository, session: AsyncSession,

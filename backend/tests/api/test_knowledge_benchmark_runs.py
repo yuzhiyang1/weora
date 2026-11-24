@@ -145,4 +145,17 @@ async def exercise_benchmark_run(runs: RunsHarness, base: str, proposed: str, *,
     assert expired.json()["status"] == "expired" and expired.json()["gate"] == "incomplete"
     assert (await mark(expiry_path, verdict(expiry["trials"][0]))).status_code == 409
     assert (await runs.client.get(f"{root}/suites", params=scope | {"suite": SUITE})).status_code == 200
+    dashboard_path = root.removesuffix("/benchmark") + "/dashboard/benchmarks"
+    history = await runs.client.get(dashboard_path, params=scope | {"days": "30", "limit": "1"})
+    assert history.status_code == 200, history.text
+    dashboard = history.json()
+    assert dashboard["total"] == 4 and dashboard["next_offset"] == 1
+    assert dashboard["suite_id"] == suite["id"]
+    assert len(dashboard["runs"]) == 1
+    assert sum(arm["planned"] for arm in dashboard["arms"]) == 48
+    assert sum(pair["excluded_judge_changed"] for pair in dashboard["comparisons"]) == 1
+    assert sum(pair["unjudged"] for pair in dashboard["comparisons"]) == 6
+    assert {row["revision"] for row in dashboard["revisions"]} == {base, proposed}
+    assert "TASK_PROMPT" not in history.text and "fixture-gateway" not in history.text
+    assert (await runs.client.get(dashboard_path, params=scope | {"suite_id": str(uuid4())})).status_code == 404
     return project

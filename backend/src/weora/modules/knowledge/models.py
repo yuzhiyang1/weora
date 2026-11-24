@@ -89,6 +89,63 @@ class KnowledgeWorkflowDecision(Base):
     decided_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
+class KnowledgeWorkflowScore(Base):
+    """保存团队上报的原始判定快照，重评追加记录，导入者独立留痕。"""
+
+    __tablename__ = "knowledge_workflow_scores"
+    __table_args__ = (
+        Index("ix_knowledge_workflow_scores_window", "workspace_id", "project_id", "scored_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    workspace_id: Mapped[UUID] = mapped_column(ForeignKey("workspaces.id"))
+    project_id: Mapped[UUID | None] = mapped_column(ForeignKey("projects.id"))
+    label_key: Mapped[str] = mapped_column(String(64))
+    scored_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    imported_by: Mapped[UUID] = mapped_column(ForeignKey("users.id"))
+    imported_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    payload: Mapped[dict[str, object]] = mapped_column(JSON())
+
+
+class WorkflowScoreSyncSource(Base):
+    """每个报表范围绑定一个已授权连接，记录租约和最后成功的分支快照。"""
+
+    __tablename__ = "knowledge_workflow_score_sync_sources"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "scope_key", name="uq_workflow_score_sync_scope"),
+        Index("ix_workflow_score_sync_due", "enabled", "next_sync_at"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True)
+    workspace_id: Mapped[UUID] = mapped_column(ForeignKey("workspaces.id"))
+    scope_key: Mapped[str] = mapped_column(String(36))
+    source_project_id: Mapped[UUID] = mapped_column(ForeignKey("projects.id"))
+    repository_id: Mapped[UUID] = mapped_column(ForeignKey("project_repositories.id"))
+    connection_version: Mapped[int]
+    configured_by: Mapped[UUID] = mapped_column(ForeignKey("users.id"))
+    configured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    version: Mapped[int]
+    enabled: Mapped[bool]
+    revision: Mapped[str | None] = mapped_column(String(64))
+    synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    next_sync_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    lease_id: Mapped[UUID | None]
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    error_code: Mapped[str | None] = mapped_column(String(80))
+
+
+class WorkflowScoreSyncFile(Base):
+    """保存同步快照中的报表文件与其归一化标签，不保存仓库原文。"""
+
+    __tablename__ = "knowledge_workflow_score_sync_files"
+
+    source_id: Mapped[UUID] = mapped_column(ForeignKey("knowledge_workflow_score_sync_sources.id"), primary_key=True)
+    path: Mapped[str] = mapped_column(String(280), primary_key=True)
+    oid: Mapped[str] = mapped_column(String(64))
+    month: Mapped[str] = mapped_column(String(7))
+    labels: Mapped[list[dict[str, object]]] = mapped_column(JSON())
+
+
 class KnowledgeEntry(Base):
     __tablename__ = "knowledge_entries"
     __table_args__ = (

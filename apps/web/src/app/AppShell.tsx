@@ -10,6 +10,8 @@ import {
   ChevronDown,
   ChevronsLeft,
   ChevronsRight,
+  ChartLine,
+  FlaskConical,
   FolderGit2,
   Inbox,
   GitBranch,
@@ -22,6 +24,8 @@ import {
   Search,
   Settings2,
   Sun,
+  TrendingUp,
+  Gauge,
   Users,
   X,
   type LucideIcon,
@@ -80,6 +84,20 @@ const sections: { label: string; items: NavigationItem[] }[] = [
       { label: "Agent", path: "/agents", icon: Bot },
       { label: "Skills", path: "/skills", icon: Puzzle },
       { label: "飞书上下文", path: "/context", icon: Settings2 },
+    ],
+  },
+  {
+    label: "评估",
+    items: [
+      { label: "评分器", path: "/scorers", icon: Gauge },
+      { label: "基准测试", path: "/benchmarks", icon: FlaskConical },
+    ],
+  },
+  {
+    label: "改进",
+    items: [
+      { label: "改进中心", path: "/improvement", icon: ChartLine },
+      { label: "自我改进", path: "/self-improvement", icon: TrendingUp },
     ],
   },
   {

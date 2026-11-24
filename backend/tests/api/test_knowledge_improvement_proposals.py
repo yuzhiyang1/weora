@@ -136,8 +136,24 @@ async def exercise_improvement(
     assert "smallest example" in revision["changes"][0]["content"]
     coverage = (await runs.client.get(f"{root}/self-improvement/candidates", params=params)).json()
     assert sum(item["task"] is not None for item in coverage["subjects"]) == 3
+    dashboard_path = f"{root}/dashboard/self-improvement"
+    dashboard = await runs.client.get(dashboard_path, params=params)
+    assert dashboard.status_code == 200, dashboard.text
+    view = dashboard.json()
+    assert view["summary"]["open"] == view["total"] == 1
+    assert view["summary"]["tasks"] == 3
+    assert view["items"][0]["revision"] == 2 and view["items"][0]["id"] == identifier
+    assert view["items"][0]["resources"] == ["rules/review.md"]
+    assert view["items"][0]["proof"] is None and "smallest example" not in dashboard.text
+    scoring = await runs.client.get(f"{root}/dashboard/scorers", params=scope | {"days": "180"})
+    assert scoring.status_code == 200, scoring.text
+    assert scoring.json()["window"]["days"] == 180
+    cohorts = scoring.json()["cohorts"]
+    assert any(cohort["scorer"] == "review-quality" and cohort["driver"] == "human"
+               and any(item["value"] == "fail" for item in cohort["labels"]) for cohort in cohorts)
     async with member(runs, "提案只读测试") as (teammate, _):
         assert (await teammate.get(detail, params=scope)).status_code == 403
+        assert (await teammate.get(dashboard_path, params=scope)).status_code == 403
         assert (await teammate.get(resume, params=first_operation)).status_code == 403
     result = await runs.client.put(f"{root}/benchmark/proposals/{identifier}", params=scope, headers=headers,
                                    json={"status": "merged"})

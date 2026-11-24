@@ -48,6 +48,15 @@ class RepositoryReader(Protocol):
 
 
 @dataclass(frozen=True, slots=True)
+class ReportRepository:
+    """已通过检查的仓库连接。只有同步 Worker 需要解密的 Git 读取身份。"""
+
+    name: str
+    connection_version: int
+    source: RepositorySource | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class RepositoryBlob:
     """固定提交中的普通文本候选，目录、符号链接和子模块不作为源码。"""
 

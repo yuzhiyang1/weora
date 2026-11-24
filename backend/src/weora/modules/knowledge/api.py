@@ -41,6 +41,7 @@ from weora.modules.knowledge.benchmark import (
     suite_coverage,
 )
 from weora.modules.knowledge.benchmark_models import AssetEdit, BenchmarkExecutionProfile, BenchmarkTool, TrialOutcome
+from weora.modules.knowledge.benchmark_reports import benchmark_dashboard
 from weora.modules.knowledge.benchmark_runs import (
     MAX_TRIALS,
     BenchmarkPlanInput,
@@ -89,6 +90,7 @@ from weora.modules.knowledge.improvement_proposals import (
     save_improvement,
     writable_asset,
 )
+from weora.modules.knowledge.improvement_reports import self_improvement_dashboard
 from weora.modules.knowledge.local_source import MAX_LOCAL_BODY_BYTES, LocalCodeSnapshot
 from weora.modules.knowledge.models import ScorerFile, ScorerLabel, TranscriptTurn
 from weora.modules.knowledge.named_scoring import (
@@ -115,6 +117,7 @@ from weora.modules.knowledge.queued_recall import QueuedLearning
 from weora.modules.knowledge.recall_check import empty_check
 from weora.modules.knowledge.report import digest as knowledge_digest
 from weora.modules.knowledge.report import health as knowledge_health
+from weora.modules.knowledge.report import improvement_dashboard
 from weora.modules.knowledge.resource_paths import normalize_resource_path
 from weora.modules.knowledge.routing_evidence import (
     MAX_ROUTING_SKILLS,
@@ -194,6 +197,10 @@ from weora.modules.knowledge.workflow_runs import draft as draft_workflow
 from weora.modules.knowledge.workflow_runs import find as find_workflow_run
 from weora.modules.knowledge.workflow_runs import finish_session as finish_workflow_session
 from weora.modules.knowledge.workflow_runs import start as start_workflow
+from weora.modules.knowledge.workflow_score_report import GroupBy as WorkflowScoreGroup
+from weora.modules.knowledge.workflow_score_report import workflow_score_dashboard
+from weora.modules.knowledge.workflow_score_sync import configure_sync, sync_status
+from weora.modules.knowledge.workflow_scores import WorkflowScoreImport, import_workflow_scores
 from weora.modules.knowledge.workflow_versions import configure as configure_workflow
 from weora.modules.knowledge.workflow_versions import latest as latest_workflow
 from weora.modules.knowledge.workflow_versions import view as workflow_view
@@ -2177,6 +2184,85 @@ async def digest_report(store: Store, include_shared: bool = False) -> dict[str,
 @router.get("/digest/failures")
 async def digest_failures(store: Store, limit: Annotated[int, Query(ge=1, le=100)] = 50) -> dict[str, object]:
     return await scoring_failures(store, limit)
+
+
+@router.get("/dashboard/improvement")
+async def team_improvement_report(
+    store: Store, days: Literal["7", "30", "90"] = "30", limit: Annotated[int, Query(ge=1, le=50)] = 10,
+) -> dict[str, object]:
+    store.require_reviewer()
+    return await improvement_dashboard(store.db, store.scope, int(days), limit)
+
+
+@router.get("/dashboard/scorers")
+async def scorer_dashboard_report(
+    store: Store, days: Literal["7", "30", "90", "180"] = "30", limit: Annotated[int, Query(ge=1, le=100)] = 30,
+) -> dict[str, object]:
+    return await scoring_failures(store, limit, days=int(days), dashboard=True)
+
+
+@router.get("/dashboard/scorers/workflow")
+async def workflow_scorer_dashboard_report(
+    request: Request, store: Store, days: Literal["7", "30", "90", "180"] = "30",
+    scorer: Annotated[str, Query(min_length=1, max_length=256)] | None = None,
+    cohort: Annotated[str, Query(pattern=r"^[a-f0-9]{64}$")] | None = None,
+    group_by: WorkflowScoreGroup | None = None,
+    group: Annotated[str, Query(pattern=r"^[a-f0-9]{64}$")] | None = None,
+    limit: Annotated[int, Query(ge=1, le=1000)] = 25,
+) -> dict[str, object]:
+    return await workflow_score_dashboard(
+        store, cast(ProjectService, request.app.state.project_service),
+        days=int(days), scorer=scorer, cohort=cohort, group_by=group_by, group=group, limit=limit,
+    )
+
+
+@router.post("/dashboard/scorers/workflow/import")
+async def import_workflow_scorer_report(store: Store, payload: WorkflowScoreImport) -> dict[str, int]:
+    return await import_workflow_scores(store, payload)
+
+
+class WorkflowScoreSyncInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_version: int = Field(ge=0)
+    enabled: bool
+    source_project_id: UUID | None = None
+    repository_id: UUID | None = None
+
+
+@router.get("/dashboard/scorers/workflow/sync")
+async def workflow_score_sync_status(request: Request, store: Store) -> dict[str, object]:
+    return await sync_status(
+        store, cast(ProjectService, request.app.state.project_service),
+        available=request.app.state.workflow_score_sync is not None,
+    )
+
+
+@router.put("/dashboard/scorers/workflow/sync")
+async def set_workflow_score_sync(request: Request, store: Store, payload: WorkflowScoreSyncInput) -> dict[str, object]:
+    return await configure_sync(
+        store, cast(ProjectService, request.app.state.project_service),
+        expected_version=payload.expected_version, enabled=payload.enabled,
+        project=payload.source_project_id, repository=payload.repository_id,
+        available=request.app.state.workflow_score_sync is not None,
+    )
+
+
+@router.get("/dashboard/self-improvement")
+async def self_improvement_dashboard_report(
+    store: Store, scorer: ScorerName | None = None, limit: Annotated[int, Query(ge=1, le=50)] = 20,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> dict[str, object]:
+    store.require_reviewer()
+    return await self_improvement_dashboard(store, scorer, limit, offset)
+
+
+@router.get("/dashboard/benchmarks")
+async def benchmark_dashboard_report(
+    store: Store, suite_id: UUID | None = None, days: Literal["30", "90", "365"] = "90",
+    limit: Annotated[int, Query(ge=1, le=100)] = 20, offset: Annotated[int, Query(ge=0)] = 0,
+) -> dict[str, object]:
+    return await benchmark_dashboard(store, suite_id, int(days), limit, offset)
 
 
 @router.get("/self-improvement/candidates")
