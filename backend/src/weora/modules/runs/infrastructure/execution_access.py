@@ -11,6 +11,7 @@ from weora.modules.context.service import ContextService
 from weora.modules.delivery.application.service import DeliveryService
 from weora.modules.delivery.domain.models import ArtifactRecord, DeliveryError
 from weora.modules.identity.application.service import IdentityService
+from weora.modules.knowledge.feishu_revisions import FEISHU_REVISION_TOOLS, is_feishu_revision_request
 from weora.modules.runs.application.execution import RuntimeFailure, RuntimeInput
 from weora.modules.runs.application.harness import NATIVE_RUNTIMES
 from weora.modules.runs.application.ports import ProjectContextCatalog, RunActor, RunRecord, RunsUnitOfWorkFactory
@@ -330,6 +331,15 @@ class ModulesExecutionAccess:
             )
         runtime_id = run.execution_profile.runtime_id if run.execution_profile else None
         tools = self._gateway.specifications_for_runtime(runtime_id) if self._gateway else ()
+        if is_feishu_revision_request(task) and not run.recovery_read_only:
+            prompt += (
+                "\n用户已明确要求更新项目知识库。用 knowledge.find_revision_target 定位原条目并读取基准正文，"
+                "只替换能依据本轮请求或被引用消息确定的一处规则。条目或决定不明确时，先请用户补充，不猜测。"
+                "用 knowledge.submit_revision 送审，不修改原 PRD。"
+                "只在工具返回真实回执后告知条目和审核状态；群回复不要回显已有条目的正文。"
+            )
+        else:
+            tools = tuple(tool for tool in tools if tool.name not in FEISHU_REVISION_TOOLS)
         if run.recovery_read_only:
             tools = tuple(tool for tool in tools if tool.effect == "read")
             prompt += "\n本次为人工选择的只读恢复，禁止修改、执行命令、提交计划或远端交付；未知写结果只解释证据。"

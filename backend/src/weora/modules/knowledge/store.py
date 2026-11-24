@@ -116,6 +116,7 @@ from weora_code_graph.iwiki_links import CodeEvidence, CodeLink
 from weora_code_graph.reconcile import Page
 
 _ADOPTION_WINDOW = timedelta(hours=24)
+_CHANNEL_REVISION_KINDS = ("rule", "doc", "learning")
 
 
 class ProjectRecallSettings(TypedDict):
@@ -388,6 +389,76 @@ class KnowledgeStore:
 
     async def _lock_promotion_targets(self) -> None:
         await lock_knowledge_targets(self.db, self.scope.workspace, self.scope.project)
+
+    async def channel_revision_targets(
+        self, *, query: str = "", entry_id: UUID | None = None, offset: int = 0,
+    ) -> dict[str, object]:
+        """只向群任务提供本项目内、发起人可修订的发布版本。"""
+        scope = self.scope
+        if scope.project is None:
+            raise missing()
+        targets = published(scope).where(
+            KnowledgeEntry.project_id == scope.project,
+            KnowledgeEntry.codebase_id.is_(None),
+            KnowledgeEntry.kind.in_(_CHANNEL_REVISION_KINDS),
+        )
+        if not scope.can_review:
+            targets = targets.where(KnowledgeEntry.created_by == scope.user)
+        if entry_id is None:
+            hits = await rank_published(
+                self.db, targets, scope.workspace, query, recall=False, hidden=false(), with_coverage=False,
+            )
+            return {"items": [
+                {"id": str(hit.candidate.entry), "title": hit.candidate.title,
+                 "kind": hit.candidate.kind, "revision": hit.candidate.revision}
+                for hit in order_hits(hits, code_limit=None, authored_date=False)[:5]
+            ]}
+        row = (await self.db.execute(targets.where(KnowledgeEntry.id == entry_id))).one_or_none()
+        if row is None:
+            raise missing()
+        entry, version = row
+        end = offset + 12000
+        return {
+            "id": str(entry.id), "kind": entry.kind, "title": version.title, "revision": version.revision,
+            "body": version.body[offset:end], "next_offset": end if end < len(version.body) else None,
+        }
+
+    async def propose_channel_revision(
+        self, entry_id: UUID, base: int, operation: UUID, expected: str, replacement: str,
+        evidence: dict[str, str],
+    ) -> dict[str, object]:
+        """以发起人身份提交局部修订，原版本在审核通过前继续生效。"""
+        if self.scope.project is None:
+            raise missing()
+        entry = await self._entry(entry_id, exact_scope=True, refresh=True)
+        if entry.kind not in _CHANNEL_REVISION_KINDS or entry.codebase_id is not None:
+            raise missing()
+        if entry.created_by != self.scope.user and not self.scope.can_review:
+            raise KnowledgeError("KNOWLEDGE_FORBIDDEN", "只有作者或管理员可以提交修订。", 403)
+        # 保留已发布的基准供重放使用；新的提案仍由 contribute 核对当前发布指针和待审冲突。
+        baseline = await self.db.get(KnowledgeRevision, (entry.id, base))
+        if baseline is None or baseline.status != "published":
+            raise conflict("找不到所选的发布版本，请重新读取条目。")
+        start = baseline.body.find(expected)
+        if start < 0 or baseline.body.find(expected, start + 1) >= 0:
+            raise KnowledgeError("KNOWLEDGE_FRAGMENT_NOT_UNIQUE", "原片段必须在基准版本里恰好出现一次。", 422)
+        body = baseline.body[:start] + replacement + baseline.body[start + len(expected):]
+        if body == baseline.body or not body.strip() or len(body) > 64000 or "\x00" in body:
+            raise KnowledgeError("KNOWLEDGE_REVISION_BODY_INVALID", "修订正文无有效变化或超过长度限制。", 422)
+        paths: dict[str, list[str]] = defaultdict(list)
+        for link in await saved_declarations(self.db, baseline):
+            paths[link.kind].append(link.path)
+        related: dict[str, JsonValue] = {kind: list(values) for kind, values in paths.items()}
+        result = await self.contribute(Contribution(
+            operation_id=operation, kind=type_cast(KnowledgeKind, entry.kind),
+            title=baseline.title, body=body, tags=baseline.tags,
+            source={key: value for key, value in baseline.source.items() if not key.startswith("feishu_")} | evidence,
+            relations=baseline.relations, base_revision=base,
+            rule_paths=baseline.rule_paths if entry.kind == "rule" else None,
+            related=related or None,
+        ), entry.id)
+        # 群回复只需要回执，避免把正文或不同受众的关联条目带回飞书。
+        return {key: result[key] for key in ("id", "project_id", "title", "revision", "revision_status")}
 
     async def contribute(
         self, value: Contribution, entry_id: UUID | None = None, *,

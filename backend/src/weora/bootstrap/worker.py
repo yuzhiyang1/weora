@@ -30,6 +30,7 @@ from weora.modules.delivery.application.service import DeliveryService
 from weora.modules.delivery.domain.models import DeliveryError
 from weora.modules.delivery.infrastructure.docker import DockerSandbox
 from weora.modules.identity.application.service import IdentityService
+from weora.modules.knowledge.feishu_revisions import requests_knowledge_revision
 from weora.modules.knowledge.recall_journal import purge_recall_journal
 from weora.modules.runs.application.execution import (
     RunExecutor,
@@ -499,7 +500,12 @@ async def _pump_inbox(app: FastAPI) -> None:
         async def submit(actor: ContextActor, payload: Json) -> Json:
             coordinator = app.state.coordination_service
             if coordinator:
-                managed = await coordinator.ingest(actor, payload)
+                # 关闭自动接单时，显式知识修订由群发布的普通 Agent 处理。
+                knowledge_revision = (
+                    payload.get("mentioned") is True and bool(payload.get("project_id"))
+                    and requests_knowledge_revision(str(payload["instruction"]))
+                )
+                managed = await coordinator.ingest(actor, payload, ordinary_when_off=knowledge_revision)
                 if managed is not None:
                     return cast(Json, managed)
             if payload.get("addressed") is True and task_reference(str(payload["instruction"])) is not None:
@@ -528,6 +534,8 @@ async def _pump_inbox(app: FastAPI) -> None:
             if payload.get("project_id"):
                 # 普通/历史群任务保留原始指纹；只给新项目路由增加分享授权绑定。
                 origin.update(route_key=payload.get("route_key"), project_grant_id=payload.get("project_grant_id"))
+                if payload.get("mentioned") is True:
+                    origin["mentioned"] = True
             return await runs.submit_channel(
                 actor=RunActor(actor.user_id, actor.workspace_id),
                 agent_id=UUID(str(payload["agent_id"])),

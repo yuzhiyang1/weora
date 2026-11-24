@@ -8,7 +8,7 @@ from weora.modules.console_settings.domain import ModelConfiguration, SettingsAc
 from weora.modules.console_settings.service import ConsoleSettingsService
 from weora.modules.identity.application.service import IdentityService
 from weora.modules.runs.application.execution import RuntimeFailure
-from weora.modules.runs.application.harness import OMP_RUNTIME, PI_RUNTIME
+from weora.modules.runs.application.harness import NATIVE_RUNTIMES, OMP_RUNTIME, PI_RUNTIME
 from weora.modules.runs.application.ports import ExecutionProfile, RunActor
 
 
@@ -35,7 +35,8 @@ async def resolve_run_profile(
     deployment_key: str | None = None,
 ) -> tuple[ExecutionProfile, str]:
     """旧运行固定部署配置；有版本引用时绝不静默使用团队最新 Key。"""
-    if frozen is None or frozen.runtime_id not in {PI_RUNTIME, OMP_RUNTIME}:
+    # 提交端会按部署配置冻结原生 RPC 标识；后台仍要逐项核对模型和执行预算。
+    if frozen is None or frozen.runtime_id not in {PI_RUNTIME, OMP_RUNTIME, *NATIVE_RUNTIMES}:
         raise RuntimeFailure("MODEL_CONFIGURATION_MISMATCH")
     if frozen.configuration_id is None:
         # 无版本的历史运行保持部署配置，不被后来保存的控制台设置改变。

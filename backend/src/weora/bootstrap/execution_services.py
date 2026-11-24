@@ -42,6 +42,7 @@ from weora.modules.delivery.infrastructure.git import CliGitPublisher, Configure
 from weora.modules.delivery.infrastructure.github import GitHubDraftPullRequests, GitHubRemote, UnconfiguredPullRequests
 from weora.modules.delivery.infrastructure.github_tokens import GitHubAppTokens
 from weora.modules.delivery.infrastructure.persistence import SqlAlchemyDeliveryStore
+from weora.modules.knowledge.feishu_revisions import register_feishu_revision_tools
 from weora.modules.knowledge.tools import register_knowledge_tools
 from weora.modules.projects.domain import ProjectActor, ProjectError
 from weora.modules.projects.service import ProjectService
@@ -413,10 +414,14 @@ def configure_execution_services(app: FastAPI, settings: AppSettings, guard: Run
     tool_store = SqlAlchemyToolStore(sessions)
     gateway_access = GatewayModuleAccess(context_access, executions, context)
     gateway = ToolGateway(tool_store, gateway_access)
+    runs = cast(RunService, app.state.run_service)
+    projects = cast(ProjectService, app.state.project_service)
     register_knowledge_tools(
-        gateway, sessions, cast(RunService, app.state.run_service), cast(ProjectService, app.state.project_service),
+        gateway, sessions, runs, projects,
         cast(ObjectStoragePort | None, app.state.object_storage),
     )
+    if context is not None:
+        register_feishu_revision_tools(gateway, sessions, runs, projects, context)
     repository = ReadOnlyRepository(
         Path(settings.readonly_repository_path) if settings.readonly_repository_path else None
     )

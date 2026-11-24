@@ -465,7 +465,7 @@ class CoordinationService:
             workspace_id, (f"{connection_id}:{chat_id}:{thread_id or '-'}", f"{connection_id}:{chat_id}:-")
         )
 
-    async def ingest(self, actor: ContextActor, payload: Json) -> Json | None:
+    async def ingest(self, actor: ContextActor, payload: Json, *, ordinary_when_off: bool = False) -> Json | None:
         """由已完成身份绑定/来源校验/冻结路由的 Inbox 调用；不在接收 ACK 内调用模型。"""
         config = await self._matching(
             actor.workspace_id,
@@ -473,7 +473,7 @@ class CoordinationService:
             str(payload["chat_id"]),
             cast(str | None, payload.get("thread_id")),
         )
-        if config is None or not config.enabled:
+        if config is None or not config.enabled or (config.mode == "off" and ordinary_when_off):
             return None
         await self.context.authorize_channel(actor, UUID(config.source_id), str(payload["open_id"]))
         if payload.get("source_id") != config.source_id or payload.get("route_key") != config.route_key:

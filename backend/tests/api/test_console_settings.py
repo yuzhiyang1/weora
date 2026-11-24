@@ -3,6 +3,7 @@
 import base64
 import json
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from sys import executable
 from types import TracebackType
 from uuid import UUID, uuid4
@@ -22,7 +23,7 @@ from weora.modules.console_settings.domain import GitPreferences, ModelPreferenc
 from weora.modules.console_settings.store import SettingVersionModel
 from weora.modules.context.feishu import FernetSecrets
 from weora.modules.identity.infrastructure.models import WorkspaceMembershipModel
-from weora.modules.runs.application.harness import OMP_RUNTIME, PI_RUNTIME
+from weora.modules.runs.application.harness import OMP_RPC_RUNTIME, OMP_RUNTIME, PI_RPC_RUNTIME, PI_RUNTIME
 from weora.modules.runs.application.ports import ExecutionProfile, RunActor
 
 
@@ -89,6 +90,11 @@ async def test_model_key_is_write_only_versioned_and_cas_protected(runs: RunsHar
     fixed = model_profile(old, base)
     resolved, key = await resolve_run_profile(service, UUID(runs.workspace_id), fixed, base)
     assert resolved == fixed and key == "secret-first"
+    # 原生运行使用同一个已冻结的配置版本和凭据，不能被后保存的版本替换。
+    for runtime_id in (PI_RPC_RUNTIME, OMP_RPC_RUNTIME):
+        native = replace(fixed, runtime_id=runtime_id)
+        resolved, key = await resolve_run_profile(service, UUID(runs.workspace_id), native, base)
+        assert resolved == native and key == "secret-first"
     with pytest.raises(SettingsError):
         await service.resolve_model(uuid4(), frozen.configuration_id)
     async with runs.sessions() as session:
