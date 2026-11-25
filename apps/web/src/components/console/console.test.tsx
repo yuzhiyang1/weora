@@ -8,9 +8,21 @@ import {
 import userEvent from "@testing-library/user-event";
 import { createRef, useState } from "react";
 
-import { Button, Checkbox, Input, Modal, Select, TextArea } from "./index";
+import { Button, Checkbox, Input, Modal, Select, Table, TextArea } from "./index";
 
 afterEach(cleanup);
+
+it("数字型报表记录的主键不会与表格列冲突", () => {
+  render(
+    <Table
+      rowKey="id"
+      columns={[{ title: "标签", dataIndex: "label" }, { title: "分数", dataIndex: "score" }]}
+      dataSource={[{ id: 1, label: "needs-review", score: 0.5 }]}
+    />,
+  );
+  expect(screen.getByRole("columnheader", { name: "分数" })).toBeInTheDocument();
+  expect(screen.getByRole("rowheader", { name: "needs-review" })).toBeInTheDocument();
+});
 
 it("密码模式不会退化成明文，草稿文本域保留真实 ref", () => {
   const ref = createRef<HTMLTextAreaElement>();

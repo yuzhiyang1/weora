@@ -7,8 +7,12 @@ import os
 import re
 import sqlite3
 import subprocess
+import sys
+from contextlib import suppress
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import cast
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
@@ -27,23 +31,53 @@ from weora_cli.collab_client import (
     paired_client,
     read_config,
 )
+from weora_cli.collab_native import NATIVE
 from weora_cli.commands import JsonValue
+from weora_cli.knowledge_activity import publish as publish_activity
+from weora_cli.knowledge_unattended import drain as drain_unattended
+from weora_cli.knowledge_unattended import task_environment
 from weora_cli.skill_adapters import TOOLS, USER_ONLY, destination, install_hook, launch, skill_roots, tool_home
-from weora_cli.skill_local import change_files, conflict, database, inventory, now, queue, recover, temporary_package
+from weora_cli.skill_local import (
+    change_files,
+    conflict,
+    database,
+    inventory,
+    is_current_binding,
+    now,
+    queue,
+    recover,
+    temporary_package,
+    unpack,
+)
 from weora_cli.skill_upload import push
 
 _SLUG = re.compile(r"[a-z0-9][a-z0-9-]{0,63}\Z")
 _DEVICE_REVOKED = {"SKILL_DEVICE_NOT_AUTHORIZED", "AGENT_DEVICE_UNAUTHORIZED"}
 
 
+@dataclass(frozen=True)
 class SkillClient(Client):
+    project_id: str | None = None
+
+    def _scoped_path(self, path: str) -> str:
+        if self.project_id is None:
+            return path
+        separator = "&" if "?" in path else "?"
+        return path + separator + urlencode({"project_id": self.project_id})
+
+    def request(
+        self, method: str, path: str, data: dict[str, JsonValue] | None = None, *, key: str | None = None,
+    ) -> dict[str, JsonValue]:
+        return super().request(method, self._scoped_path(path), data, key=key)
+
     @property
     def path(self) -> str:
         return f"{self.base.rstrip('/')}/api/v1/workspaces/{self.workspace}/skill-distribution"
 
     def download(self, version_id: str, expected: str, output: Path) -> None:
         version = UUID(version_id)
-        request = Request(self.path + f"/versions/{version}/package", headers={"Authorization": f"Bearer {self.token}"})
+        path = self._scoped_path(f"/versions/{version}/package")
+        request = Request(self.path + path, headers={"Authorization": f"Bearer {self.token}"})
         checksum = hashlib.sha256()
         size = 0
         try:
@@ -75,13 +109,6 @@ def project_root(path: Path) -> Path:
     return Path(os.fsdecode(result.stdout.strip())).resolve()
 
 
-def is_current_binding(binding: sqlite3.Row, config: dict[str, JsonValue]) -> bool:
-    """Skill 文件和队列会留在本机，只有当前登录设备可使用对应绑定。"""
-    return (binding["base"], binding["workspace"], binding["device"]) == (
-        config.get("base"), config.get("workspace"), config.get("device_id")
-    )
-
-
 def client_for(binding: sqlite3.Row) -> SkillClient:
     if not is_current_binding(binding, read_config()):
         raise CollabError("SKILL_DEVICE_NOT_PAIRED", "请登录后重新运行 weora skill bind 绑定此范围。")
@@ -92,51 +119,77 @@ def client_for(binding: sqlite3.Row) -> SkillClient:
         os.environ.get("WEORA_COLLAB_URL", base).rstrip("/"),
         os.environ.get("WEORA_COLLAB_WORKSPACE", workspace),
     ):
-        return SkillClient(base, workspace, override)
+        return SkillClient(base, workspace, override, project_id=binding["project_id"])
 
     token = keyring.get_password(SERVICE, f"{base}/{workspace}/{device}")
     if not token:
         raise CollabError("SKILL_DEVICE_NOT_PAIRED", "系统钥匙串找不到绑定设备，请重新配对。")
-    return SkillClient(base, workspace, token)
+    return SkillClient(base, workspace, token, project_id=binding["project_id"])
+
+
+def _binding(db: sqlite3.Connection, runtime: str, scope: str, root: str, profile: str) -> sqlite3.Row | None:
+    row = db.execute(
+        "SELECT * FROM binding WHERE root=? AND runtime=? AND scope=? AND profile=?",
+        (root, runtime, scope, profile),
+    ).fetchone()
+    return cast(sqlite3.Row | None, row)
 
 
 def lookup(db: sqlite3.Connection, runtime: str, scope: str, root: str) -> sqlite3.Row:
-    row = db.execute(
-        "SELECT * FROM binding WHERE root=? AND runtime=? AND scope=? AND profile=?",
-        (root, runtime, scope, str(tool_home(runtime))),
-    ).fetchone()
+    row = _binding(db, runtime, scope, root, str(tool_home(runtime)))
     if row is None:
         raise CollabError("SKILL_NOT_BOUND", "请先运行 weora skill bind 绑定此安装范围。")
-    return cast(sqlite3.Row, row)
+    return row
+
+
+def _checkout_project(db: sqlite3.Connection, root: str) -> tuple[str, str, str] | None:
+    # 同一 Git 根目录的工具可能共享 Skill 路径，项目选择必须在目录级一致。
+    row = db.execute(
+        "SELECT base, workspace, project_id FROM binding WHERE root=? AND scope='project' AND project_id IS NOT NULL",
+        (root,),
+    ).fetchone()
+    return (row["base"], row["workspace"], row["project_id"]) if row is not None else None
 
 
 def _manifest(client: SkillClient, runtime: str, scope: str) -> dict[str, JsonValue]:
     return client.request("GET", "/manifest?" + urlencode({"runtime": runtime, "scope": scope}))
 
 
-def bind(runtime: str, scope: str, root: str) -> dict[str, JsonValue]:
+def bind(runtime: str, scope: str, root: str, *, project_id: UUID | None = None) -> dict[str, JsonValue]:
+    if project_id is not None and scope != "project":
+        raise CollabError("SKILL_PROJECT_SCOPE_REQUIRED", "项目 Skill 只能绑定项目目录。")
     current = paired_client()
-    client = SkillClient(current.base, current.workspace, current.token)
-    manifest = _manifest(client, runtime, scope)
-    if manifest.get("complete") is not True:
-        raise CollabError("SKILL_MANIFEST_INCOMPLETE", "服务端返回的分发清单不完整。")
-    device_id = str(UUID(str(manifest["device_id"])))
     profile = str(tool_home(runtime))
+    with database() as db:
+        checkout = _checkout_project(db, root)
+    project = str(project_id) if project_id is not None else checkout[2] if checkout else None
+    identity = (current.base, current.workspace, project)
+    if checkout is not None and checkout != identity:
+        raise CollabError("SKILL_BINDING_CONFLICT", "当前目录已绑定其他 Weora 项目。")
+    client = SkillClient(current.base, current.workspace, current.token, project_id=project)
+    manifest = _manifest(client, runtime, scope)
+    if manifest.get("complete") is not True or manifest.get("project_id") != project:
+        raise CollabError("SKILL_MANIFEST_INCOMPLETE", "分发清单不完整或所属项目不一致。")
+    device_id = str(UUID(str(manifest["device_id"])))
     with database() as db, db:
         db.execute("BEGIN IMMEDIATE")
-        row = db.execute(
-            "SELECT * FROM binding WHERE root=? AND runtime=? AND scope=? AND profile=?",
-            (root, runtime, scope, profile),
-        ).fetchone()
+        checkout = _checkout_project(db, root)
+        if checkout is not None and checkout != identity:
+            raise CollabError("SKILL_BINDING_CONFLICT", "当前目录已绑定其他 Weora 项目。")
+        row = _binding(db, runtime, scope, root, profile)
         if row and (row["base"], row["workspace"]) != (client.base, client.workspace):
             raise CollabError("SKILL_BINDING_CONFLICT", "当前范围已绑定其他服务或工作空间。")
-        if row and row["device"] != device_id:
-            _rebind_device(db, row, device_id)
-        if not row:
+        if row:
+            if row["device"] != device_id:
+                _rebind_device(db, row, device_id)
+            if row["project_id"] != project:
+                _require_idle_binding(db, row)
+                db.execute("UPDATE binding SET project_id=? WHERE id=?", (project, row["id"]))
+        else:
             db.execute(
-                "INSERT INTO binding(id, root, runtime, scope, profile, base, workspace, device) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (str(uuid4()), root, runtime, scope, profile, client.base, client.workspace, device_id),
+                "INSERT INTO binding(id, root, runtime, scope, profile, base, workspace, device, project_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (str(uuid4()), root, runtime, scope, profile, client.base, client.workspace, device_id, project),
             )
     hook = install_hook(runtime)
     with database() as db:
@@ -145,6 +198,7 @@ def bind(runtime: str, scope: str, root: str) -> dict[str, JsonValue]:
             "workspace": client.workspace,
             "server": client.base,
             "scope": scope,
+            "project_id": project,
             "target": str(destination(runtime, Path(root) if root else None)),
             "sync": pull(db, lookup(db, runtime, scope, root), client),
         }
@@ -154,14 +208,18 @@ def _installations(db: sqlite3.Connection, binding: sqlite3.Row) -> dict[str, sq
     return {row["slug"]: row for row in db.execute("SELECT * FROM installation WHERE binding=?", (binding["id"],))}
 
 
-def _rebind_device(db: sqlite3.Connection, binding: sqlite3.Row, device_id: str) -> None:
-    """同空间重新登录后重新登记已有副本，旧设备的离线记录不得归给新身份。"""
+def _require_idle_binding(db: sqlite3.Connection, binding: sqlite3.Row) -> None:
     cutoff = (datetime.now(UTC) - timedelta(minutes=10)).isoformat()
     if db.execute(
         "SELECT 1 FROM sync_lease WHERE binding=? AND acquired_at>=?",
         (binding["id"], cutoff),
     ).fetchone():
         raise CollabError("SKILL_SYNC_IN_PROGRESS", "当前正在同步 Skill，请完成后重新绑定。")
+
+
+def _rebind_device(db: sqlite3.Connection, binding: sqlite3.Row, device_id: str) -> None:
+    """同空间重新登录后重新登记已有副本，旧设备的离线记录不得归给新身份。"""
+    _require_idle_binding(db, binding)
     recover(db)
     db.execute("DELETE FROM pending WHERE binding=?", (binding["id"],))
     db.execute("UPDATE binding SET device=?, usage=0, checked=NULL WHERE id=?", (device_id, binding["id"]))
@@ -324,8 +382,17 @@ def _install_locked(
         raise conflict(target)
     actual = inventory(target) if target.exists() else None
     known = [r for r in [row, *siblings] if r and actual == json.loads(r["files"])]
+    matches_release = False
     if target.exists() and not known:
-        raise conflict(target)
+        if row is None or row["version_id"] == version_id:
+            raise conflict(target)
+        if package is None:
+            raise _DownloadRequired
+        # 本地编辑已经和团队发布版完全相同，登记该版本即可，避免覆盖已审核的本地文件。
+        with TemporaryDirectory(dir=package.parent) as staging:
+            matches_release = unpack(package, Path(staging), slug) == actual
+        if not matches_release:
+            raise conflict(target)
     root = Path(binding["root"]) if binding["root"] else None
     if any(
         path != target.parent and (path / slug / "SKILL.md").exists()
@@ -333,7 +400,7 @@ def _install_locked(
     ):
         raise conflict(target)
     db.execute("DELETE FROM excluded WHERE binding=? AND slug=?", (binding["id"], slug))
-    ready = any(r["digest"] == expected for r in known)
+    ready = matches_release or any(r["digest"] == expected for r in known)
     if ready and row and row["version_id"] == version_id:
         db.execute("UPDATE installation SET pinned=? WHERE binding=? AND slug=?", (pinned, binding["id"], slug))
         return "current"
@@ -469,6 +536,9 @@ def pull(
     owner = uuid4().hex
     with db:
         db.execute("BEGIN IMMEDIATE")
+        saved = db.execute("SELECT project_id FROM binding WHERE id=?", (binding["id"],)).fetchone()
+        if saved is None or saved["project_id"] != binding["project_id"]:
+            raise CollabError("SKILL_BINDING_CONFLICT", "项目绑定已更新，请重试同步。")
         cutoff = (datetime.now(UTC) - timedelta(minutes=10)).isoformat()
         db.execute("DELETE FROM sync_lease WHERE binding=? AND acquired_at<?", (binding["id"], cutoff))
         if not db.execute(
@@ -497,13 +567,20 @@ def _pull_locked(
     owner: str,
     manifest: dict[str, JsonValue] | None,
 ) -> dict[str, JsonValue]:
-    # 只有完整的同设备清单才允许清理本机已撤回的副本。
+    """在同步租约下应用完整分发清单，并上报每项变更与待发回执。"""
+    # 只有同设备、同项目的完整清单才允许清理本机副本。
     manifest = manifest or _manifest(client, binding["runtime"], binding["scope"])
-    if manifest.get("complete") is not True or manifest.get("device_id") != binding["device"]:
-        raise CollabError("SKILL_MANIFEST_INCOMPLETE", "分发清单不完整或设备身份不一致。")
+    if (
+        manifest.get("complete") is not True
+        or manifest.get("device_id") != binding["device"]
+        or manifest.get("project_id") != binding["project_id"]
+    ):
+        raise CollabError("SKILL_MANIFEST_INCOMPLETE", "分发清单不完整或绑定范围不一致。")
     desired = {str(entry["slug"]): entry for entry in items(manifest)}
     current = _installations(db, binding)
     excluded = {row[0] for row in db.execute("SELECT slug FROM excluded WHERE binding=?", (binding["id"],))}
+
+    # 每处理一个 Skill 前续租。失去租约时停止，避免继续覆盖新的同步结果。
     changes: dict[str, JsonValue] = {}
     for slug in sorted(desired.keys() | current.keys()):
         with db:
@@ -519,15 +596,22 @@ def _pull_locked(
             elif slug not in excluded and not (row and row["pinned"]):
                 changes[slug] = install(db, binding, client, desired[slug], pinned=False, following=True)
         except CollabError as exc:
-            if exc.code != "SKILL_LOCAL_CONFLICT":
+            if exc.code == "SKILL_ARCHIVE_INVALID":
+                # 单个历史包路径不兼容时，记录该包失败并继续同步其他项目资产。
+                changes[slug] = {"status": "failed", "code": exc.code, "message": str(exc)}
+            elif exc.code == "SKILL_LOCAL_CONFLICT":
+                changes[slug] = {"status": "conflict", "message": str(exc)}
+            else:
                 raise
-            changes[slug] = {"status": "conflict", "message": str(exc)}
+
+    # 分发清单的使用授权需落到本机绑定，回执在状态更新后再发出。
+    usage_enabled = manifest.get("usage_enabled") is True
     with db:
         db.execute(
             "UPDATE binding SET checked=?, usage=? WHERE id=?",
-            (now(), manifest.get("usage_enabled") is True, binding["id"]),
+            (now(), usage_enabled, binding["id"]),
         )
-    if manifest.get("usage_enabled") is not True:
+    if not usage_enabled:
         disable_usage(db, binding)
     return {"changes": changes, "reported": flush(db, binding, client)}
 
@@ -542,17 +626,22 @@ def arguments(parser: argparse.ArgumentParser) -> None:
     actions = parser.add_subparsers(dest="action", required=True)
     upload = actions.add_parser("push", aliases=["upload"], help="向当前工作空间提交 Skill 包。")
     upload.add_argument("path", help="包含 SKILL.md 的目录，或 .zip、.skill 文件")
+    upload.add_argument("--namespace", default="", help="团队目录，例如 engineering/release")
+    upload.add_argument("--project-id", type=UUID, help="将 Skill 提交到指定 Weora 项目")
     for action in ("bind", "pull", "install", "update", "follow", "uninstall", "status", "install-hook", "launch"):
         command = actions.add_parser(action)
         command.add_argument("--runtime", choices=TOOLS, required=True)
         command.add_argument("--scope", choices=("project", "user"), default="project")
         command.add_argument("--project", default=".")
+        if action == "bind":
+            command.add_argument("--project-id", type=UUID, help="将当前仓库绑定到指定 Weora 项目")
         if action in {"install", "update", "follow", "uninstall"}:
             command.add_argument("skill")
         if action == "update":
             command.add_argument("--to")
         if action == "launch":
             command.add_argument("--executable", help="原生工具的启动程序路径")
+            command.add_argument("--unattended", action="store_true", help="原生进程退出后同步结束本次任务的会话")
             command.add_argument("host_args", nargs=argparse.REMAINDER)
     usage = actions.add_parser("usage").add_subparsers(dest="usage_action", required=True)
     drain = usage.add_parser("flush")
@@ -566,12 +655,12 @@ def arguments(parser: argparse.ArgumentParser) -> None:
 
 def execute(args: argparse.Namespace) -> JsonValue:
     if args.action in {"push", "upload"}:
-        return push(args.path)
+        return push(args.path, project=args.project_id, namespace=args.namespace)
     if args.action == "install-hook":
         return install_hook(args.runtime)
     scope, root = _binding_scope(args)
     if args.action == "bind":
-        return bind(args.runtime, scope, root)
+        return bind(args.runtime, scope, root, project_id=args.project_id)
     with database() as db:
         binding = lookup(db, args.runtime, scope, root)
         if args.action == "status":
@@ -584,6 +673,7 @@ def execute(args: argparse.Namespace) -> JsonValue:
                 "last_checked": binding["checked"],
                 "last_sync": json.loads(result["payload"]) if result else None,
                 "usage_enabled": bool(binding["usage"]),
+                "project_id": binding["project_id"],
                 "profile": binding["profile"],
                 "pending": db.execute("SELECT count(*) FROM pending WHERE binding=?", (binding["id"],)).fetchone()[0],
             }
@@ -593,7 +683,13 @@ def execute(args: argparse.Namespace) -> JsonValue:
         if args.action == "usage":
             return {"reported": flush(db, binding, client)}
         if args.action == "pull":
-            return pull(db, binding, client)
+            result = pull(db, binding, client)
+            if result.get("status") != "sync_in_progress":
+                with suppress(OSError, ValueError, CollabError):
+                    activity = publish_activity(client, Path(root) if root else Path.cwd())
+                    if activity is not None:
+                        result["activity"] = activity
+            return result
         slug, _, pin = args.skill.partition("@")
         if args.action == "update":
             pin = args.to or pin
@@ -612,13 +708,32 @@ def execute(args: argparse.Namespace) -> JsonValue:
 
 
 def launch_bound(args: argparse.Namespace) -> int:
+    unattended = getattr(args, "unattended", False)
+    if unattended and args.runtime not in NATIVE:
+        raise CollabError("KNOWLEDGE_DRAIN_RUNTIME", "无人值守结束流程支持 Codex 和 Claude Code。")
     scope, root = _binding_scope(args)
     with database() as db:
         binding = lookup(db, args.runtime, scope, root)
+        client = client_for(binding)
         try:
-            pull(db, binding, client_for(binding))
+            pull(db, binding, client)
         except CollabError as exc:
             if exc.code != "WEORA_UNREACHABLE":
                 raise
     host_args = args.host_args[1:] if args.host_args[:1] == ["--"] else args.host_args
-    return launch(args.runtime, host_args, Path(args.project).resolve(), args.executable)
+    cwd = Path(args.project).resolve()
+    if not unattended:
+        return launch(args.runtime, host_args, cwd, args.executable)
+
+    task = uuid4()
+    code = launch(args.runtime, host_args, cwd, args.executable, env=task_environment(task))
+    # 保留原生工具的标准输出和退出码。结束报告单独写 stderr，供任务运行器读取。
+    device = Client(client.base, client.workspace, client.token)
+    options = argparse.Namespace(project=None, run_mode="unattended", limit=20, bound=False)
+    try:
+        closed = drain_unattended(device, cwd, options, task=str(task))
+    except (CollabError, OSError, ValueError) as error:
+        result = error.code if isinstance(error, CollabError) else "KNOWLEDGE_DRAIN_PENDING"
+        closed = {"drain_failed": True, "errors": [{"code": result}]}
+    print(json.dumps({"weora_unattended": closed}, ensure_ascii=False), file=sys.stderr)
+    return code

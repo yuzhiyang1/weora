@@ -30,9 +30,10 @@ import {
 } from "../../components/console/asset-controls";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState, type FormEvent } from "react";
-import { useParams } from "react-router-dom";
+import { useParams, useSearchParams } from "react-router-dom";
 
 import { useAuth } from "../auth/AuthProvider";
+import { listProjects, projectKey } from "../projects/api";
 import {
   getSkill,
   listSkillEvents,
@@ -41,6 +42,7 @@ import {
   replaceSkillDraft,
   setSkillArchived,
   skillDownloadUrl,
+  skillPagePath,
   SkillsApiError,
   type SkillDetail,
   type SkillDraft,
@@ -62,15 +64,26 @@ type DetailTab = "files" | "versions" | "activity" | "usage" | "contributions";
 export function SkillDetailPage() {
   const { principal } = useAuth();
   const { skillId } = useParams();
+  const [params] = useSearchParams();
   if (!principal || !skillId)
     throw new Error("Skill 详情缺少工作空间或资产标识");
-  // 切换资产或账号时丢弃旧弹窗状态，避免把文件或版本号提交到另一个 Skill。
+  const { workspace, user } = principal;
+  const projectId = params.get("project") || undefined;
+  const projects = useQuery({
+    queryKey: projectKey(workspace.id, user.id),
+    queryFn: () => listProjects(workspace.id),
+    enabled: Boolean(projectId),
+  });
+  const projectName = projects.data?.items.find((item) => item.id === projectId)?.name;
+  // 切换资产、账号或所属项目时，清除当前草稿与待审核弹窗。
   return (
     <SkillDetailContent
-      key={`${principal.workspace.id}:${principal.user.id}:${skillId}`}
-      workspaceId={principal.workspace.id}
+      key={`${workspace.id}:${user.id}:${projectId ?? "shared"}:${skillId}`}
+      workspaceId={workspace.id}
       skillId={skillId}
-      canWrite={["owner", "admin"].includes(principal.workspace.role)}
+      projectId={projectId}
+      projectName={projectName}
+      canWrite={["owner", "admin"].includes(workspace.role)}
     />
   );
 }
@@ -78,10 +91,14 @@ export function SkillDetailPage() {
 function SkillDetailContent({
   workspaceId,
   skillId,
+  projectId,
+  projectName,
   canWrite,
 }: {
   workspaceId: string;
   skillId: string;
+  projectId: string | undefined;
+  projectName: string | undefined;
   canWrite: boolean;
 }) {
   const queryClient = useQueryClient();
@@ -92,24 +109,24 @@ function SkillDetailContent({
   const [editOpen, setEditOpen] = useState(false);
 
   const detailQuery = useQuery({
-    queryKey: ["skill", workspaceId, skillId],
-    queryFn: () => getSkill(workspaceId, skillId),
+    queryKey: ["skill", workspaceId, skillId, projectId],
+    queryFn: () => getSkill(workspaceId, skillId, projectId),
   });
   const versionsQuery = useQuery({
-    queryKey: ["skill-versions", workspaceId, skillId],
-    queryFn: () => listSkillVersions(workspaceId, skillId),
+    queryKey: ["skill-versions", workspaceId, skillId, projectId],
+    queryFn: () => listSkillVersions(workspaceId, skillId, projectId),
   });
   const eventsQuery = useQuery({
-    queryKey: ["skill-events", workspaceId, skillId],
-    queryFn: () => listSkillEvents(workspaceId, skillId),
+    queryKey: ["skill-events", workspaceId, skillId, projectId],
+    queryFn: () => listSkillEvents(workspaceId, skillId, projectId),
   });
   const archiveMutation = useMutation({
     mutationFn: (archived: boolean) =>
-      setSkillArchived(workspaceId, skillId, archived),
+      setSkillArchived(workspaceId, skillId, archived, projectId),
     onSuccess: async () =>
-      invalidateSkillQueries(queryClient, workspaceId, skillId),
+      invalidateSkillQueries(queryClient, workspaceId, skillId, projectId),
   });
-  const backLink = <AssetBackLink to="/skills" label="返回 Skills" />;
+  const backLink = <AssetBackLink to={skillPagePath(projectId)} label="返回 Skills" />;
 
   if (detailQuery.isPending) {
     return (
@@ -148,9 +165,12 @@ function SkillDetailContent({
             <Typography.Title heading={1}>
               {skill.display_name}
             </Typography.Title>
-            {skill.display_name !== skill.slug && <code className="skill-detail-slug">{skill.slug}</code>}
+            {skill.namespace
+              ? <code className="skill-detail-slug">skills/{skill.namespace}/{skill.slug}</code>
+              : skill.display_name !== skill.slug && <code className="skill-detail-slug">{skill.slug}</code>}
             <Typography.Paragraph>{skill.description}</Typography.Paragraph>
             <div className="detail-inline-meta">
+              {projectId && <span>项目 {projectName ?? projectId}</span>}
               <StatusBadge status={skill.status} />
               <Tag color={skill.latest_published_version ? "blue" : "orange"}>
                 {skill.latest_published_version ? `v${skill.latest_published_version}` : "待发布"}
@@ -218,7 +238,7 @@ function SkillDetailContent({
         }}
       >
         <TabPane itemKey="files" tab="文件">
-          <FilesTab workspaceId={workspaceId} skill={skill} versions={versionsQuery.data?.items ?? []}
+          <FilesTab workspaceId={workspaceId} projectId={projectId} skill={skill} versions={versionsQuery.data?.items ?? []}
             loading={versionsQuery.isPending} error={versionsQuery.error} canWrite={canWrite}
             selection={fileSelection} onSelectionChange={setFileSelection}
             onRetry={() => void versionsQuery.refetch()} />
@@ -235,6 +255,7 @@ function SkillDetailContent({
             error={versionsQuery.error}
             loading={versionsQuery.isPending}
             skillId={skillId}
+            projectId={projectId}
             versions={versionsQuery.data?.items ?? []}
             workspaceId={workspaceId}
           />
@@ -247,13 +268,13 @@ function SkillDetailContent({
           />
         </TabPane>
         <TabPane itemKey="usage" tab="使用统计">
-          {tab === "usage" && <SkillUsagePanel workspaceId={workspaceId} skillId={skillId}
+          {tab === "usage" && <SkillUsagePanel workspaceId={workspaceId} skillId={skillId} projectId={projectId}
             versions={versionsQuery.data?.items ?? []} canWrite={canWrite} />}
         </TabPane>
         {canWrite && <TabPane itemKey="contributions" tab="待审核">
-          {tab === "contributions" && <SkillContributions workspaceId={workspaceId} skillId={skillId}
+          {tab === "contributions" && <SkillContributions workspaceId={workspaceId} skillId={skillId} projectId={projectId}
             archived={skill.status === "archived"} hasDraft={!!skill.draft} onChanged={async (accept) => {
-              await invalidateSkillQueries(queryClient, workspaceId, skillId);
+              await invalidateSkillQueries(queryClient, workspaceId, skillId, projectId);
               if (accept) {
                 setFileSelection("draft");
                 setTab("files");
@@ -265,8 +286,8 @@ function SkillDetailContent({
       <SkillPackageDialog
         onClose={() => setReplaceOpen(false)}
         onSubmit={async (file) => {
-          await replaceSkillDraft(workspaceId, skillId, file);
-          await invalidateSkillQueries(queryClient, workspaceId, skillId);
+          await replaceSkillDraft(workspaceId, skillId, file, projectId);
+          await invalidateSkillQueries(queryClient, workspaceId, skillId, projectId);
           setReplaceOpen(false);
           setFileSelection("draft");
           setTab("files");
@@ -281,8 +302,8 @@ function SkillDetailContent({
           initialVersion={nextPatchVersion(skill.latest_published_version)}
           onClose={() => setPublishOpen(false)}
           onPublish={async (input) => {
-            await publishSkill(workspaceId, skillId, input);
-            await invalidateSkillQueries(queryClient, workspaceId, skillId);
+            await publishSkill(workspaceId, skillId, input, projectId);
+            await invalidateSkillQueries(queryClient, workspaceId, skillId, projectId);
             setPublishOpen(false);
             setTab("versions");
           }}
@@ -292,8 +313,8 @@ function SkillDetailContent({
         <EditSkillDialog
           onClose={() => setEditOpen(false)}
           onSave={async (input) => {
-            await updateSkill(workspaceId, skillId, input);
-            await invalidateSkillQueries(queryClient, workspaceId, skillId);
+            await updateSkill(workspaceId, skillId, input, projectId);
+            await invalidateSkillQueries(queryClient, workspaceId, skillId, projectId);
             setEditOpen(false);
           }}
           skill={skill}
@@ -304,8 +325,9 @@ function SkillDetailContent({
 }
 
 /** 默认打开已发布版本；成员可切换到草稿核对内容，阻断草稿仅管理员可预览。 */
-function FilesTab({ workspaceId, skill, versions, loading, error, canWrite, selection, onSelectionChange, onRetry }: {
+function FilesTab({ workspaceId, projectId, skill, versions, loading, error, canWrite, selection, onSelectionChange, onRetry }: {
   workspaceId: string;
+  projectId: string | undefined;
   skill: SkillDetail;
   versions: SkillVersion[];
   loading: boolean;
@@ -340,10 +362,10 @@ function FilesTab({ workspaceId, skill, versions, loading, error, canWrite, sele
       <Select aria-label="包版本" value={selected} optionList={options}
         onChange={(value) => onSelectionChange(String(value ?? ""))} />
       {selected !== "draft" && <a className={buttonVariants({ variant: "outline", size: "sm" })}
-        href={skillDownloadUrl(workspaceId, skill.id, selected)}><IconDownload />下载包</a>}
+        href={skillDownloadUrl(workspaceId, skill.id, selected, projectId)}><IconDownload />下载包</a>}
     </div>
     <SkillFileBrowser key={`${selected}:${record.package_sha256}`} workspaceId={workspaceId}
-      skillId={skill.id} source={source} files={record.files} />
+      skillId={skill.id} projectId={projectId} source={source} files={record.files} />
     <PackageNotes key={record.package_sha256} record={record} />
   </div>;
 }
@@ -354,12 +376,14 @@ function VersionsTab({
   versions,
   workspaceId,
   skillId,
+  projectId,
 }: {
   error: Error | null;
   loading: boolean;
   versions: SkillVersion[];
   workspaceId: string;
   skillId: string;
+  projectId: string | undefined;
 }) {
   const columns: TableColumn<SkillVersion>[] = [
     {
@@ -399,7 +423,7 @@ function VersionsTab({
       render: (value: string) => (
         <a
           className={buttonVariants({ variant: "ghost", size: "sm" })}
-          href={skillDownloadUrl(workspaceId, skillId, value)}
+          href={skillDownloadUrl(workspaceId, skillId, value, projectId)}
         >
           <IconDownload />
           下载
@@ -689,17 +713,18 @@ async function invalidateSkillQueries(
   queryClient: ReturnType<typeof useQueryClient>,
   workspaceId: string,
   skillId: string,
+  projectId?: string,
 ) {
   await Promise.all([
     queryClient.invalidateQueries({ queryKey: ["skills", workspaceId] }),
     queryClient.invalidateQueries({
-      queryKey: ["skill", workspaceId, skillId],
+      queryKey: ["skill", workspaceId, skillId, projectId],
     }),
     queryClient.invalidateQueries({
-      queryKey: ["skill-versions", workspaceId, skillId],
+      queryKey: ["skill-versions", workspaceId, skillId, projectId],
     }),
     queryClient.invalidateQueries({
-      queryKey: ["skill-events", workspaceId, skillId],
+      queryKey: ["skill-events", workspaceId, skillId, projectId],
     }),
   ]);
 }

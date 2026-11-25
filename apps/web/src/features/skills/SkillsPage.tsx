@@ -18,13 +18,15 @@ import {
   AssetLoadError,
 } from "../../components/console/asset-controls";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useRef, useState, type FormEvent } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { useRef, useState, type FormEvent, type ReactNode } from "react";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 
 import { useAuth } from "../auth/AuthProvider";
+import { listProjects, projectKey } from "../projects/api";
 import {
   createSkill,
   listSkills,
+  skillPagePath,
   SkillsApiError,
   type SkillSummary,
 } from "./api";
@@ -33,6 +35,49 @@ import "./skill-reader.css";
 
 export function SkillsPage() {
   const { principal } = useAuth();
+  const [params, setParams] = useSearchParams();
+  if (!principal) throw new Error("Skills 页面缺少当前工作空间");
+  const { workspace, user } = principal;
+  const projectId = params.get("project") || undefined;
+  const projects = useQuery({
+    queryKey: projectKey(workspace.id, user.id),
+    queryFn: () => listProjects(workspace.id),
+  });
+  const active = projects.data?.items.filter((item) => item.status === "active") ?? [];
+  const current = active.find((item) => item.id === projectId);
+  const options = [
+    { value: "shared", label: "工作空间共享" },
+    ...active.map(({ id, name }) => ({ value: id, label: name })),
+    ...(projectId && !current ? [{ value: projectId, label: "所选项目", disabled: true }] : []),
+  ];
+  const canWrite = ["owner", "admin"].includes(workspace.role);
+  // 切换范围会重建上传弹窗，让文件始终提交到打开弹窗时的范围。
+  return <SkillsCatalog
+    key={`${workspace.id}:${user.id}:${projectId ?? "shared"}`}
+    workspaceId={workspace.id}
+    userId={user.id}
+    projectId={projectId}
+    scopeLabel={current?.name ?? "工作空间共享"}
+    canWrite={canWrite && (!projectId || Boolean(current))}
+    scopeControl={<Select aria-label="Skill 范围" optionList={options} value={projectId ?? "shared"}
+      onChange={(value) => setParams(value && value !== "shared" ? { project: String(value) } : {})} />}
+    projectsError={projects.isError}
+    retryProjects={() => void projects.refetch()}
+  />;
+}
+
+function SkillsCatalog({
+  workspaceId, userId, projectId, scopeLabel, canWrite, scopeControl, projectsError, retryProjects,
+}: {
+  workspaceId: string;
+  userId: string;
+  projectId: string | undefined;
+  scopeLabel: string;
+  canWrite: boolean;
+  scopeControl: ReactNode;
+  projectsError: boolean;
+  retryProjects: () => void;
+}) {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const [searchInput, setSearchInput] = useState("");
@@ -41,21 +86,19 @@ export function SkillsPage() {
   const [uploadOpen, setUploadOpen] = useState(false);
   const searchRef = useRef<HTMLInputElement>(null);
 
-  if (!principal) throw new Error("Skills 页面缺少当前工作空间");
-  const workspaceId = principal.workspace.id;
-  const canWrite = ["owner", "admin"].includes(principal.workspace.role);
   const skillsQuery = useQuery({
-    queryKey: ["skills", workspaceId, search, status],
-    queryFn: () => listSkills(workspaceId, { search, status }),
+    queryKey: ["skills", workspaceId, userId, projectId, search, status],
+    queryFn: () => listSkills(workspaceId, { search, status }, projectId),
   });
   const createMutation = useMutation({
-    mutationFn: (file: File) => createSkill(workspaceId, file),
+    mutationFn: ({ file, namespace }: { file: File; namespace: string }) =>
+      createSkill(workspaceId, file, projectId, namespace),
     onSuccess: async (skill) => {
       await queryClient.invalidateQueries({
         queryKey: ["skills", workspaceId],
       });
       setUploadOpen(false);
-      navigate(`/skills/${skill.id}`);
+      navigate(skillPagePath(projectId, skill.id));
     },
   });
 
@@ -71,11 +114,13 @@ export function SkillsPage() {
       title: "Skill",
       dataIndex: "display_name",
       render: (_: unknown, skill: SkillSummary) => (
-        <Link className="resource-cell" to={`/skills/${skill.id}`}>
+        <Link className="resource-cell" to={skillPagePath(projectId, skill.id)}>
           <SkillLogo />
           <span>
             <strong>{skill.display_name}</strong>
-            {skill.display_name !== skill.slug && <code className="skill-list-slug">{skill.slug}</code>}
+            {skill.namespace
+              ? <code className="skill-list-slug">{skill.namespace}/{skill.slug}</code>
+              : skill.display_name !== skill.slug && <code className="skill-list-slug">{skill.slug}</code>}
             <small>{skill.description}</small>
           </span>
         </Link>
@@ -115,7 +160,7 @@ export function SkillsPage() {
       width: 106,
       render: (_: unknown, skill: SkillSummary) => (
         <AssetDetailsLink
-          to={`/skills/${skill.id}`}
+          to={skillPagePath(projectId, skill.id)}
           name={skill.display_name}
         />
       ),
@@ -147,6 +192,7 @@ export function SkillsPage() {
 
       <section className="asset-surface">
         <div className="asset-toolbar">
+          {scopeControl}
           <Select
             aria-label="筛选状态"
             onChange={(value) => setStatus(String(value ?? ""))}
@@ -171,6 +217,9 @@ export function SkillsPage() {
           </form>
         </div>
 
+        {projectsError && (
+          <AssetLoadError title="项目列表暂时无法加载" description="可以重试加载项目。" onRetry={retryProjects} />
+        )}
         {skillsQuery.isError ? (
           <AssetLoadError
             description={apiErrorMessage(skillsQuery.error)}
@@ -190,7 +239,7 @@ export function SkillsPage() {
                   : "上传完整目录包，把团队经验变成可版本化资产。"
               }
               image={<IconPuzzle size={32} />}
-              title={hasFilters ? "没有匹配的 Skill" : "还没有团队 Skill"}
+              title={hasFilters ? "没有匹配的 Skill" : projectId ? "当前项目还没有 Skill" : "还没有团队 Skill"}
             />
             {hasFilters && (
               <Button
@@ -232,9 +281,10 @@ export function SkillsPage() {
 
       <SkillPackageDialog
         onClose={() => setUploadOpen(false)}
-        onSubmit={async (file) => {
-          await createMutation.mutateAsync(file);
+        onSubmit={async (file, namespace) => {
+          await createMutation.mutateAsync({ file, namespace });
         }}
+        scopeLabel={scopeLabel}
         open={uploadOpen}
         submitLabel="校验并创建"
         title="上传 Skill 包"

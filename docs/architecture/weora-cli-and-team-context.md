@@ -1,5 +1,8 @@
 # Weora CLI 与团队上下文接入方案
 
+本文保留最初的 CLI 接入决策和历史验证。当前项目知识实现及 TeamAI 行为对照见
+[项目知识库设计](../product/project-knowledge-design.md)。
+
 ## 目标与边界
 
 Weora 保存团队共同上下文，使使用 Codex、Claude Code 等不同 Agent 的开发者能够按项目、按需获取同一份有效信息。开发者继续使用自己的 Agent，不必迁移到 Weora 内置界面。

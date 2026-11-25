@@ -165,8 +165,7 @@ def upgrade() -> None:
     op.create_index("ix_agent_mail_task", "collab_agent_mail", ["task_id", "created_at", "id"], unique=False)
     op.create_index(op.f("ix_collab_agent_evidence_task_id"), "collab_agent_evidence", ["task_id"], unique=False)
 
-    # 提交后只通知目标设备，接收者再从持久化收件箱补取。
-    # SQLite 测试可以创建表；消息唤醒只在 PostgreSQL 上安装通知触发器。
+    # PostgreSQL 提交后通知目标设备，其他方言仍保留可轮询的收件箱。
     if op.get_context().dialect.name != "postgresql":
         return
     op.execute("""

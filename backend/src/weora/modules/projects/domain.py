@@ -47,6 +47,44 @@ class RepositoryReader(Protocol):
     async def discard(self, cache_id: UUID) -> None: ...
 
 
+@dataclass(frozen=True, slots=True)
+class ReportRepository:
+    """已通过检查的仓库连接。只有同步 Worker 需要解密的 Git 读取身份。"""
+
+    name: str
+    connection_version: int
+    source: RepositorySource | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RepositoryBlob:
+    """固定提交中的普通文本候选，目录、符号链接和子模块不作为源码。"""
+
+    path: str
+    oid: str
+    size: int
+
+
+@dataclass(frozen=True, slots=True)
+class FixedRepository:
+    repository_id: UUID
+    connection_version: int
+    name: str
+    revision: str
+    cache_id: UUID
+    git_url: str = ""
+    provider: str = ""
+
+
+@runtime_checkable
+class RepositoryIndexReader(Protocol):
+    async def index_blobs(
+        self, cache_id: UUID, revision: str, paths: tuple[str, ...] = (),
+    ) -> list[RepositoryBlob]: ...
+
+    async def index_text(self, cache_id: UUID, blob: RepositoryBlob) -> str | None: ...
+
+
 @runtime_checkable
 class RepositoryPagedReader(Protocol):
     """同一固定提交内的行窗口读取；游标不能改变仓库或提交权限。"""

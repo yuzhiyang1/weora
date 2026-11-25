@@ -1,7 +1,5 @@
 """Adapted from TeamAI src/skill-use.ts at 1104f305. See TEAMAI-LICENSE.txt."""
 
-import hashlib
-import hmac
 import json
 import os
 import re
@@ -13,11 +11,11 @@ from pathlib import Path
 from sqlite3 import Connection, Error, Row
 from uuid import uuid4
 
-from weora_cli.collab_client import CollabError, as_object, read_config
+from weora_cli.collab_client import CollabError, as_object
 from weora_cli.commands import JsonValue
 from weora_cli.skill_adapters import skill_roots, tool_home
-from weora_cli.skill_local import database, digest, inventory, now, queue
-from weora_cli.skills import client_for, flush, is_current_binding, pull
+from weora_cli.skill_local import current_bindings, database, digest, inventory, now, queue, usage_session_key
+from weora_cli.skills import client_for, flush, pull
 
 # TeamAI 的各工具 Skill 调用声明，外加显式路径读取的共用分支。
 _SKILL_TOOLS = {
@@ -63,18 +61,6 @@ def _field(payload: dict[str, JsonValue], *names: str) -> str:
         if isinstance(value, str) and value.strip():
             return value.strip()
     return ""
-
-
-def _bindings(db: Connection, runtime: str, cwd: Path) -> list[Row]:
-    config = read_config()
-    return [
-        row
-        for row in db.execute(
-            "SELECT * FROM binding WHERE runtime=? AND profile=? ORDER BY length(root) DESC",
-            (runtime, str(tool_home(runtime))),
-        )
-        if is_current_binding(row, config) and (row["scope"] == "user" or cwd.is_relative_to(Path(row["root"])))
-    ]
 
 
 def _tool_candidate(runtime: str, payload: dict[str, JsonValue], cwd: Path) -> tuple[str, Path | None]:
@@ -156,7 +142,7 @@ def _verified_output(runtime: str, payload: dict[str, JsonValue], file: Path) ->
 
 
 def observe(db: Connection, runtime: str, event: str, payload: dict[str, JsonValue], cwd: Path) -> None:
-    bindings = _bindings(db, runtime, cwd)
+    bindings = current_bindings(db, runtime, cwd)
     if not bindings:
         return
     session = _field(payload, "session_id", "sessionId", "session_key", "conversation_id", "conversationId")
@@ -166,7 +152,7 @@ def observe(db: Connection, runtime: str, event: str, payload: dict[str, JsonVal
     secret = bytes.fromhex(db.execute("SELECT value FROM secret WHERE id=1").fetchone()[0])
 
     def keyed(value: str) -> str:
-        return hmac.new(secret, f"{runtime}:{profile}:{value}".encode(), hashlib.sha256).hexdigest()
+        return usage_session_key(secret, runtime, profile, value)
 
     session_key = keyed(session)
     turn = _field(payload, "turn_id", "turnId", "prompt_id", "generation_id", "generationId")
@@ -270,7 +256,7 @@ def hook(runtime: str, event: str) -> None:
     try:
         if event in {"sync", "drain"}:
             with database() as db:
-                for binding in _bindings(db, runtime, Path.cwd().resolve()):
+                for binding in current_bindings(db, runtime, Path.cwd().resolve()):
                     try:
                         client = client_for(binding)
                         previous = binding["checked"]

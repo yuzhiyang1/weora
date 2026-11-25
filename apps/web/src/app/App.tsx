@@ -52,6 +52,15 @@ const PlaceholderPage = lazy(() =>
     default: module.PlaceholderPage,
   })),
 );
+const KnowledgePage = lazy(() =>
+  import("../features/knowledge/KnowledgePage").then((module) => ({ default: module.KnowledgePage })),
+);
+const KnowledgeWorkflowPage = lazy(() =>
+  import("../features/knowledge/KnowledgeWorkflowPage").then((module) => ({ default: module.KnowledgeWorkflowPage })),
+);
+const DashboardReportsPage = lazy(() =>
+  import("../features/dashboard-reports/DashboardReportsPage").then((module) => ({ default: module.DashboardReportsPage })),
+);
 const SkillDetailPage = lazy(() =>
   import("../features/skills/SkillDetailPage").then((module) => ({
     default: module.SkillDetailPage,
@@ -224,16 +233,12 @@ export function App() {
                   />
                 }
               />
-              <Route
-                path="knowledge"
-                element={
-                  <PlaceholderPage
-                    eyebrow="Knowledge"
-                    title="知识库"
-                    description="管理文档、切片、索引、检索策略和引用来源。"
-                  />
-                }
-              />
+              <Route path="knowledge" element={<KnowledgePage />} />
+              <Route path="knowledge/workflows/:run" element={<KnowledgeWorkflowPage />} />
+              <Route path="improvement" element={<DashboardReportsPage kind="improvement" />} />
+              <Route path="self-improvement" element={<DashboardReportsPage kind="self-improvement" />} />
+              <Route path="scorers" element={<DashboardReportsPage kind="scorers" />} />
+              <Route path="benchmarks" element={<DashboardReportsPage kind="benchmarks" />} />
               <Route
                 path="rooms"
                 element={

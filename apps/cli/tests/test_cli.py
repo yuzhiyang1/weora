@@ -46,17 +46,34 @@ class CliTests(unittest.TestCase):
         data = json.loads(result.stdout)["data"]
         self.assertEqual(
             [command["name"] for command in data["commands"]],
-            ["version", "commands", "schema", "collab", "skill", "auth", "login", "logout"],
+            ["version", "commands", "schema", "collab", "skill", "context", "ci", "auth", "login", "logout"],
         )
-        self.assertEqual(data["business_capabilities"], ["collab", "skill", "auth"])
+        self.assertEqual(data["business_capabilities"], ["collab", "skill", "context", "ci", "auth"])
         self.assertEqual(
-            [c["name"] for c in data["commands"] if c["side_effects"]], ["collab", "skill", "auth", "login", "logout"]
+            [c["name"] for c in data["commands"] if c["side_effects"]],
+            ["collab", "skill", "context", "ci", "auth", "login", "logout"],
         )
 
     def test_schema_and_discovery_use_the_same_contract(self) -> None:
         discovered = json.loads(self.run_cli("commands").stdout)["data"]["commands"]
         schemas = json.loads(self.run_cli("schema").stdout)["data"]["commands"]
         self.assertEqual(discovered, schemas)
+
+    def test_knowledge_digest_can_select_scoring_failures(self) -> None:
+        for arguments, path, options in (
+            ([], "/digest", {}),
+            (["--failures", "--limit", "2"], "/digest/failures", {"limit": 2}),
+            (["--json"], "/digest/failures", {"limit": 50}),
+        ):
+            with (
+                self.subTest(arguments=arguments),
+                patch("weora_cli.knowledge.paired_client"),
+                patch("weora_cli.knowledge._call", return_value={"items": []}) as request,
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                self.assertEqual(main(["context", "digest", *arguments]), 0)
+                self.assertEqual(request.call_args.args[2], path)
+                self.assertEqual(request.call_args.kwargs, options)
 
     def test_schema_for_specific_command(self) -> None:
         result = self.run_cli("schema", "schema")

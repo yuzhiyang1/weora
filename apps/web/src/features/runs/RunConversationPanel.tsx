@@ -139,7 +139,7 @@ export function RunConversationPanel({ workspaceId, userId, run, composer, onAcc
 
   const turns = conversationEntries(data);
   const invalidMode = mode === "steer" && !data.can_steer;
-  const taskGoal = data.runs[0]?.instruction ?? run.instruction;
+  const taskGoal = data.task_goal ?? run.instruction;
   return (
     <div className="run-conversation-grid">
       <Card className="run-conversation" title={

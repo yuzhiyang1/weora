@@ -33,6 +33,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    """先卸载引用通知函数的运行触发器，再删除函数。"""
     if op.get_context().dialect.name != "postgresql":
         return
     op.execute("DROP TRIGGER weora_run_changed ON runs")

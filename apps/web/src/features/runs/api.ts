@@ -60,6 +60,7 @@ export type RunInput = {
 export type RunPage = { items: RunSummary[]; next_before_id: string | null };
 export type RunInputMode = "steer" | "continue";
 export type RunConversation = {
+  task_goal?: string;
   can_send: boolean;
   can_steer: boolean;
   runs: Array<{

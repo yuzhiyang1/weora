@@ -22,9 +22,10 @@ function dateField(date: Date) {
     .map((value) => String(value).padStart(2, "0")).join("-");
 }
 
-export function SkillUsagePanel({ workspaceId, skillId, versions, canWrite }: {
+export function SkillUsagePanel({ workspaceId, skillId, projectId, versions, canWrite }: {
   workspaceId: string;
   skillId: string;
+  projectId: string | undefined;
   versions: SkillVersion[];
   canWrite: boolean;
 }) {
@@ -48,7 +49,7 @@ export function SkillUsagePanel({ workspaceId, skillId, versions, canWrite }: {
     enabled: canWrite,
   });
   const usage = useQuery({
-    queryKey: ["skill-usage", workspaceId, skillId, from, to, group, version, user, page],
+    queryKey: ["skill-usage", workspaceId, skillId, projectId, from, to, group, version, user, page],
     enabled: valid,
     queryFn: () => {
       const query = new URLSearchParams({
@@ -58,6 +59,7 @@ export function SkillUsagePanel({ workspaceId, skillId, versions, canWrite }: {
       });
       if (version) query.set("version_id", version);
       if (user) query.set("user_id", user);
+      if (projectId) query.set("project_id", projectId);
       return consoleRequest<UsageSummary>(
         workspaceId, "/skills/" + encodeURIComponent(skillId) + "/usage?" + query,
       );

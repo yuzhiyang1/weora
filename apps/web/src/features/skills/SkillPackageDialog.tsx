@@ -1,5 +1,5 @@
 import { File as IconFile, Upload as IconUpload } from "lucide-react";
-import { Banner, Button, Modal, Typography } from "../../components/console";
+import { Banner, Button, Input, Modal, Typography } from "../../components/console";
 import { useRef, useState, type DragEvent, type FormEvent } from "react";
 
 import { SkillsApiError } from "./api";
@@ -9,7 +9,8 @@ type SkillPackageDialogProps = {
   submitLabel: string;
   open: boolean;
   onClose: () => void;
-  onSubmit: (file: File) => Promise<void>;
+  onSubmit: (file: File, namespace: string) => Promise<void>;
+  scopeLabel?: string;
 };
 
 const MAX_PACKAGE_BYTES = 50 * 1024 * 1024;
@@ -20,9 +21,11 @@ export function SkillPackageDialog({
   open,
   onClose,
   onSubmit,
+  scopeLabel,
 }: SkillPackageDialogProps) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [file, setFile] = useState<File | null>(null);
+  const [namespace, setNamespace] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [dragging, setDragging] = useState(false);
@@ -30,6 +33,7 @@ export function SkillPackageDialog({
   function close() {
     if (submitting) return;
     setFile(null);
+    setNamespace("");
     setError(null);
     setDragging(false);
     onClose();
@@ -71,8 +75,9 @@ export function SkillPackageDialog({
     setSubmitting(true);
     setError(null);
     try {
-      await onSubmit(file);
+      await onSubmit(file, namespace.trim());
       setFile(null);
+      setNamespace("");
     } catch (nextError) {
       setError(
         nextError instanceof SkillsApiError
@@ -137,6 +142,14 @@ export function SkillPackageDialog({
           </small>
         </div>
 
+        {scopeLabel && (
+          <label className="form-field">
+            <span>团队目录（选填）</span>
+            <Input aria-label="团队目录（选填）" value={namespace} onChange={setNamespace} disabled={submitting}
+              maxLength={512} placeholder="留空使用根目录，例如 engineering/platform" />
+            <p>上传到 {scopeLabel}</p>
+          </label>
+        )}
         <div className="package-guidance">
           <Typography.Text strong>包结构要求</Typography.Text>
           <Typography.Text type="tertiary">

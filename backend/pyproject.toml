@@ -15,12 +15,17 @@ dependencies = [
     "fastapi>=0.116.0,<1.0.0",
     "jsonschema>=4.25.0,<5.0.0",
     "lark-oapi==1.7.5",
+    "markdown-it-py==4.2.0",
     "pwdlib[argon2]>=0.3.0,<1.0.0",
     "pydantic-settings>=2.10.0,<3.0.0",
     "python-multipart>=0.0.20,<1.0.0",
     "pyyaml>=6.0.0,<7.0.0",
     "redis>=6.0.0,<7.0.0",
     "sqlalchemy[asyncio]>=2.0.0,<3.0.0",
+    "tree-sitter==0.25.2",
+    "tree-sitter-go==0.25.0",
+    "tree-sitter-swift==0.7.4",
+    "tree-sitter-typescript==0.23.2",
     "uvicorn[standard]>=0.35.0,<1.0.0",
 ]
 
@@ -41,7 +46,7 @@ requires = ["hatchling>=1.27.0,<2.0.0"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/weora"]
+packages = ["src/weora", "src/weora_code_graph"]
 
 [tool.pytest.ini_options]
 addopts = "-q"

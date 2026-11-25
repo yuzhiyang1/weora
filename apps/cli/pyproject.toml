@@ -1,12 +1,16 @@
 [project]
 name = "weora-cli"
-version = "0.1.0"
+version = "0.2.0"
 description = "Weora platform CLI for people and coding agents"
 readme = "README.md"
 requires-python = "~=3.12.0"
 dependencies = [
     "keyring>=25,<26",
     "ruamel-yaml>=0.18,<0.20",
+    "tree-sitter==0.25.2",
+    "tree-sitter-go==0.25.0",
+    "tree-sitter-swift==0.7.4",
+    "tree-sitter-typescript==0.23.2",
     "websockets>=15,<17",
 ]
 
@@ -19,6 +23,11 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/weora_cli"]
+
+[tool.hatch.build]
+dev-mode-dirs = ["src", "../../backend/src"]
+
+[tool.hatch.build.hooks.custom]
 
 [tool.ruff]
 line-length = 120

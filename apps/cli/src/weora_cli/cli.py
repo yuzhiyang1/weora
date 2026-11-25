@@ -9,7 +9,7 @@ from typing import NoReturn
 
 from keyring.errors import KeyringError
 
-from weora_cli import cli_auth, collaboration, skill_telemetry, skills
+from weora_cli import cli_auth, collaboration, knowledge, knowledge_ci, skill_telemetry, skills
 from weora_cli.collab_client import CollabError
 from weora_cli.commands import COMMANDS, JsonValue
 
@@ -37,6 +37,10 @@ def build_parser() -> Parser:
             collaboration.arguments(subparser)
         elif command.name == "skill":
             skills.arguments(subparser)
+        elif command.name == "context":
+            knowledge.arguments(subparser)
+        elif command.name == "ci":
+            knowledge_ci.arguments(subparser)
         elif command.name in {"auth", "login", "logout"}:
             cli_auth.arguments(subparser, command.name)
     return parser
@@ -48,7 +52,7 @@ def execute(args: argparse.Namespace) -> JsonValue:
     if args.operation == "commands":
         return {
             "commands": [command.describe() for command in COMMANDS],
-            "business_capabilities": ["collab", "skill", "auth"],
+            "business_capabilities": ["collab", "skill", "context", "ci", "auth"],
         }
     if args.operation == "schema":
         target = " ".join(args.command)
@@ -60,6 +64,10 @@ def execute(args: argparse.Namespace) -> JsonValue:
         return collaboration.execute(args)
     if args.operation == "skill":
         return skills.execute(args)
+    if args.operation == "context":
+        return knowledge.execute(args)
+    if args.operation == "ci":
+        return knowledge_ci.execute(args)
     if args.operation in {"auth", "login", "logout"}:
         return cli_auth.execute(args)
     raise UsageError("未找到命令。")
@@ -112,4 +120,18 @@ def main(argv: list[str] | None = None) -> int:
         emit({"ok": False, "error": {"code": "INTERNAL_ERROR", "message": "CLI 内部错误。"}}, error=True)
         return 1
     emit({"ok": True, "data": data})
+    if (
+        getattr(args, "action", None) == "codebase" and args.output and args.lint and isinstance(data, dict)
+        and isinstance(summary := data.get("summary"), dict) and summary.get("high")
+    ):
+        return 1
+    if getattr(args, "action", None) == "score-drain" and isinstance(data, dict) and data.get("drain_failed") is True:
+        return 1
+    if getattr(args, "require_ci_success", False) and isinstance(data, dict) and data.get("check_state") in (
+        "failure", "error",
+    ):
+        return 1
+    if getattr(args, "fail_on_regression", False) and isinstance(data, dict) and data.get("gate") == "regressed":
+        # CI 读取正常的报告 JSON，并通过退出码识别已验证的回退。
+        return 1
     return 0

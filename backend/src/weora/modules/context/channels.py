@@ -257,6 +257,8 @@ class FeishuChannels:
                 **({"root_id": root_id} if root_id else {}),
                 "open_id": open_id,
                 "addressed": addressed,
+                # 已送达任务的普通跟进也可能是 addressed，知识修订只接受真正的 @。
+                **({"mentioned": True} if mentioned else {}),
                 **({"actor_id": reply_actor} if reply_actor else {}),
                 "ingress": ingress,
                 "instruction": self.context.cipher.encrypt(instruction),

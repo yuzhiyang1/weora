@@ -1,0 +1,29 @@
+name: Weora knowledge workflow activity
+
+on:
+  workflow_run:
+    workflows:
+      - Weora project knowledge review
+      - Weora improvement benchmark
+      - Weora self-improvement
+    types: [completed]
+
+permissions:
+  actions: read
+
+jobs:
+  publish:
+    # 仅执行预装的 CLI。无需检出、缓存或下载上游工作流产生的文件。
+    runs-on: [self-hosted, linux, weora-ci]
+    timeout-minutes: 5
+    steps:
+      - name: Report the completed attempt
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          WEORA_COLLAB_URL: ${{ vars.WEORA_URL }}
+          WEORA_COLLAB_WORKSPACE: ${{ vars.WEORA_WORKSPACE_ID }}
+          WEORA_PROJECT_ID: ${{ vars.WEORA_PROJECT_ID }}
+          WEORA_COLLAB_TOKEN: ${{ secrets.WEORA_CI_DEVICE_TOKEN }}
+        run: |
+          weora context publish-workflow --event "$GITHUB_EVENT_PATH" --project "$WEORA_PROJECT_ID"

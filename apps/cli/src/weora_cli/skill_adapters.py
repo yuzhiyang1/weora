@@ -513,9 +513,11 @@ def install_hook(runtime: str) -> dict[str, JsonValue]:
     return {"mode": "native", "path": str(path), "runtime": runtime}
 
 
-def launch(runtime: str, args: list[str], cwd: Path, executable_path: str | None = None) -> int:
+def launch(
+    runtime: str, args: list[str], cwd: Path, executable_path: str | None = None, *, env: dict[str, str] | None = None,
+) -> int:
     binary = TOOLS[runtime].binary or runtime
     executable = shutil.which(executable_path or binary)
     if not executable:
         raise CollabError("SKILL_RUNTIME_NOT_FOUND", f"没有找到 {binary} 的启动入口。可用 --executable 指定程序。")
-    return subprocess.call([executable, *args], cwd=cwd)
+    return subprocess.call([executable, *args], cwd=cwd, env=env)

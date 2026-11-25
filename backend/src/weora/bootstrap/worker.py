@@ -30,6 +30,8 @@ from weora.modules.delivery.application.service import DeliveryService
 from weora.modules.delivery.domain.models import DeliveryError
 from weora.modules.delivery.infrastructure.docker import DockerSandbox
 from weora.modules.identity.application.service import IdentityService
+from weora.modules.knowledge.feishu_revisions import requests_knowledge_revision
+from weora.modules.knowledge.recall_journal import purge_recall_journal
 from weora.modules.runs.application.execution import (
     RunExecutor,
     RunLease,
@@ -50,7 +52,7 @@ from weora.modules.runs.infrastructure.pi_runtime import PiTextRuntime
 from weora.modules.runs.infrastructure.unit_of_work import SqlAlchemyRunsUnitOfWork
 from weora.modules.tools.application.gateway import ToolGateway, ToolScope
 from weora.modules.tools.infrastructure.store import SqlAlchemyToolStore
-from weora.shared.infrastructure.database import SessionFactory
+from weora.shared.infrastructure.database import SessionFactory, create_database
 
 celery_app = Celery("weora", broker=get_settings().celery_broker_url)
 celery_app.conf.update(
@@ -78,6 +80,11 @@ celery_app.conf.update(
             "schedule": 2.0,
             "options": {"queue": "weora.coordination.control"},
         },
+        "purge-knowledge-recall-journal": {
+            "task": "weora.knowledge.purge_recall_journal",
+            "schedule": 3600.0,
+            "options": {"expires": 900},
+        },
     },
 )
 if get_settings().repository_sync_enabled:
@@ -91,6 +98,11 @@ if get_settings().repository_sync_enabled:
         "schedule": 300.0,
         "options": {"queue": "weora.repositories.sync", "expires": 60},
     }
+    celery_app.conf.beat_schedule["sync-workflow-scores"] = {
+        "task": "weora.knowledge.sync_workflow_scores",
+        "schedule": 5.0,
+        "options": {"queue": "weora.repositories.sync", "expires": 10},
+    }
 
 
 async def _sync_repository(*, purge: bool = False) -> bool:
@@ -101,6 +113,25 @@ async def _sync_repository(*, purge: bool = False) -> bool:
     async with app.router.lifespan_context(app):
         sync = app.state.project_service.repository_sync
         return bool(sync and (await sync.purge_retired() if purge else await sync.run_one()))
+
+
+async def _sync_workflow_scores() -> bool:
+    settings = get_settings()
+    if not settings.repository_sync_enabled:
+        return False
+    app = create_app(settings)
+    async with app.router.lifespan_context(app):
+        sync = app.state.workflow_score_sync
+        return bool(sync and await sync.run_one())
+
+
+async def _purge_recall_journal() -> int:
+    engine, sessions = create_database(get_settings().database_url)
+    try:
+        async with sessions() as db, db.begin():
+            return await purge_recall_journal(db)
+    finally:
+        await engine.dispose()
 
 
 async def _generate_title() -> bool:
@@ -469,7 +500,12 @@ async def _pump_inbox(app: FastAPI) -> None:
         async def submit(actor: ContextActor, payload: Json) -> Json:
             coordinator = app.state.coordination_service
             if coordinator:
-                managed = await coordinator.ingest(actor, payload)
+                # 关闭自动接单时，显式知识修订由群发布的普通 Agent 处理。
+                knowledge_revision = (
+                    payload.get("mentioned") is True and bool(payload.get("project_id"))
+                    and requests_knowledge_revision(str(payload["instruction"]))
+                )
+                managed = await coordinator.ingest(actor, payload, ordinary_when_off=knowledge_revision)
                 if managed is not None:
                     return cast(Json, managed)
             if payload.get("addressed") is True and task_reference(str(payload["instruction"])) is not None:
@@ -498,6 +534,8 @@ async def _pump_inbox(app: FastAPI) -> None:
             if payload.get("project_id"):
                 # 普通/历史群任务保留原始指纹；只给新项目路由增加分享授权绑定。
                 origin.update(route_key=payload.get("route_key"), project_grant_id=payload.get("project_grant_id"))
+                if payload.get("mentioned") is True:
+                    origin["mentioned"] = True
             return await runs.submit_channel(
                 actor=RunActor(actor.user_id, actor.workspace_id),
                 agent_id=UUID(str(payload["agent_id"])),
@@ -660,6 +698,20 @@ def purge_retired_repositories() -> bool:
         raise RuntimeError("REPOSITORY_SYNC_CLEANUP_ERROR") from None
 
 
+def sync_workflow_scores() -> bool:
+    try:
+        return asyncio.run(_sync_workflow_scores())
+    except Exception:
+        raise RuntimeError("WORKFLOW_SCORE_SYNC_INFRASTRUCTURE_ERROR") from None
+
+
+def purge_knowledge_recall_journal() -> int:
+    try:
+        return asyncio.run(_purge_recall_journal())
+    except Exception:
+        raise RuntimeError("KNOWLEDGE_RECALL_CLEANUP_ERROR") from None
+
+
 # 保留普通函数的类型，避免无类型 Celery 装饰器污染应用层签名。
 celery_app.task(name="weora.runs.execute")(execute_run)
 
@@ -669,3 +721,5 @@ celery_app.task(name="weora.runs.dispatch")(dispatch_runs)
 celery_app.task(name="weora.runs.generate_title")(generate_task_title)
 celery_app.task(name="weora.projects.sync_repository")(sync_repository)
 celery_app.task(name="weora.projects.purge_retired_repositories")(purge_retired_repositories)
+celery_app.task(name="weora.knowledge.sync_workflow_scores")(sync_workflow_scores)
+celery_app.task(name="weora.knowledge.purge_recall_journal")(purge_knowledge_recall_journal)

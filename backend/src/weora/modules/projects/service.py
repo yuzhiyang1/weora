@@ -3,6 +3,8 @@
 import asyncio
 import hashlib
 import json
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Literal, cast
 from urllib.parse import urlsplit
@@ -14,10 +16,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from weora.modules.projects.domain import (
     DEFAULT_REPOSITORY_ARCHIVE_BYTES,
+    FixedRepository,
     ProjectActor,
     ProjectError,
     ProjectMembers,
     ProjectSecrets,
+    ReportRepository,
     RepositoryArchive,
     RepositoryArchiveExporter,
     RepositoryDirectoryReader,
@@ -95,12 +99,14 @@ class ProjectService:
             raise ProjectError("PROJECT_NOT_FOUND", "项目不存在或无权访问")
         return role
 
-    async def _project(self, session: AsyncSession, actor: ProjectActor, project_id: UUID) -> ProjectModel:
+    async def _project(
+        self, session: AsyncSession, actor: ProjectActor, project_id: UUID, *, read: bool = False,
+    ) -> ProjectModel:
         row = await session.scalar(
             # 项目作为聚合锁：仓库增删状态与资料快照必须看到同一个版本。
             select(ProjectModel)
             .where(ProjectModel.id == project_id, ProjectModel.workspace_id == actor.workspace_id)
-            .with_for_update()
+            .with_for_update(read=read)
         )
         if row is None:
             raise ProjectError("PROJECT_NOT_FOUND", "项目不存在或无权访问")
@@ -123,10 +129,93 @@ class ProjectService:
             ).all()
             return {"items": [project_view(row, self._manage(actor, role, row)) for row in rows]}
 
+    async def require_active_project(
+        self, actor: ProjectActor, project_id: UUID, session: AsyncSession,
+    ) -> None:
+        """验证业务请求的项目范围，在调用方事务结束前保持项目状态稳定。"""
+        await self._role(actor)
+        await self.require_workspace_project(actor.workspace_id, project_id, session)
+
+    async def require_workspace_project(self, workspace_id: UUID, project_id: UUID, session: AsyncSession) -> None:
+        """调用方已通过成员认证。复用其事务验证项目归属并锁定活跃状态。"""
+        status = await session.scalar(select(ProjectModel.status).where(
+            ProjectModel.id == project_id, ProjectModel.workspace_id == workspace_id,
+        ).with_for_update(read=True))
+        if status != "active":
+            raise ProjectError("PROJECT_NOT_FOUND", "项目不存在或无权访问")
+
+    async def active_repository_connections(
+        self, actor: ProjectActor, project_id: UUID, session: AsyncSession,
+    ) -> dict[UUID, int]:
+        """返回项目当前的读身份。调用方已通过项目授权，仍按工作空间和项目过滤。"""
+        rows = await session.execute(select(
+            ProjectRepositoryModel.id, ProjectRepositoryModel.connection_version,
+        ).where(
+            ProjectRepositoryModel.workspace_id == actor.workspace_id,
+            ProjectRepositoryModel.project_id == project_id,
+            ProjectRepositoryModel.status == "active",
+        ))
+        return dict(rows.tuples().all())
+
+    async def active_repository_addresses(
+        self, actor: ProjectActor, project_id: UUID, session: AsyncSession,
+    ) -> dict[UUID, str]:
+        """仓库定位只用登记地址，连接凭据不进入知识来源匹配。"""
+        rows = await session.execute(select(
+            ProjectRepositoryModel.id, ProjectRepositoryModel.git_url,
+        ).where(
+            ProjectRepositoryModel.workspace_id == actor.workspace_id,
+            ProjectRepositoryModel.project_id == project_id,
+            ProjectRepositoryModel.status == "active",
+        ))
+        return dict(rows.tuples().all())
+
+    async def report_repository(
+        self, session: AsyncSession, workspace_id: UUID, project_id: UUID, repository_id: UUID, *,
+        lock: bool = False, credentials: bool = False, connection_version: int | None = None,
+    ) -> ReportRepository | None:
+        """只允许同步已登记并检查通过的活动仓库，调用方负责目标报表范围的权限。"""
+        repo = ProjectRepositoryModel
+        query = select(repo).join(ProjectModel, ProjectModel.id == repo.project_id).where(
+            repo.id == repository_id, repo.workspace_id == workspace_id, repo.project_id == project_id,
+            repo.status == "active", repo.connection_check["status"].as_string() == "connected",
+            ProjectModel.workspace_id == workspace_id, ProjectModel.status == "active",
+        )
+        if connection_version is not None:
+            query = query.where(repo.connection_version == connection_version)
+        if lock:
+            query = query.with_for_update(of=(ProjectModel, repo), read=True)
+        row = await session.scalar(query)
+        if row is None:
+            return None
+        return ReportRepository(row.name, row.connection_version, self.repository_source(row) if credentials else None)
+
+    async def lock_repository_connection(
+        self, actor: ProjectActor, project_id: UUID, fixed: FixedRepository, session: AsyncSession,
+    ) -> None:
+        """发布代码证据前重新验证成员和连接，避免使用扫描过程中撤销的仓库权限。"""
+        await self._role(actor)
+        await self.lock_active_repository(actor, project_id, fixed.repository_id, fixed.connection_version, session)
+
+    async def lock_active_repository(
+        self, actor: ProjectActor, project_id: UUID, repository_id: UUID, version: int, session: AsyncSession,
+    ) -> None:
+        """已授权的用例锁定登记地址版本，串行处理此仓库的来源发布。"""
+        valid = await session.scalar(select(ProjectRepositoryModel.id).where(
+            ProjectRepositoryModel.id == repository_id,
+            ProjectRepositoryModel.workspace_id == actor.workspace_id,
+            ProjectRepositoryModel.project_id == project_id,
+            ProjectRepositoryModel.status == "active",
+            ProjectRepositoryModel.connection_version == version,
+        ).with_for_update())
+        if valid is None:
+            raise ProjectError("PROJECT_ACCESS_REVOKED", "操作期间仓库连接已变化")
+
     async def detail(self, actor: ProjectActor, project_id: UUID) -> dict[str, object]:
         role = await self._role(actor)
         async with self.sessions() as session:
-            row = await self._project(session, actor, project_id)
+            # 只读详情保护同一聚合，允许持有项目读锁的知识查询再读取固定仓库。
+            row = await self._project(session, actor, project_id, read=True)
             manage = self._manage(actor, role, row)
             repos = (
                 await session.scalars(
@@ -460,7 +549,7 @@ class ProjectService:
     ) -> RepositorySource:
         await self._role(actor)
         async with self.sessions() as session:
-            project = await self._project(session, actor, project_id)
+            project = await self._project(session, actor, project_id, read=True)
             row = await session.get(ProjectRepositoryModel, repository_id)
             if (
                 project.status != "active"
@@ -716,6 +805,61 @@ class ProjectService:
             )
             await session.commit()
 
+    @asynccontextmanager
+    async def fixed_repository(
+        self,
+        actor: ProjectActor,
+        project_id: UUID,
+        repository_ids: tuple[UUID, ...],
+        repository_id: UUID,
+        *,
+        revision: str | None = None,
+        connection_version: int | None = None,
+        local_only: bool = False,
+        fetch_missing_revision: bool = False,
+    ) -> AsyncIterator[FixedRepository]:
+        """租用一个已授权提交。临时裸库只在读取期间存活。"""
+        snapshot = await self.snapshot(actor, project_id, repository_ids)
+        repositories = cast(list[dict[str, object]], snapshot["repositories"])
+        selected = next((item for item in repositories if item["id"] == str(repository_id)), None)
+        if not selected or self.reader is None:
+            raise ProjectError("REPOSITORY_NOT_SELECTED", "评估只能读取当前选中的可读仓库")
+        version = int(str(selected["connection_version"]))
+        if connection_version is not None and version != connection_version:
+            raise ProjectError("PROJECT_ACCESS_REVOKED", "接单评估期间仓库连接已变化")
+        shared = self.repository_sync
+        bound = None
+        if shared is not None:
+            try:
+                bound = await shared.binding(actor.workspace_id, repository_id, version, revision)
+            except ProjectError as exc:
+                # 评审源提交可能尚未进入默认分支。只从登记源临时读取明确选定的提交。
+                if (
+                    not fetch_missing_revision or revision is None or local_only
+                    or exc.code not in {"REPOSITORY_SYNC_CACHE_MISSING", "REPOSITORY_SYNC_PENDING"}
+                ):
+                    raise
+        if bound is not None:
+            cache, fixed_revision = bound.cache_id, bound.revision
+        else:
+            if local_only:
+                raise ProjectError("REPOSITORY_SYNC_DISABLED", "没有可比较的新鲜度基准")
+            source = await self._source(actor, project_id, repository_id, version)
+            fixed_revision = revision or await self.reader.check(source)
+            cache = await self.reader.clone(source, fixed_revision)
+        try:
+            if not await self.authorize_snapshot(actor, snapshot):
+                raise ProjectError("PROJECT_ACCESS_REVOKED", "读取前项目授权已变化")
+            yield FixedRepository(
+                repository_id, version, str(selected["name"]), fixed_revision, cache,
+                str(selected["git_url"]), str(selected["provider"]),
+            )
+            if not await self.authorize_snapshot(actor, snapshot):
+                raise ProjectError("PROJECT_ACCESS_REVOKED", "读取期间项目授权已变化")
+        finally:
+            if bound is None:
+                await self.reader.discard(cache)
+
     async def assessment_read(
         self,
         actor: ProjectActor,
@@ -729,41 +873,22 @@ class ProjectService:
         directory: bool = False,
     ) -> dict[str, object]:
         """接单前读取固定提交。只有兼容旧模式的临时裸库会在读取后回收。"""
-        snapshot = await self.snapshot(actor, project_id, repository_ids)
-        repositories = cast(list[dict[str, object]], snapshot["repositories"])
-        selected = next((item for item in repositories if item["id"] == str(repository_id)), None)
-        if not selected or self.reader is None:
-            raise ProjectError("REPOSITORY_NOT_SELECTED", "评估只能读取当前选中的可读仓库")
-        version = int(str(selected["connection_version"]))
-        if connection_version is not None and version != connection_version:
-            raise ProjectError("PROJECT_ACCESS_REVOKED", "接单评估期间仓库连接已变化")
-        shared = self.repository_sync
-        if shared is not None:
-            bound = await shared.binding(actor.workspace_id, repository_id, version, revision)
-            cache, fixed_revision = bound.cache_id, bound.revision
-        else:
-            source = await self._source(actor, project_id, repository_id, version)
-            fixed_revision = revision or await self.reader.check(source)
-            cache = await self.reader.clone(source, fixed_revision)
-        try:
-            if not await self.authorize_snapshot(actor, snapshot):
-                raise ProjectError("PROJECT_ACCESS_REVOKED", "读取前项目授权已变化")
+        async with self.fixed_repository(
+            actor, project_id, repository_ids, repository_id, revision=revision,
+            connection_version=connection_version,
+        ) as fixed:
             if directory:
                 if not isinstance(self.reader, RepositoryDirectoryReader):
                     raise ProjectError("REPOSITORY_DIRECTORY_UNAVAILABLE", "当前只读适配器不支持目录")
-                result = await self.reader.directory(cache, fixed_revision, path)
+                result = await self.reader.directory(fixed.cache_id, fixed.revision, path)
             else:
-                result = await self.reader.read(cache, fixed_revision, path)
-            if not await self.authorize_snapshot(actor, snapshot):
-                raise ProjectError("PROJECT_ACCESS_REVOKED", "读取期间项目授权已变化")
+                assert self.reader is not None
+                result = await self.reader.read(fixed.cache_id, fixed.revision, path)
             return result | {
-                "revision": fixed_revision,
+                "revision": fixed.revision,
                 "repository_id": str(repository_id),
-                "connection_version": version,
+                "connection_version": fixed.connection_version,
             }
-        finally:
-            if shared is None:
-                await self.reader.discard(cache)
 
     async def read_file(
         self, actor: ProjectActor, run_id: UUID, snapshot: dict[str, object], repository_id: UUID, path: str,

@@ -1,14 +1,17 @@
 """Skill Registry HTTP 路由。"""
 
+from collections.abc import AsyncIterator
 from typing import Annotated, NoReturn, cast
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile, status
 from fastapi.responses import Response
 
 from weora.modules.identity.api.dependencies import current_principal, write_principal
 from weora.modules.identity.application.ports import PrincipalRecord
 from weora.modules.identity.application.service import IdentityService
+from weora.modules.projects.domain import ProjectError
+from weora.modules.projects.service import ProjectService
 from weora.modules.skills.api.schemas import (
     ErrorResponse,
     PublishSkillRequest,
@@ -34,12 +37,16 @@ from weora.modules.skills.domain.errors import (
     SkillCursorInvalidError,
     SkillDraftChangedError,
     SkillDraftNotReadyError,
+    SkillKnowledgeReviewPendingError,
     SkillManifestInvalidError,
     SkillManifestMissingError,
+    SkillNamespaceInvalidError,
     SkillNotFoundError,
     SkillObjectMissingError,
     SkillPackageTooLargeError,
     SkillPermissionDeniedError,
+    SkillPromotionPathConflictError,
+    SkillPromotionSourceConflictError,
     SkillRegistryError,
     SkillRootAmbiguousError,
     SkillSlugConflictError,
@@ -48,11 +55,16 @@ from weora.modules.skills.domain.errors import (
     SkillVersionInvalidError,
     WorkspaceAccessDeniedError,
 )
+from weora.modules.skills.infrastructure.binding import scoped_skill_registry
+from weora.modules.skills.infrastructure.unit_of_work import RegistryPublicationHooks
 from weora.shared.api.request_id import get_request_id
+from weora.shared.infrastructure.database import SessionFactory
+from weora.shared.object_storage import ObjectStoragePort
 
 router = APIRouter(prefix="/workspaces/{workspace_id}/skills", tags=["Skills"])
 _MAX_UPLOAD_READ_BYTES = 50 * 1024 * 1024 + 1
 PackageUpload = Annotated[UploadFile, File(description=".zip 或 .skill 格式的完整 Skill 目录")]
+SkillNamespace = Annotated[str, Form(max_length=512, description="团队树中的 Skill 所属目录")]
 ReadPrincipal = Annotated[PrincipalRecord, Depends(current_principal)]
 WritePrincipal = Annotated[PrincipalRecord, Depends(write_principal)]
 
@@ -67,6 +79,30 @@ async def read_skill_upload(package: UploadFile) -> tuple[str, bytes]:
 
 def _service(request: Request) -> SkillRegistryService:
     return cast(SkillRegistryService, request.app.state.skill_registry_service)
+
+
+async def _scoped_service(
+    workspace_id: UUID, request: Request, principal: ReadPrincipal, project_id: UUID | None = None,
+) -> AsyncIterator[SkillRegistryService]:
+    """在选定项目的授权事务内管理项目资产，默认管理共享资产。"""
+    if principal.workspace_id != workspace_id:
+        _raise_http_error(WorkspaceAccessDeniedError())
+    if project_id is None:
+        yield _service(request)
+        return
+    sessions = cast(SessionFactory, request.app.state.db_session_factory)
+    projects = cast(ProjectService, request.app.state.project_service)
+    async with sessions() as db, db.begin():
+        try:
+            await projects.require_workspace_project(workspace_id, project_id, db)
+        except ProjectError as error:
+            raise HTTPException(404, detail={"code": error.code, "message": error.message}) from error
+        storage = cast(ObjectStoragePort | None, request.app.state.object_storage)
+        publication = cast(RegistryPublicationHooks, request.app.state.skill_publication)
+        yield await scoped_skill_registry(db, project_id, storage, publication=publication)
+
+
+ScopedSkillService = Annotated[SkillRegistryService, Depends(_scoped_service, scope="function")]
 
 
 def _actor(principal: PrincipalRecord) -> SkillActor:
@@ -88,10 +124,13 @@ def _raise_http_error(error: SkillRegistryError) -> NoReturn:
         error,
         (
             SkillSlugConflictError,
+            SkillPromotionPathConflictError,
+            SkillPromotionSourceConflictError,
             SkillVersionConflictError,
             SkillArchivedError,
             SkillContributionStaleError,
             SkillDraftChangedError,
+            SkillKnowledgeReviewPendingError,
         ),
     ):
         http_status = status.HTTP_409_CONFLICT
@@ -105,6 +144,7 @@ def _raise_http_error(error: SkillRegistryError) -> NoReturn:
             SkillArchiveUnsafePathError,
             SkillRootAmbiguousError,
             SkillManifestMissingError,
+            SkillNamespaceInvalidError,
             SkillManifestInvalidError,
             SkillVersionInvalidError,
             SkillDraftNotReadyError,
@@ -135,19 +175,21 @@ def _raise_http_error(error: SkillRegistryError) -> NoReturn:
 )
 async def create_skill(
     workspace_id: UUID,
-    request: Request,
-    package: Annotated[UploadFile, File(description=".zip 或 .skill 格式的完整 Skill 目录")],
-    principal: Annotated[PrincipalRecord, Depends(write_principal)],
+    service: ScopedSkillService,
+    package: PackageUpload,
+    principal: WritePrincipal,
+    namespace: SkillNamespace = "",
 ) -> SkillDetailResponse:
     """上传、校验并创建一个带初始草稿的 Skill。"""
     package_name, archive_bytes = await read_skill_upload(package)
     try:
-        skill = await _service(request).create_skill(
+        skill = await service.create_skill(
             actor=_actor(principal),
             workspace_id=workspace_id,
             package_name=package_name,
             archive_bytes=archive_bytes,
             request_id=get_request_id() or "unknown",
+            namespace=namespace,
         )
     except SkillRegistryError as exc:
         _raise_http_error(exc)
@@ -158,7 +200,7 @@ async def create_skill(
 async def preview_skill_file(
     workspace_id: UUID,
     skill_id: UUID,
-    request: Request,
+    service: ScopedSkillService,
     principal: ReadPrincipal,
     path: Annotated[str, Query(min_length=1, max_length=4096)],
     version: Annotated[str | None, Query(min_length=1, max_length=64)] = None,
@@ -169,7 +211,7 @@ async def preview_skill_file(
     if sum(bool(value) for value in (version, contribution_id, draft_sha256)) > 1:
         _raise_http_error(SkillNotFoundError())
     try:
-        text = await _service(request).preview_file(
+        text = await service.preview_file(
             _actor(principal),
             workspace_id,
             skill_id,
@@ -187,12 +229,12 @@ async def preview_skill_file(
 async def list_contributions(
     workspace_id: UUID,
     skill_id: UUID,
-    request: Request,
+    service: ScopedSkillService,
     principal: ReadPrincipal,
 ) -> list[SkillContributionResponse]:
     """管理员查看指定资产的待审队列。"""
     try:
-        items = await _service(request).contributions(_actor(principal), workspace_id, skill_id)
+        items = await service.contributions(_actor(principal), workspace_id, skill_id)
     except SkillRegistryError as exc:
         _raise_http_error(exc)
     return [SkillContributionResponse.from_record(item) for item in items]
@@ -203,12 +245,12 @@ async def get_contribution(
     workspace_id: UUID,
     skill_id: UUID,
     contribution_id: UUID,
-    request: Request,
+    service: ScopedSkillService,
     principal: ReadPrincipal,
 ) -> SkillDraftResponse:
     """复用草稿校验报告供管理员审阅。"""
     try:
-        draft = await _service(request).contribution_draft(_actor(principal), workspace_id, skill_id, contribution_id)
+        draft = await service.contribution_draft(_actor(principal), workspace_id, skill_id, contribution_id)
     except SkillRegistryError as exc:
         _raise_http_error(exc)
     return SkillDraftResponse.from_record(draft)
@@ -220,12 +262,12 @@ async def decide_contribution(
     skill_id: UUID,
     contribution_id: UUID,
     payload: SkillContributionDecision,
-    request: Request,
+    service: ScopedSkillService,
     principal: WritePrincipal,
 ) -> None:
     """接受为待发布草稿，或驳回候选包。"""
     try:
-        await _service(request).review_contribution(
+        await service.review_contribution(
             _actor(principal),
             workspace_id,
             skill_id,
@@ -244,7 +286,7 @@ async def decide_contribution(
 )
 async def list_skills(
     workspace_id: UUID,
-    request: Request,
+    service: ScopedSkillService,
     principal: Annotated[PrincipalRecord, Depends(current_principal)],
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
     search: Annotated[str | None, Query(max_length=120)] = None,
@@ -256,7 +298,7 @@ async def list_skills(
 ) -> SkillListResponse:
     """列出当前工作空间中的 Skill 资产。"""
     try:
-        page = await _service(request).list_skills(
+        page = await service.list_skills(
             actor=_actor(principal),
             workspace_id=workspace_id,
             limit=limit,
@@ -276,12 +318,12 @@ async def list_skills(
 async def get_skill(
     workspace_id: UUID,
     skill_id: UUID,
-    request: Request,
+    service: ScopedSkillService,
     principal: Annotated[PrincipalRecord, Depends(current_principal)],
 ) -> SkillDetailResponse:
     """获取 Skill 元数据、当前草稿和最新发布版本摘要。"""
     try:
-        skill = await _service(request).get_skill(
+        skill = await service.get_skill(
             actor=_actor(principal),
             workspace_id=workspace_id,
             skill_id=skill_id,
@@ -296,12 +338,12 @@ async def update_skill(
     workspace_id: UUID,
     skill_id: UUID,
     payload: UpdateSkillRequest,
-    request: Request,
+    service: ScopedSkillService,
     principal: Annotated[PrincipalRecord, Depends(write_principal)],
 ) -> SkillDetailResponse:
     """修改列表展示名称和描述，不改变包内清单。"""
     try:
-        skill = await _service(request).update_metadata(
+        skill = await service.update_metadata(
             actor=_actor(principal),
             workspace_id=workspace_id,
             skill_id=skill_id,
@@ -318,14 +360,14 @@ async def update_skill(
 async def replace_skill_draft(
     workspace_id: UUID,
     skill_id: UUID,
-    request: Request,
+    service: ScopedSkillService,
     package: Annotated[UploadFile, File(description="替换当前草稿的完整 Skill 包")],
     principal: Annotated[PrincipalRecord, Depends(write_principal)],
 ) -> SkillDraftResponse:
     """校验并替换当前草稿，历史发布版本不发生变化。"""
     package_name, archive_bytes = await read_skill_upload(package)
     try:
-        draft = await _service(request).replace_draft(
+        draft = await service.replace_draft(
             actor=_actor(principal),
             workspace_id=workspace_id,
             skill_id=skill_id,
@@ -342,12 +384,12 @@ async def replace_skill_draft(
 async def get_skill_draft(
     workspace_id: UUID,
     skill_id: UUID,
-    request: Request,
+    service: ScopedSkillService,
     principal: Annotated[PrincipalRecord, Depends(current_principal)],
 ) -> SkillDraftResponse:
     """获取当前草稿的包校验报告。"""
     try:
-        skill = await _service(request).get_skill(
+        skill = await service.get_skill(
             actor=_actor(principal),
             workspace_id=workspace_id,
             skill_id=skill_id,
@@ -363,17 +405,18 @@ async def get_skill_draft(
     "/{skill_id}/publish",
     response_model=SkillVersionResponse,
     status_code=status.HTTP_201_CREATED,
+    responses={status.HTTP_409_CONFLICT: {"model": ErrorResponse}},
 )
 async def publish_skill(
     workspace_id: UUID,
     skill_id: UUID,
     payload: PublishSkillRequest,
-    request: Request,
+    service: ScopedSkillService,
     principal: Annotated[PrincipalRecord, Depends(write_principal)],
 ) -> SkillVersionResponse:
     """以当前草稿发布一个不可变 SemVer 版本。"""
     try:
-        version = await _service(request).publish(
+        version = await service.publish(
             actor=_actor(principal),
             workspace_id=workspace_id,
             skill_id=skill_id,
@@ -391,12 +434,12 @@ async def publish_skill(
 async def list_skill_versions(
     workspace_id: UUID,
     skill_id: UUID,
-    request: Request,
+    service: ScopedSkillService,
     principal: Annotated[PrincipalRecord, Depends(current_principal)],
 ) -> SkillVersionListResponse:
     """获取 Skill 的全部不可变发布版本。"""
     try:
-        versions = await _service(request).list_versions(
+        versions = await service.list_versions(
             actor=_actor(principal),
             workspace_id=workspace_id,
             skill_id=skill_id,
@@ -411,12 +454,12 @@ async def get_skill_version(
     workspace_id: UUID,
     skill_id: UUID,
     version: str,
-    request: Request,
+    service: ScopedSkillService,
     principal: Annotated[PrincipalRecord, Depends(current_principal)],
 ) -> SkillVersionResponse:
     """获取一个不可变版本的完整校验快照。"""
     try:
-        record = await _service(request).get_version(
+        record = await service.get_version(
             actor=_actor(principal),
             workspace_id=workspace_id,
             skill_id=skill_id,
@@ -432,12 +475,12 @@ async def download_skill_version(
     workspace_id: UUID,
     skill_id: UUID,
     version: str,
-    request: Request,
+    service: ScopedSkillService,
     principal: Annotated[PrincipalRecord, Depends(current_principal)],
 ) -> Response:
     """完成权限和摘要校验后下载发布包。"""
     try:
-        download = await _service(request).download_version(
+        download = await service.download_version(
             actor=_actor(principal),
             workspace_id=workspace_id,
             skill_id=skill_id,
@@ -464,12 +507,12 @@ async def _change_archive_status(
     workspace_id: UUID,
     skill_id: UUID,
     archived: bool,
-    request: Request,
+    service: SkillRegistryService,
     principal: PrincipalRecord,
 ) -> SkillDetailResponse:
     """复用归档与恢复的鉴权、错误和响应映射。"""
     try:
-        skill = await _service(request).set_archived(
+        skill = await service.set_archived(
             actor=_actor(principal),
             workspace_id=workspace_id,
             skill_id=skill_id,
@@ -485,7 +528,7 @@ async def _change_archive_status(
 async def archive_skill(
     workspace_id: UUID,
     skill_id: UUID,
-    request: Request,
+    service: ScopedSkillService,
     principal: Annotated[PrincipalRecord, Depends(write_principal)],
 ) -> SkillDetailResponse:
     """从活跃资产列表中归档 Skill。"""
@@ -493,16 +536,20 @@ async def archive_skill(
         workspace_id=workspace_id,
         skill_id=skill_id,
         archived=True,
-        request=request,
+        service=service,
         principal=principal,
     )
 
 
-@router.post("/{skill_id}/restore", response_model=SkillDetailResponse)
+@router.post(
+    "/{skill_id}/restore",
+    response_model=SkillDetailResponse,
+    responses={status.HTTP_409_CONFLICT: {"model": ErrorResponse}},
+)
 async def restore_skill(
     workspace_id: UUID,
     skill_id: UUID,
-    request: Request,
+    service: ScopedSkillService,
     principal: Annotated[PrincipalRecord, Depends(write_principal)],
 ) -> SkillDetailResponse:
     """把已归档 Skill 恢复为活跃资产。"""
@@ -510,21 +557,22 @@ async def restore_skill(
         workspace_id=workspace_id,
         skill_id=skill_id,
         archived=False,
-        request=request,
+        service=service,
         principal=principal,
     )
 
 
 @router.get("/{skill_id}/events", response_model=SkillEventListResponse)
 async def list_skill_events(
+    request: Request,
     workspace_id: UUID,
     skill_id: UUID,
-    request: Request,
+    service: ScopedSkillService,
     principal: Annotated[PrincipalRecord, Depends(current_principal)],
 ) -> SkillEventListResponse:
     """获取 Skill 创建、发布、归档等关键活动。"""
     try:
-        events = await _service(request).list_events(
+        events = await service.list_events(
             actor=_actor(principal),
             workspace_id=workspace_id,
             skill_id=skill_id,

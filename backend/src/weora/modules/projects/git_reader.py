@@ -31,6 +31,7 @@ from weora.modules.projects.domain import (
     DEFAULT_REPOSITORY_ARCHIVE_BYTES,
     ProjectError,
     RepositoryArchive,
+    RepositoryBlob,
     RepositorySource,
     git_address,
     validate_repository_directory_path,
@@ -202,6 +203,15 @@ class GitRepositoryReader:
             raise ProjectError("REPOSITORY_GIT_FAILED", "Git 操作失败，请检查地址、分支、凭据和网络") from None
 
     async def check(self, source: RepositorySource) -> str:
+        revision = await self._remote_revision(source, allow_missing=False)
+        assert revision is not None
+        return revision
+
+    async def report_revision(self, source: RepositorySource) -> str | None:
+        """读取报表分支的固定提交，区分分支缺失和网络或授权失败。"""
+        return await self._remote_revision(source, allow_missing=True)
+
+    async def _remote_revision(self, source: RepositorySource, *, allow_missing: bool) -> str | None:
         # 兼容旧库保存的云效网页地址；请求 URL 与认证 Header 的作用域必须一致。
         source = replace(source, git_url=git_address(source.git_url))
         cache_id = uuid4()
@@ -210,7 +220,10 @@ class GitRepositoryReader:
         try:
             env = await self._environment(path, source)
             ref = "refs/heads/" + source.branch
-            raw = await self._run(path, env, "ls-remote", "--exit-code", "--refs", "--", source.git_url, ref)
+            exit_code = () if allow_missing else ("--exit-code",)
+            raw = await self._run(path, env, "ls-remote", *exit_code, "--refs", "--", source.git_url, ref)
+            if allow_missing and not raw.strip():
+                return None
             parts = raw.strip().split(b"\t")
             if len(parts) != 2 or parts[1].decode("utf-8") != ref:
                 raise ProjectError("REPOSITORY_BRANCH_UNAVAILABLE", "默认分支不存在或返回不完整")
@@ -391,6 +404,62 @@ class GitRepositoryReader:
         except (UnicodeError, ProjectError):
             return None
         return path
+
+    async def index_blobs(
+        self, cache_id: UUID, revision: str, paths: tuple[str, ...] = (),
+    ) -> list[RepositoryBlob]:
+        """只返回允许读取的普通对象标识和大小。内容没变时无需读取对象正文。"""
+        revision_id(revision.encode())
+        for path in paths:
+            validate_repository_file_path(path)
+        root = self._path(cache_id)
+        env = await self._environment(root)
+        args = ("--literal-pathspecs", "ls-tree", "-rzl", "--full-tree", revision, "--", *paths)
+        raw = bytearray()
+        try:
+            if isinstance(self.runner, StreamingGitRunner):
+                await self.runner.stream(root, env, *args, consumer=raw.extend, max_bytes=16 * 1024 * 1024)
+            else:
+                raw.extend(await self._run(root, env, *args))
+        except TimeoutError:
+            raise ProjectError("REPOSITORY_TIMEOUT", "代码目录读取超时") from None
+        except DeliveryError:
+            raise ProjectError("REPOSITORY_INDEX_CATALOG_UNAVAILABLE", "固定提交目录无法读取或超过索引预算") from None
+        blobs: list[RepositoryBlob] = []
+        for record in filter(None, bytes(raw).split(b"\0")):
+            meta, name = record.split(b"\t", 1)
+            mode, kind, oid, size = meta.split()
+            if mode in {b"100644", b"100755"} and kind == b"blob" and (visible := self._visible_path(name)):
+                blobs.append(RepositoryBlob(visible, revision_id(oid), int(size)))
+        return blobs
+
+    async def index_text(self, cache_id: UUID, blob: RepositoryBlob, *, max_bytes: int = 256 * 1024) -> str | None:
+        """只接收来自 index_blobs 的对象，文本不上送客户端。"""
+        validate_repository_file_path(blob.path)
+        if blob.size > max_bytes:
+            return None
+        root = self._path(cache_id)
+        env = await self._environment(root)
+        args = ("cat-file", "blob", revision_id(blob.oid.encode()))
+        if blob.size > 2 * 1024 * 1024 and isinstance(self.runner, StreamingGitRunner):
+            data = bytearray()
+            try:
+                await self.runner.stream(root, env, *args, consumer=data.extend, max_bytes=max_bytes)
+            except TimeoutError:
+                raise ProjectError("REPOSITORY_TIMEOUT", "固定报表对象读取超时") from None
+            except DeliveryError:
+                raise ProjectError("REPOSITORY_GIT_FAILED", "固定报表对象无法读取") from None
+            raw = bytes(data)
+        else:
+            raw = await self._run(root, env, *args)
+        if len(raw) != blob.size:
+            raise ProjectError("REPOSITORY_PROTOCOL_ERROR", "固定提交对象长度不一致")
+        if b"\x00" in raw or raw.startswith(b"version https://git-lfs.github.com/spec/v1"):
+            return None
+        try:
+            return raw.decode("utf-8-sig")
+        except UnicodeError:
+            return None
 
     async def find(self, cache_id: UUID, revision: str, path: str, pattern: str) -> dict[str, object]:
         revision_id(revision.encode())

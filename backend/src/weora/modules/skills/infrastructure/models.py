@@ -17,6 +17,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     false,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -34,17 +35,28 @@ class SkillPackageModel(Base):
 
 
 class SkillModel(Base):
-    """工作空间中的可管理 Skill 资产。"""
+    """可管理 Skill 资产，按工作空间或所属项目分发。"""
 
     __tablename__ = "skills"
     __table_args__ = (
-        UniqueConstraint("workspace_id", "slug", name="uq_skills_workspace_slug"),
+        Index(
+            "uq_skills_shared_namespace_slug", "workspace_id", "namespace", "slug", unique=True,
+            postgresql_where=text("project_id IS NULL"), sqlite_where=text("project_id IS NULL"),
+        ),
+        Index(
+            "uq_skills_project_namespace_slug", "workspace_id", "project_id", "namespace", "slug", unique=True,
+            postgresql_where=text("project_id IS NOT NULL"), sqlite_where=text("project_id IS NOT NULL"),
+        ),
         Index("ix_skills_workspace_updated_at", "workspace_id", "updated_at"),
+        Index("ix_skills_workspace_project_id", "workspace_id", "project_id"),
     )
 
     id: Mapped[UUID] = mapped_column(primary_key=True)
     workspace_id: Mapped[UUID] = mapped_column(ForeignKey("workspaces.id"))
+    # 空值表示共享。项目范围在首次发布前固定，后续版本均继承。
+    project_id: Mapped[UUID | None] = mapped_column(ForeignKey("projects.id"))
     slug: Mapped[str] = mapped_column(String(64))
+    namespace: Mapped[str] = mapped_column(String(512), server_default="")
     display_name: Mapped[str] = mapped_column(String(120))
     description: Mapped[str] = mapped_column(Text())
     status: Mapped[str] = mapped_column(String(16), default="active")
@@ -103,6 +115,35 @@ class SkillVersionModel(Base):
     published_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     interface: Mapped[dict[str, str | None] | None] = mapped_column(JSON(none_as_null=True))
     uploader_name: Mapped[str | None] = mapped_column(String(120))
+
+
+class SkillSearchVersion(Base):
+    """从已发布 SKILL.md 派生的排序字段和摘要。"""
+
+    __tablename__ = "skill_search_versions"
+
+    version_id: Mapped[UUID] = mapped_column(ForeignKey("skill_versions.id", ondelete="CASCADE"), primary_key=True)
+    title: Mapped[str] = mapped_column(String(160))
+    tags: Mapped[list[str]] = mapped_column(JSON())
+    excerpt: Mapped[str] = mapped_column(Text())
+    domain: Mapped[str] = mapped_column(String(16))
+    title_length: Mapped[int]
+    length: Mapped[int]
+
+
+class SkillSearchTerm(Base):
+    """词项绑定 Registry 的固定版本，归档及换版由读路径判断。"""
+
+    __tablename__ = "skill_search_terms"
+    __table_args__ = (Index("ix_skill_search_terms_version", "version_id"),)
+
+    workspace_id: Mapped[UUID] = mapped_column(primary_key=True)
+    term: Mapped[str] = mapped_column(String(160), primary_key=True)
+    version_id: Mapped[UUID] = mapped_column(
+        ForeignKey("skill_search_versions.version_id", ondelete="CASCADE"), primary_key=True,
+    )
+    fields: Mapped[int]
+    frequency: Mapped[int]
 
 
 class SkillContributionModel(Base):

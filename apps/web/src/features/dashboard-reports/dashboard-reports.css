@@ -1,0 +1,128 @@
+.dashboard-reports {
+  min-width: 0;
+}
+
+.dashboard-reports .console-table {
+  min-width: 0;
+}
+
+.report-stack {
+  display: grid;
+  gap: calc(var(--spacing) * 5);
+  min-width: 0;
+}
+
+.scorer-source-tabs > :first-child {
+  justify-self: start;
+  max-width: 100%;
+}
+
+.sync-status-line {
+  justify-content: space-between;
+}
+
+.sync-source-field {
+  display: grid;
+  gap: calc(var(--spacing) * 2);
+}
+
+.report-toolbar,
+.report-pagination,
+.report-inline {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: calc(var(--spacing) * 2);
+  min-width: 0;
+}
+
+.report-toolbar > * {
+  max-width: 100%;
+}
+
+.report-toolbar > .console-select {
+  width: fit-content;
+  min-width: min(8rem, 100%);
+}
+
+.report-muted {
+  color: var(--muted);
+  font-size: 0.8125rem;
+}
+
+.report-metrics {
+  margin: 0;
+}
+
+.report-pagination {
+  justify-content: flex-end;
+  margin-top: calc(var(--spacing) * 3);
+}
+
+.report-chart-scroll {
+  /* 屏幕阅读器标签使用绝对定位，定位范围必须留在图表滚动区内。 */
+  position: relative;
+  overflow-x: auto;
+}
+
+.report-chart {
+  display: flex;
+  align-items: end;
+  gap: calc(var(--spacing) * 2);
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.report-chart li {
+  display: grid;
+  flex: 1 0 2.625rem;
+  gap: calc(var(--spacing) * 1);
+  justify-items: center;
+}
+
+.report-chart-slot {
+  display: flex;
+  width: 100%;
+  max-width: 4.5rem;
+  height: 8rem;
+  align-items: end;
+  gap: 2px;
+}
+
+.report-chart-slot span {
+  flex: 1;
+  background: var(--accent);
+  border-radius: 4px 4px 0 0;
+}
+
+.report-chart-slot [data-series="1"] {
+  background: var(--success);
+}
+
+.report-chart-label {
+  color: var(--muted);
+  white-space: nowrap;
+  font-size: 0.75rem;
+}
+
+.report-detail {
+  display: grid;
+  gap: calc(var(--spacing) * 3);
+  overflow-wrap: anywhere;
+}
+
+.report-details > summary {
+  color: var(--accent);
+  cursor: pointer;
+  margin-block: calc(var(--spacing) * 3);
+}
+
+@media (max-width: 640px) {
+  .report-chart-slot {
+    height: 5.75rem;
+  }
+  .report-chart li {
+    flex-basis: 2.25rem;
+  }
+}

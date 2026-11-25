@@ -397,11 +397,22 @@ class RunService:
         return RuntimeSession(f"{run.id}:{lease.fencing_token}", pull=pull, checkpoint=checkpoint)
 
     async def conversation(self, actor: RunActor, workspace_id: UUID, run_id: UUID) -> dict[str, object]:
-        """返回本人可访问的运行输出和续接指令，群聊及共享运行仅展示当前轮。"""
+        """授权后组装任务目标、运行历史和续接指令，并标明当前轮是否可继续输入。
+
+        私有对话可读取原任务目标和历史。群聊及共享运行只返回当前轮的授权视图。
+        """
         self._require_workspace(actor, workspace_id)
         async with self._uow_factory() as uow:
             run, task = await self._authorized_run(uow, actor, run_id)
             private = task.audience == "private" and run.collaboration_context is None
+
+            # 续接轮的投影视图可能已换成本轮指令，私有对话仍以原始任务为目标。
+            original_task = await uow.tasks.get_private(
+                workspace_id=workspace_id, task_id=run.task_id, user_id=run.created_by,
+            ) if private else None
+            task_goal = original_task.instruction if original_task else task.instruction
+
+            # 当前协作有待处理事项时，仍可查看历史，但暂停接收新的续接指令。
             collaboration = await uow.tasks.collaboration(workspace_id, task.id) if private else None
             can_send = private and not (
                 collaboration
@@ -409,6 +420,8 @@ class RunService:
             )
             items = await uow.tasks.inputs(workspace_id, task.id, actor.user_id, recent=True) if private else []
             candidates = await uow.store.task_runs(actor=actor, task_id=task.id, limit=12) if private else [run]
+
+            # 候选历史逐条复核权限，当前轮复用入口已授权的视图。
             candidates = [row for row in candidates if row.id != run.id] + [run]
             visible: dict[UUID, RunRecord] = {}
             history = []
@@ -429,6 +442,8 @@ class RunService:
                     "updated_at": authorized.updated_at,
                     "agent_name": authorized.agent_name,
                 })
+
+            # 调度已失去目标或执行租约时，续接窗口展示未送达的结果。
             messages = []
             for item in items:
                 status = item.status
@@ -448,6 +463,7 @@ class RunService:
             return {
                 "runs": history, "inputs": messages, "can_send": can_send,
                 "can_steer": can_send and self._can_steer(run),
+                "task_goal": task_goal,
             }
 
     async def task_input(self, actor: RunActor, input_id: UUID) -> TaskInput:

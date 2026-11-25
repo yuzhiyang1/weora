@@ -9,17 +9,18 @@ import { PackageNotes } from "./SkillPackageNotes";
 import { formatDate } from "./SkillsPage";
 
 /** 待审包可单独预览，接受后仍需通过现有发布流程。 */
-export function SkillContributions({ workspaceId, skillId, archived, hasDraft, onChanged }: {
+export function SkillContributions({ workspaceId, skillId, projectId, archived, hasDraft, onChanged }: {
   workspaceId: string;
   skillId: string;
+  projectId: string | undefined;
   archived: boolean;
   hasDraft: boolean;
   onChanged: (accept: boolean) => Promise<void>;
 }) {
   const client = useQueryClient();
   const [selected, setSelected] = useState<SkillContribution | null>(null);
-  const queryKey = ["skill-contributions", workspaceId, skillId];
-  const list = useQuery({ queryKey, queryFn: () => listSkillContributions(workspaceId, skillId) });
+  const queryKey = ["skill-contributions", workspaceId, skillId, projectId];
+  const list = useQuery({ queryKey, queryFn: () => listSkillContributions(workspaceId, skillId, projectId) });
   if (list.isPending) return <Skeleton active />;
   if (list.isError) return <AssetLoadError title="待审核列表暂时无法加载" description={list.error.message}
     onRetry={() => void list.refetch()} />;
@@ -33,7 +34,7 @@ export function SkillContributions({ workspaceId, skillId, archived, hasDraft, o
         <time dateTime={item.created_at}>{formatDate(item.created_at)}</time>
       </div>
     </Card>)}
-    {selected && <ReviewDialog key={selected.id} workspaceId={workspaceId} skillId={skillId} item={selected}
+    {selected && <ReviewDialog key={selected.id} workspaceId={workspaceId} skillId={skillId} projectId={projectId} item={selected}
       archived={archived} hasDraft={hasDraft} onClose={() => setSelected(null)}
       onChanged={async (accept) => {
         await client.invalidateQueries({ queryKey });
@@ -44,9 +45,10 @@ export function SkillContributions({ workspaceId, skillId, archived, hasDraft, o
 }
 
 /** 确认之前展示候选包自身的文件和校验结果。 */
-function ReviewDialog({ workspaceId, skillId, item, archived, hasDraft, onClose, onChanged }: {
+function ReviewDialog({ workspaceId, skillId, projectId, item, archived, hasDraft, onClose, onChanged }: {
   workspaceId: string;
   skillId: string;
+  projectId: string | undefined;
   item: SkillContribution;
   archived: boolean;
   hasDraft: boolean;
@@ -54,11 +56,11 @@ function ReviewDialog({ workspaceId, skillId, item, archived, hasDraft, onClose,
   onChanged: (accept: boolean) => Promise<void>;
 }) {
   const details = useQuery({
-    queryKey: ["skill-contribution", workspaceId, skillId, item.id],
-    queryFn: () => getSkillContribution(workspaceId, skillId, item.id),
+    queryKey: ["skill-contribution", workspaceId, skillId, projectId, item.id],
+    queryFn: () => getSkillContribution(workspaceId, skillId, item.id, projectId),
   });
   const review = useMutation({
-    mutationFn: (accept: boolean) => decideSkillContribution(workspaceId, skillId, item.id, accept),
+    mutationFn: (accept: boolean) => decideSkillContribution(workspaceId, skillId, item.id, accept, projectId),
     onSuccess: (_, accept) => onChanged(accept),
   });
   return <Modal visible title="审核 Skill 候选包" width={950}
@@ -69,7 +71,7 @@ function ReviewDialog({ workspaceId, skillId, item, archived, hasDraft, onClose,
       {details.isError && <AssetLoadError title="候选包暂时无法加载" description={details.error.message}
         onRetry={() => void details.refetch()} />}
       {details.data && <>
-        <SkillFileBrowser workspaceId={workspaceId} skillId={skillId}
+        <SkillFileBrowser workspaceId={workspaceId} skillId={skillId} projectId={projectId}
           source={{ contributionId: item.id }} files={details.data.files} />
         <PackageNotes record={details.data} />
       </>}
