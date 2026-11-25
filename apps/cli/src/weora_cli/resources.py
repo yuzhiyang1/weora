@@ -19,7 +19,7 @@ from weora_cli import rule_import, rule_install
 from weora_cli.collab_client import CollabError, as_object, items, paired_client, read_config, request_json, write_json
 from weora_cli.commands import JsonValue
 from weora_cli.resource_delivery import Object
-from weora_cli.rule_adapters import RULE_TOOLS, home, rule_directory, split_markdown, stem
+from weora_cli.rule_adapters import RULE_TOOLS, home, render_native, rule_directory, split_markdown, stem
 from weora_cli.skill_local import unsafe
 
 COMMANDS = {
@@ -287,20 +287,50 @@ def push_namespace(args: argparse.Namespace, current: Object, config: Object) ->
     return chosen if chosen != "shared" else None
 
 
+def check_native_edit_base(
+    source_path: str,
+    delivered: Object,
+    team_text: str,
+    team_rule: Object | None,
+    format_id: str,
+    assets: Path,
+) -> None:
+    """确认本地编辑仍以团队当前文件为基线，支持旧版投递记录。"""
+    expected_hash = delivered.get("source_hash")
+    if isinstance(expected_hash, str):
+        baseline_matches = expected_hash == hashlib.sha256(team_text.encode("utf-8")).hexdigest()
+    else:
+        # 旧账本只有工具副本的摘要，用当前团队内容重新渲染后比较。
+        baseline_matches = (
+            team_rule is not None
+            and delivered.get("hash")
+            == hashlib.sha256(render_native(format_id, team_rule, team_text, assets).encode("utf-8")).hexdigest()
+        )
+    if not baseline_matches:
+        raise CollabError(
+            "RESOURCE_EDIT_BASE_CHANGED",
+            f"团队规则已更新：{source_path}。请对照最新团队版本合并本地编辑后重新提交。",
+        )
+
+
 def scan_local(
     path: Path, root: Path, config: Object, current: Object, *, user: bool
 ) -> list[tuple[str, str | None, str]]:
-    """返回本地名称、已知团队路径和变更正文，供发布命令确定新规则的落点。"""
+    """扫描当前检出的本地规则，核对投递基线后返回可发布的修改。"""
+    # 读取此检出的账本。其他 worktree 刷新的共享快照不能替换编辑基线。
     tracked = as_object(delivery.read(rule_install.native_ledger(path, root)).get("files", {}))
     placements = as_object(config.get("placements", {}))
     files = as_object(current["files"])
-    rules = {str(rule["name"]): str(rule["path"]) for rule in delivery.project_rows(current, "rules")}
-    folder_names = {name for name, source in rules.items() if source.endswith("/RULE.md")}
+    team_rules = {str(rule["name"]): rule for rule in delivery.project_rows(current, "rules")}
+    folder_names = {name for name, rule in team_rules.items() if str(rule["path"]).endswith("/RULE.md")}
+    pending_removals = set(delivery.values(config.get("pending_removals", [])))
+    assets = delivery.asset_root(path, root, user=user)
     sources = {
         directory: RULE_TOOLS[runtime].format
         for runtime in ["claude", *rule_install.agents(config)]
         if (directory := rule_directory(runtime, None if user else root)) is not None
     }
+    # 按团队源路径收集编辑，转换格式的副本只回写正文。
     changes: list[tuple[str, str | None, str]] = []
     for directory, format_id in sources.items():
         for file in rule_import.rule_files(directory, limit=2 * 1024 * 1024):
@@ -314,27 +344,46 @@ def scan_local(
                 continue
             if any(name == folder or name.startswith(folder + "/") for folder in folder_names):
                 continue
-            existing = str(placements.get(name) or "")
-            target = existing if existing in files else rules.get(name)
+            team_rule = team_rules.get(name)
+            owned_source = previous.get("source")
+            placed_source = str(placements.get(name) or "")
+            target = str(team_rule["path"]) if team_rule else None
+            if placed_source in files:
+                target = placed_source
+            if isinstance(owned_source, str):
+                target = owned_source
+            elif previous and target is None:
+                target = placed_source or f"rules/{name}.md"
+            if target is not None and target in pending_removals:
+                continue
+            team_text = files.get(target) if target else None
+            if previous and not isinstance(team_text, str):
+                raise CollabError("RESOURCE_EDIT_BASE_CHANGED", f"本地副本对应的团队文件已移除或迁移：{target}。")
+
             try:
                 text = raw.decode("utf-8")
             except UnicodeError as exc:
                 raise CollabError("RESOURCE_SOURCE_INVALID", f"规则必须是 UTF-8 文本：{file.name}。") from exc
             if format_id != "verbatim":
-                if target is None:
+                if not isinstance(team_text, str):
                     # 私有原生规则需要经导入分类，不能作为新团队规则直接回推。
                     continue
-                header, team_body = split_markdown(str(files[target]))
+                header, team_body = split_markdown(team_text)
                 _, body = split_markdown(text)
                 if body == team_body:
                     continue
                 text = (header.rstrip() + "\n\n" if header else "") + body + "\n"
-            if target is None or files.get(target) != text:
-                changes.append((name, target, text))
+            if team_text == text:
+                continue
+            if previous and target is not None and isinstance(team_text, str):
+                check_native_edit_base(target, previous, team_text, team_rule, format_id, assets)
+            changes.append((name, target, text))
     return changes
 
 
 def push(args: argparse.Namespace, path: Path, root: Path, config: Object, *, user: bool) -> Object:
+    """准备待发布路径，核对编辑基线和删除状态，再创建或更新候选分支。"""
+    # 只用最新发布修订承接已通过基线检查的变更，保留其他文件的并发更新。
     current = snapshot(config)
     placements = as_object(config.get("placements", {})).copy()
     if args.from_dir:
@@ -352,6 +401,7 @@ def push(args: argparse.Namespace, path: Path, root: Path, config: Object, *, us
             if target in updates and updates[target] != body:
                 raise CollabError("RESOURCE_SOURCE_CONFLICT", f"多个本地工具修改了同一条规则：{target}。")
             updates[target] = body
+    # 过滤本机已经发起删除的内容，避免目录仍留有副本时被重新发布。
     main = as_object(current["files"])
     pending_removals = delivery.values(config.get("pending_removals", []))
     for name in [*updates]:
@@ -360,10 +410,22 @@ def push(args: argparse.Namespace, path: Path, root: Path, config: Object, *, us
             for removed in pending_removals
         ):
             updates.pop(name)
+    if args.from_dir and (last_sync := as_object(config.get("snapshot", {}))):
+        last_files = as_object(last_sync["files"])
+        conflicts = sorted(
+            name for name, value in updates.items() if main.get(name) not in (last_files.get(name), value)
+        )
+        if conflicts:
+            raise CollabError(
+                "RESOURCE_EDIT_BASE_CHANGED",
+                f"团队源已更新：{', '.join(conflicts)}。请对照最新团队版本合并本地编辑后重新提交。",
+            )
     if not args.branch and not config.get("branch"):
         updates = {key: value for key, value in updates.items() if main.get(key) != value}
     if not updates:
         return {"status": "unchanged"}
+
+    # 先确认变更，再记录候选分支和新规则的放置位置。
     if not args.all:
         if not sys.stdin.isatty():
             raise CollabError("RESOURCE_CONFIRMATION_REQUIRED", "非交互环境提交规则需要传入 --all。")
@@ -428,6 +490,36 @@ def remove(args: argparse.Namespace, path: Path, root: Path, config: Object, *, 
     return change
 
 
+def uninstall(path: Path, root: Path, config: Object, *, user: bool) -> Object:
+    """清理所有属于这次安装的副本，全部完成后解除共享绑定，失败时保留重试入口。"""
+    # Git 共用一份绑定，各检出只有存在安装账本时才需要清理。
+    affected = [root]
+    if not user:
+        for checkout in delivery.worktree_roots(root):
+            if checkout == root:
+                continue
+            delivered = (
+                rule_install.native_ledger(path, checkout).exists() or delivery.worktree_ledger(path, checkout).exists()
+            )
+            if not delivered:
+                continue
+            try:
+                checkout_config, _ = delivery.installed(checkout)
+            except CollabError as exc:
+                raise CollabError("RESOURCE_WORKTREE_UNAVAILABLE", f"无法读取已投递的检出：{checkout}。") from exc
+            if checkout_config != path:
+                raise CollabError("RESOURCE_WORKTREE_UNAVAILABLE", f"原检出已不属于此 Git 仓库：{checkout}。")
+            affected.append(checkout)
+
+    # 保留个人编辑及其附件，所有已管理投递清理后才能移除共享配置。
+    for checkout in affected:
+        rule_install.apply_native(path, checkout, config, [], user=user)
+        retained = rule_install.retained_rules(path, checkout)
+        delivery.apply_assets(path, checkout, [], user=user, retain=retained)
+    path.unlink()
+    return {"status": "uninstalled"}
+
+
 def execute(args: argparse.Namespace) -> JsonValue:
     command = args.operation
     cwd = Path.cwd()
@@ -473,10 +565,7 @@ def execute(args: argparse.Namespace) -> JsonValue:
                 return request(config, "POST", f"/changes/{identifier}/merge", {"expected": change["revision"]})
             return request(config, "GET", f"/changes/{identifier}")
         if command == "uninstall":
-            rule_install.apply_native(path, root, config, [], user=user)
-            delivery.apply_assets(path, root, [], user=user, retain=rule_install.retained_rules(path, root))
-            path.unlink()
-            return {"status": "uninstalled"}
+            return uninstall(path, root, config, user=user)
         if command == "list":
             return {"items": snapshot(config, str(config.get("ref") or "main"))["rules"]}
         if command == "recall":

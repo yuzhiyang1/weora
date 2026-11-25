@@ -7,7 +7,8 @@ from alembic import command
 from alembic.autogenerate import compare_metadata
 from alembic.config import Config
 from alembic.migration import MigrationContext
-from sqlalchemy import UniqueConstraint, create_engine, inspect
+from alembic.operations import Operations
+from sqlalchemy import String, UniqueConstraint, create_engine, inspect
 
 from tests.support.settings import IsolatedAppSettings
 from weora.bootstrap import settings
@@ -58,5 +59,32 @@ def test_console_run_migration_matches_metadata_and_can_downgrade(
         command.upgrade(config, "head")
         with engine.connect() as connection:
             assert "runs" in inspect(connection).get_table_names()
+    finally:
+        engine.dispose()
+
+
+def test_repository_revision_nullable_after_upgrading_a_legacy_0027_database(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """重现已停在 0027、且尚未执行 revision 可空迁移的数据库。"""
+    path = tmp_path / "legacy.db"
+    isolated = IsolatedAppSettings(database_url=f"sqlite+aiosqlite:///{path}", environment="test")
+    monkeypatch.setattr(settings, "get_settings", lambda: isolated)
+    config = Config(str(Path(__file__).parents[2] / "alembic.ini"))
+    config.set_main_option("script_location", str(Path(__file__).parents[2] / "migrations"))
+
+    command.upgrade(config, "20261110_0027")
+    engine = create_engine(f"sqlite:///{path}")
+    try:
+        with engine.begin() as connection:
+            # 当前 0027 的祖先已包含修复，显式恢复历史数据库实际保留的约束。
+            operations = Operations(MigrationContext.configure(connection))
+            with operations.batch_alter_table("project_run_repositories") as batch:
+                batch.alter_column("revision", existing_type=String(64), nullable=False)
+
+        command.upgrade(config, "head")
+        with engine.connect() as connection:
+            columns = {column["name"]: column for column in inspect(connection).get_columns("project_run_repositories")}
+            assert columns["revision"]["nullable"]
     finally:
         engine.dispose()

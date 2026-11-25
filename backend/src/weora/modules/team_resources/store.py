@@ -103,31 +103,48 @@ async def revision(db: AsyncSession, workspace: UUID, revision_id: UUID | None) 
     return row
 
 
+def revision_id_from_ref(ref: str) -> UUID | None:
+    """识别 API 接受的修订 ID 写法。"""
+    try:
+        return UUID(ref)
+    except ValueError:
+        return None
+
+
 async def resolve(db: AsyncSession, workspace: UUID, ref: str) -> Revision | None:
+    """解析默认引用、固定引用和候选分支，固定引用优先于历史同名候选。"""
     if ref == "main":
         head = await db.get(Head, workspace)
         return await revision(db, workspace, head.revision_id if head else None)
-    change = await db.scalar(select(Change).where(Change.workspace_id == workspace, Change.branch == ref))
-    if change:
-        return await revision(db, workspace, change.revision_id)
+
+    identifier = revision_id_from_ref(ref)
+    if identifier is not None:
+        return await revision(db, workspace, identifier)
     tag = await db.get(Tag, (workspace, ref))
     if tag:
         return await revision(db, workspace, tag.revision_id)
-    try:
-        identifier = UUID(ref)
-    except ValueError as exc:
-        raise ResourceError("RESOURCE_REVISION_NOT_FOUND", "找不到团队源引用。", 404) from exc
-    return await revision(db, workspace, identifier)
+
+    change = await db.scalar(select(Change).where(Change.workspace_id == workspace, Change.branch == ref))
+    if change:
+        return await revision(db, workspace, change.revision_id)
+    raise ResourceError("RESOURCE_REVISION_NOT_FOUND", "找不到团队源引用。", 404)
 
 
 async def create_tag(db: AsyncSession, workspace: UUID, actor: UUID, name: str, target: UUID) -> Tag:
-    # 标签指向不可变修订，重试同一请求可复用，修改已有标签会影响固定版本的成员。
+    """在工作空间锁内检查引用冲突，创建不可变标签或返回同一发布请求的结果。"""
     await lock_head(db, workspace)
+    if revision_id_from_ref(name) is not None:
+        raise ResourceError("RESOURCE_REF_CONFLICT", "标签名不能使用修订 ID 的格式。", 409)
     tag = await db.get(Tag, (workspace, name))
     if tag is not None:
         if tag.revision_id != target:
             raise ResourceError("RESOURCE_TAG_EXISTS", "标签已指向其他修订。", 409)
         return tag
+
+    # 标签和候选分支共用短名称，检查必须与创建操作持有同一把锁。
+    branch = await db.scalar(select(Change.id).where(Change.workspace_id == workspace, Change.branch == name))
+    if branch is not None:
+        raise ResourceError("RESOURCE_REF_CONFLICT", "该名称已用于候选分支。", 409)
     await revision(db, workspace, target)
     tag = Tag(workspace_id=workspace, name=name, revision_id=target, actor_id=actor)
     db.add(tag)
@@ -188,18 +205,26 @@ async def propose(
     expected: UUID | None,
     updates: dict[str, TreeFile | None],
 ) -> Change:
+    """保存候选变更及其修订，默认发布引用继续指向当前版本。"""
+    # 串行检查标签和分支占用，避免并发创建同名引用。
     head = await lock_head(db, workspace)
+    if revision_id_from_ref(branch) is not None or await db.get(Tag, (workspace, branch)) is not None:
+        raise ResourceError("RESOURCE_REF_CONFLICT", "该名称已用于固定引用，无法作为候选分支。", 409)
     change = await db.scalar(select(Change).where(Change.workspace_id == workspace, Change.branch == branch))
-    if change is None and head.revision_id != base_id:
-        raise ResourceError("RESOURCE_HEAD_CHANGED", "团队源已更新，请同步后重试。", 409)
     if change is not None and (change.author_id != actor or change.merged_id is not None):
         raise ResourceError("RESOURCE_BRANCH_UNAVAILABLE", "该分支不可更新。", 409)
+
+    # 用原候选内容承接重复提交，保留合并时需要的共同基线。
     base = await revision(db, workspace, change.base_id if change else base_id)
     previous = await revision(db, workspace, change.revision_id if change else None)
     prior_files = previous.files if previous else base.files if base else {}
     files = replace_files(prior_files, updates)
     if change is not None and files == prior_files:
         return change
+
+    # 候选分支也可能在另一次发布后被其他客户端创建，旧的发布基线不能更新它。
+    if head.revision_id != base_id:
+        raise ResourceError("RESOURCE_HEAD_CHANGED", "团队源已更新，请同步后重试。", 409)
     if change is not None and expected != change.revision_id:
         raise ResourceError("RESOURCE_BRANCH_CHANGED", "分支已更新，请读取候选修订后重试。", 409)
     if files == prior_files:

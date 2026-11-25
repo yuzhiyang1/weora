@@ -1,6 +1,6 @@
 """验证规则候选、内容修订与工作空间鉴权。"""
 
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from fastapi import FastAPI
@@ -8,6 +8,7 @@ from httpx import ASGITransport, AsyncClient
 
 from tests.api.test_agent_mail import device
 from tests.api.test_skill_sharing import sharing_client as sharing_client  # noqa: F401
+from weora.modules.team_resources.store import Change
 
 
 @pytest.mark.anyio
@@ -83,6 +84,35 @@ async def test_team_rules_branch_and_device_delivery(sharing_client: tuple[Async
     assert tagged.status_code == 200, tagged.text
     pinned = await client.get(url + "/snapshot", headers=auth, params={"ref": "rules/v1"})
     assert pinned.json()["revision"] == live["revision"]
+    for reserved_ref in ("rules/v1", live["revision"], live["revision"].replace("-", "").upper()):
+        shadow = await client.post(
+            url + "/changes",
+            headers=auth,
+            json={"branch": reserved_ref, "base": live["revision"], "files": {"rules/java-vo.md": "未合入"}},
+        )
+        assert shadow.status_code == 409
+        assert shadow.json()["detail"]["code"] == "RESOURCE_REF_CONFLICT"
+    blocked_tag = await client.put(
+        url + "/refs/tags/" + change["branch"], headers=csrf, json={"revision": live["revision"]}
+    )
+    assert blocked_tag.status_code == 409
+    assert blocked_tag.json()["detail"]["code"] == "RESOURCE_REF_CONFLICT"
+
+    # 已存在的同名候选也不能改变旧检出的固定引用。
+    async with app.state.db_session_factory() as db, db.begin():
+        for legacy_ref in ("rules/v1", live["revision"]):
+            db.add(
+                Change(
+                    workspace_id=UUID(workspace),
+                    branch=legacy_ref,
+                    author_id=UUID(change["author_id"]),
+                    base_id=UUID(live["revision"]),
+                    revision_id=UUID(change["revision"]),
+                )
+            )
+    for fixed_ref in ("rules/v1", live["revision"]):
+        fixed = await client.get(url + "/snapshot", headers=auth, params={"ref": fixed_ref})
+        assert fixed.json()["revision"] == live["revision"]
     moving_tag = await client.put(tag_url, headers=csrf, json={"revision": change["revision"]})
     assert moving_tag.status_code == 409
     wrong_workspace = await client.get(f"/api/v1/workspaces/{uuid4()}/team-resources/snapshot", headers=auth)
@@ -107,6 +137,25 @@ async def test_team_rules_branch_and_device_delivery(sharing_client: tuple[Async
     )
     assert imported.status_code == 200, imported.text
     assert imported.json()["files"]["docs/imported-api.md"] == "技术说明"
+    published_revision = imported.json()["revision"]
+    fresh = await client.post(
+        url + "/changes",
+        headers=auth,
+        json={"branch": "weora/push/fresh", "base": published_revision, "files": {"rules/example.md": "新候选正文"}},
+    )
+    assert fresh.status_code == 201, fresh.text
+    stale_candidate = await client.post(
+        url + "/changes",
+        headers=auth,
+        json={
+            "branch": "weora/push/fresh",
+            "base": live["revision"],
+            "expected": fresh.json()["revision"],
+            "files": {"rules/example.md": "过期本机正文"},
+        },
+    )
+    assert stale_candidate.status_code == 409
+    assert stale_candidate.json()["detail"]["code"] == "RESOURCE_HEAD_CHANGED"
     invalid_binary = await client.put(
         url + "/default",
         headers=csrf,

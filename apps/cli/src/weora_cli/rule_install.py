@@ -4,6 +4,7 @@ import hashlib
 import json
 import re
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 from weora_cli import resource_delivery as delivery
@@ -113,6 +114,14 @@ def native_ledger(config_path: Path, root: Path) -> Path:
     return delivery.worktree_ledger(config_path, root).with_suffix(".native.json")
 
 
+@dataclass(frozen=True)
+class NativeRuleCopy:
+    name: str
+    text: str
+    source_path: str
+    source_hash: str | None
+
+
 def retained_rules(config_path: Path, root: Path) -> set[str]:
     tracked = as_object(delivery.read(native_ledger(config_path, root)).get("files", {}))
     retained = set()
@@ -129,8 +138,9 @@ def retained_rules(config_path: Path, root: Path) -> set[str]:
 
 
 def write_native_files(
-    root: Path, tools: list[str], desired: dict[Path, tuple[str, str]], previous: Object, *, user: bool
+    root: Path, tools: list[str], desired: dict[Path, NativeRuleCopy], previous: Object, *, user: bool
 ) -> Object:
+    """更新归属明确的副本及其源版本，保留个人编辑和编辑时的基线。"""
     directories = {
         directory
         for tool in set(tools) | set(agents({"agents": previous.get("agents", [])}))
@@ -146,19 +156,24 @@ def write_native_files(
         old = as_object(known.get(str(path), {}))
         observed = hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None
         if old and observed is not None and observed != old.get("hash"):
-            # 个人修改保留在原处，后续 push 仍能追溯其团队规则名。
+            # 本机编辑仍基于首次投递它的内容，更新时不能替换这份基线。
             tracked[str(path)] = old
             continue
         if path not in desired:
             if old and observed is not None:
                 path.unlink()
             continue
-        name, text = desired[path]
-        current_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        rule_copy = desired[path]
+        current_hash = hashlib.sha256(rule_copy.text.encode("utf-8")).hexdigest()
         if observed is None or old:
             if observed != current_hash:
-                delivery.write_text(path, text)
-            tracked[str(path)] = {"name": name, "hash": current_hash}
+                delivery.write_text(path, rule_copy.text)
+            tracked[str(path)] = {
+                "name": rule_copy.name,
+                "hash": current_hash,
+                "source": rule_copy.source_path,
+                "source_hash": rule_copy.source_hash,
+            }
     return tracked
 
 
@@ -223,13 +238,14 @@ def opencode_instructions(root: Path, paths: set[Path], previous: Object, *, use
 
 
 def apply_native(config_path: Path, root: Path, config: Object, selected: list[Object], *, user: bool) -> None:
+    """渲染并安装各工具副本，更新激活配置，最后记录此检出的文件归属。"""
     ledger = native_ledger(config_path, root)
     previous = delivery.read(ledger)
     tools = agents(config)
     directory = delivery.asset_root(config_path, root, user=user)
     snapshot = as_object(config.get("snapshot", {}))
     source = as_object(snapshot.get("files", {}))
-    desired: dict[Path, tuple[str, str]] = {}
+    desired: dict[Path, NativeRuleCopy] = {}
     opencode: set[Path] = set()
     for runtime in tools:
         target = rule_directory(runtime, None if user else root)
@@ -249,10 +265,14 @@ def apply_native(config_path: Path, root: Path, config: Object, selected: list[O
             if "/" in name and native in conflicts:
                 native = name + ".md"
             output = delivery.safe_child(target, native)
-            raw = source.get(str(rule["path"]))
-            wanted = (
-                name,
-                render_native(format_id, rule, raw if isinstance(raw, str) else str(rule["body"]), directory),
+            source_path = str(rule["path"])
+            raw = source.get(source_path)
+            source_text = raw if isinstance(raw, str) else str(rule["body"])
+            wanted = NativeRuleCopy(
+                name=name,
+                text=render_native(format_id, rule, source_text, directory),
+                source_path=source_path,
+                source_hash=hashlib.sha256(raw.encode("utf-8")).hexdigest() if isinstance(raw, str) else None,
             )
             if output in desired and desired[output] != wanted:
                 raise CollabError("RESOURCE_FILE_CONFLICT", f"规则投递位置重复：{native}。")

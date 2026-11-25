@@ -274,3 +274,128 @@ def test_native_push_keeps_team_frontmatter_and_only_sends_local_body(tmp_path: 
     assert resources.scan_local(path, root, config, snapshot, user=False) == [
         ("backend/vo", "rules/backend/vo.md", f"{team_header}\n\n只编辑正文。\n")
     ]
+
+
+@pytest.mark.parametrize("legacy_ledger", [False, True])
+def test_native_push_rejects_edits_based_on_older_delivery(tmp_path: Path, legacy_ledger: bool) -> None:
+    path = tmp_path / "config" / "workspace.json"
+    root = tmp_path / "checkout"
+    source_path = "rules/backend/vo.md"
+    initial: Object = {
+        "revision": "r1",
+        "files": {source_path: "原正文"},
+        "rules": [rule("backend/vo", "原正文")],
+    }
+    config: Object = {"agents": ["cursor"], "snapshot": initial}
+    rule_install.apply_native(path, root, config, [rule("backend/vo", "原正文")], user=False)
+    local_copy = root / ".cursor/rules/backend/vo.mdc"
+    if legacy_ledger:
+        ledger_file = rule_install.native_ledger(path, root)
+        ledger = resource_delivery.read(ledger_file)
+        owned = resource_delivery.as_object(resource_delivery.as_object(ledger["files"])[str(local_copy)])
+        owned.pop("source")
+        owned.pop("source_hash")
+        resource_delivery.write_json(ledger_file, ledger)
+    local_copy.write_text("本地编辑\n", encoding="utf-8")
+
+    changed_upstream: Object = {
+        "revision": "r2",
+        "files": {source_path: "团队刚发布的正文"},
+        "rules": [rule("backend/vo", "团队刚发布的正文")],
+    }
+    # 共享快照可能由另一个 worktree 刷新，但该检出依然编辑 r1 副本。
+    config["snapshot"] = changed_upstream
+    with pytest.raises(resources.CollabError) as conflict:
+        resources.scan_local(path, root, config, changed_upstream, user=False)
+    assert conflict.value.code == "RESOURCE_EDIT_BASE_CHANGED"
+    assert local_copy.read_text(encoding="utf-8") == "本地编辑\n"
+
+    unrelated_update: Object = {
+        **initial,
+        "revision": "r3",
+        "files": {source_path: "原正文", "rules/other.md": "新规则"},
+    }
+    assert resources.scan_local(path, root, config, unrelated_update, user=False) == [
+        ("backend/vo", source_path, "本地编辑\n"),
+    ]
+    with pytest.raises(resources.CollabError) as removed:
+        resources.scan_local(path, root, config, {"files": {}, "rules": []}, user=False)
+    assert removed.value.code == "RESOURCE_EDIT_BASE_CHANGED"
+
+
+def test_push_from_directory_rejects_team_file_changed_since_last_sync(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source_path = "rules/backend/vo.md"
+    source = tmp_path / source_path
+    source.parent.mkdir(parents=True)
+    source.write_text("本地编辑", encoding="utf-8")
+    config: Object = {"snapshot": {"files": {source_path: "同步时的正文"}}}
+    latest: Object = {"revision": "r2", "files": {source_path: "团队已发布的正文"}}
+    monkeypatch.setattr(resources, "snapshot", lambda _config: latest)
+
+    args = build_parser().parse_args(["push", "--from-dir", str(tmp_path), "--all"])
+    with pytest.raises(resources.CollabError) as conflict:
+        resources.push(args, tmp_path / "config.json", tmp_path, config, user=False)
+    assert conflict.value.code == "RESOURCE_EDIT_BASE_CHANGED"
+    assert not (tmp_path / "config.json").exists()
+
+
+def test_uninstall_cleans_managed_files_from_all_linked_worktrees(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    checkout = tmp_path / "checkout"
+    linked = tmp_path / "linked checkout"
+    subprocess.run(["git", "init", "-q", str(checkout)], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(checkout),
+            "-c",
+            "user.name=Rule Test",
+            "-c",
+            "user.email=rule@example.test",
+            "commit",
+            "-qm",
+            "fixture",
+            "--allow-empty",
+        ],
+        check=True,
+    )
+    subprocess.run(["git", "-C", str(checkout), "worktree", "add", "-q", "--detach", str(linked)], check=True)
+    monkeypatch.setenv("WEORA_RESOURCE_HOME", str(tmp_path / "state"))
+    path, checkout = resource_delivery.installed(checkout)
+    linked_config, linked = resource_delivery.installed(linked)
+    assert linked_config == path
+    config: Object = {"agents": ["claude", "opencode"]}
+    resource_delivery.write_json(path, config)
+    source = rule("backend/vo", "规则内容")
+    source["assets"] = {"example.txt": "示例"}
+    for root in (checkout, linked):
+        resource_delivery.apply_assets(path, root, [source], user=False)
+        rule_install.apply_native(path, root, config, [source], user=False)
+
+    monkeypatch.chdir(linked)
+    command = build_parser().parse_args(["uninstall", "--scope", "workspace"])
+    install_native = rule_install.apply_native
+
+    def fail_for_main(config_path: Path, root: Path, config: Object, rules: list[Object], *, user: bool) -> None:
+        if root == checkout:
+            raise PermissionError("fixture")
+        install_native(config_path, root, config, rules, user=user)
+
+    with monkeypatch.context() as failure:
+        failure.setattr(rule_install, "apply_native", fail_for_main)
+        with pytest.raises(PermissionError, match="fixture"):
+            resources.execute(command)
+        assert path.exists()
+        assert not (linked / ".claude/rules/backend/vo.md").exists()
+        assert (checkout / ".claude/rules/backend/vo.md").exists()
+
+    assert resources.execute(command) == {"status": "uninstalled"}
+    assert not path.exists()
+    for root in (checkout, linked):
+        assert not (root / ".claude/rules/backend/vo.md").exists()
+        assert not (root / ".weora/delivered/rules/backend/vo/example.txt").exists()
+        assert resource_delivery.read(root / ".opencode/opencode.json")["instructions"] == []

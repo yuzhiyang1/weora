@@ -54,19 +54,34 @@ def state_lock() -> Iterator[None]:
         connection.close()
 
 
-def git_path(cwd: Path, *arguments: str) -> str | None:
+def git_output(cwd: Path, *arguments: str) -> str | None:
+    """读取 Git 的标准输出，调用失败时让上层决定是否继续。"""
     try:
         result = subprocess.run(
-            ["git", "-C", str(cwd), "rev-parse", "--path-format=absolute", *arguments],
+            ["git", "-C", str(cwd), *arguments],
             capture_output=True,
-            encoding="utf-8",
-            errors="replace",
             timeout=4,
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
-    return result.stdout.rstrip("\r\n") if result.returncode == 0 else None
+    return result.stdout.decode("utf-8", errors="replace") if result.returncode == 0 else None
+
+
+def git_path(cwd: Path, *arguments: str) -> str | None:
+    """返回 Git 解析的绝对路径。"""
+    output = git_output(cwd, "rev-parse", "--path-format=absolute", *arguments)
+    return output.rstrip("\r\n") if output is not None else None
+
+
+def worktree_roots(root: Path) -> list[Path]:
+    """枚举同一安装关联的 Git 检出，保留路径中的空格或换行。"""
+    output = git_output(root, "worktree", "list", "--porcelain", "-z")
+    if not output:
+        raise CollabError("RESOURCE_WORKTREE_UNAVAILABLE", "无法读取 Git worktree 列表，团队规则安装仍可重试卸载。")
+    return [
+        Path(field.removeprefix("worktree ")).resolve() for field in output.split("\0") if field.startswith("worktree ")
+    ]
 
 
 def installed(cwd: Path, *, user: bool = False) -> tuple[Path, Path]:
