@@ -206,7 +206,7 @@ describe("Weora application shell", () => {
     expect(
       await screen.findByRole("heading", { name: "Skills" }),
     ).toBeInTheDocument();
-    expect(window.location.pathname).toBe("/skills");
+    expect(window.location.pathname).toBe("/resources/skills");
     expect(window.location.search).toBe("?project=example-project");
     expect(window.location.hash).toBe("#results");
   });

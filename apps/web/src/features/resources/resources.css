@@ -1,0 +1,37 @@
+.resource-tabs > :first-child { margin-bottom: 1rem; }
+.rules-page { display: grid; gap: 1.25rem; }
+.resource-actions, .resource-tags, .resource-filters { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; }
+.resource-filters { min-width: min(21rem, 100%); }
+.resource-filters > :first-child { flex: 1 1 12rem; }
+.resource-filters > :last-child { flex: 1 0 8rem; }
+.resource-scope { display: grid; grid-template-columns: minmax(12rem, 1fr) minmax(0, 3fr); gap: 1rem; align-items: start; }
+.resource-scope:has(> :nth-child(3)) { grid-template-columns: minmax(12rem, 1fr) minmax(0, 2fr) minmax(10rem, 1fr); }
+.resource-scope > div { display: grid; gap: .375rem; }
+.resource-scope > div + div { border-inline-start: 1px solid var(--border); padding-inline-start: 1rem; }
+.resource-scope span:not(.console-tag), .resource-scope small, .resource-rule-result small { font-size: .75rem; color: var(--muted); }
+.resource-rule-link { display: flex; align-items: center; gap: .5rem; text-align: start; }
+.resource-rule-link svg { flex: none; color: var(--muted); }
+.resource-rule-link strong, .resource-rule-link code { display: block; }
+.resource-rule-link code { color: var(--muted); }
+.resource-rule-result { display: grid; gap: .125rem; justify-items: start; }
+.resource-dialog { display: grid; gap: .75rem; }
+.resource-dialog pre { background: var(--surface-secondary); padding: .75rem; white-space: pre-wrap; overflow-wrap: anywhere; }
+.resource-dialog .resource-actions { justify-content: end; }
+.resource-diff { display: grid; grid-template-columns: 1fr 1fr; gap: .5rem; }
+.resource-diff > strong { grid-column: 1 / -1; overflow-wrap: anywhere; }
+.resource-diff > div { min-width: 0; }
+@media (max-width: 640px) {
+  .resource-scope, .resource-scope:has(> :nth-child(3)) { grid-template-columns: 1fr; }
+  .resource-scope > div + div { border-inline-start: 0; padding-inline-start: 0; }
+  .resource-filters { width: 100%; }
+  .resource-catalog .console-card-heading { flex-direction: column; align-items: stretch; }
+  .resource-catalog .console-table [role="columnheader"]:is(:nth-child(2), :nth-child(3)),
+  .resource-catalog .console-table [data-label="命名空间"],
+  .resource-catalog .console-table [data-label="说明"] { display: none; }
+  .resource-catalog .console-table table { min-width: 0; table-layout: fixed; }
+  .resource-catalog .console-table th:first-child { width: 58% !important; }
+  .resource-catalog .console-table th:last-child { width: 42% !important; }
+  .resource-rule-link { overflow-wrap: anywhere; }
+  .resource-rule-link code, .resource-rule-result small { white-space: normal; }
+  .resource-diff { grid-template-columns: 1fr; }
+}

@@ -40,18 +40,61 @@ class CliTests(unittest.TestCase):
             },
         )
 
-    def test_discovery_advertises_local_collaboration(self) -> None:
+    def test_discovery_advertises_collaboration_and_team_resources(self) -> None:
         result = self.run_cli("commands")
         self.assertEqual(result.returncode, 0)
         data = json.loads(result.stdout)["data"]
         self.assertEqual(
             [command["name"] for command in data["commands"]],
-            ["version", "commands", "schema", "collab", "skill", "context", "ci", "auth", "login", "logout"],
+            [
+                "version",
+                "commands",
+                "schema",
+                "collab",
+                "skill",
+                "context",
+                "ci",
+                "auth",
+                "login",
+                "logout",
+                "init",
+                "projects",
+                "roles",
+                "tags",
+                "pull",
+                "push",
+                "list",
+                "status",
+                "doctor",
+                "recall",
+                "import",
+                "remove",
+                "review",
+                "uninstall",
+            ],
         )
-        self.assertEqual(data["business_capabilities"], ["collab", "skill", "context", "ci", "auth"])
+        self.assertEqual(data["business_capabilities"], ["collab", "skill", "context", "ci", "auth", "team-resources"])
         self.assertEqual(
             [c["name"] for c in data["commands"] if c["side_effects"]],
-            ["collab", "skill", "context", "ci", "auth", "login", "logout"],
+            [
+                "collab",
+                "skill",
+                "context",
+                "ci",
+                "auth",
+                "login",
+                "logout",
+                "init",
+                "projects",
+                "roles",
+                "tags",
+                "pull",
+                "push",
+                "import",
+                "remove",
+                "review",
+                "uninstall",
+            ],
         )
 
     def test_schema_and_discovery_use_the_same_contract(self) -> None:
