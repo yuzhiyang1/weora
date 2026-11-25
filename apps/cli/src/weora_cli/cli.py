@@ -9,9 +9,10 @@ from typing import NoReturn
 
 from keyring.errors import KeyringError
 
-from weora_cli import cli_auth, collaboration, skill_telemetry, skills
+from weora_cli import cli_auth, collaboration, resources, skill_telemetry, skills
 from weora_cli.collab_client import CollabError
 from weora_cli.commands import COMMANDS, JsonValue
+from weora_cli.rule_adapters import RULE_TOOLS
 
 PROTOCOL_VERSION = 1
 
@@ -29,6 +30,8 @@ class Parser(argparse.ArgumentParser):
 def build_parser() -> Parser:
     parser = Parser(prog="weora", description="Weora 平台 CLI，支持本地 Agent 协作。", allow_abbrev=False)
     subparsers = parser.add_subparsers(dest="operation", required=True, parser_class=Parser)
+    hook = subparsers.add_parser("_resource-hook", help=argparse.SUPPRESS)
+    hook.add_argument("--agent", choices=sorted(RULE_TOOLS), default="codex")
     for command in COMMANDS:
         subparser = subparsers.add_parser(command.name, help=command.description, description=command.description)
         for argument in command.arguments:
@@ -39,6 +42,8 @@ def build_parser() -> Parser:
             skills.arguments(subparser)
         elif command.name in {"auth", "login", "logout"}:
             cli_auth.arguments(subparser, command.name)
+        elif command.name in resources.COMMANDS:
+            resources.arguments(subparser, command.name)
     return parser
 
 
@@ -48,7 +53,7 @@ def execute(args: argparse.Namespace) -> JsonValue:
     if args.operation == "commands":
         return {
             "commands": [command.describe() for command in COMMANDS],
-            "business_capabilities": ["collab", "skill", "auth"],
+            "business_capabilities": ["collab", "skill", "auth", "team-resources"],
         }
     if args.operation == "schema":
         target = " ".join(args.command)
@@ -62,6 +67,8 @@ def execute(args: argparse.Namespace) -> JsonValue:
         return skills.execute(args)
     if args.operation in {"auth", "login", "logout"}:
         return cli_auth.execute(args)
+    if args.operation in resources.COMMANDS:
+        return resources.execute(args)
     raise UsageError("未找到命令。")
 
 
@@ -78,6 +85,11 @@ def main(argv: list[str] | None = None) -> int:
             stream.reconfigure(encoding="utf-8")
     try:
         args = build_parser().parse_args(argv)
+        if args.operation == "_resource-hook":
+            if isinstance(sys.stdin, io.TextIOWrapper):
+                sys.stdin.reconfigure(encoding="utf-8")
+            print(json.dumps(resources.hook(args.agent), ensure_ascii=False))
+            return 0
         if args.operation == "skill" and args.action == "hook":
             if isinstance(sys.stdin, io.TextIOWrapper):
                 sys.stdin.reconfigure(encoding="utf-8")
@@ -111,5 +123,6 @@ def main(argv: list[str] | None = None) -> int:
         # 不把异常文本或 traceback 暴露给调用 Agent，避免以后泄漏请求或凭据。
         emit({"ok": False, "error": {"code": "INTERNAL_ERROR", "message": "CLI 内部错误。"}}, error=True)
         return 1
-    emit({"ok": True, "data": data})
+    if args.operation != "pull" or not args.silent:
+        emit({"ok": True, "data": data})
     return 0

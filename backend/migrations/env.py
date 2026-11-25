@@ -20,6 +20,7 @@ from weora.modules.identity.infrastructure import models as identity_models  # n
 from weora.modules.projects import persistence as project_models  # noqa: F401
 from weora.modules.runs.infrastructure import models as run_models  # noqa: F401
 from weora.modules.skills.infrastructure import models as skills_models  # noqa: F401
+from weora.modules.team_resources import store as team_resource_models  # noqa: F401
 from weora.modules.tools.infrastructure import store as tool_models  # noqa: F401
 from weora.shared.infrastructure.database import Base
 

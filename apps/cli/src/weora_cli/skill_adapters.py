@@ -245,13 +245,25 @@ def _hermes_hook(home: Path) -> Path:
     return path
 
 
-def _dsh_hook(home: Path) -> Path:
+def dsh_hook_path(home: Path) -> Path:
+    return home / "weora-skills" / "hooks.json"
+
+
+def mount_dsh_bridge(home: Path) -> Path:
+    """Skills 与 Rules 共用一份 Claude 格式配置和一个 Cordis 插件实例。"""
     path = home / "cordis.patch.yml"
     yaml, rows = _yaml_document(path, CommentedSeq())
     plugin_id = "weora-skills-hooks-claude-code"
-    config_path = home / "weora-skills" / "hooks.json"
+    config_path = dsh_hook_path(home)
+    target = {"id": plugin_id, "name": "@deepseek-ai/dsh-hooks-claude-code", "config": {"configPath": str(config_path)}}
     # 沿用 TeamAI 的 Cordis 插入行，保留同一行中的其他插件和 YAML 注释。
     assert isinstance(rows, CommentedSeq)
+    if any(
+        target in row.get("insert", [])
+        for row in rows
+        if isinstance(row, dict) and isinstance(row.get("insert"), list)
+    ):
+        return path
     for row in list(rows):
         inserts = row.get("insert") if isinstance(row, dict) else None
         if isinstance(inserts, list):
@@ -259,20 +271,14 @@ def _dsh_hook(home: Path) -> Path:
             inserts[:] = [entry for entry in inserts if not (isinstance(entry, dict) and entry.get("id") == plugin_id)]
             if previous and not inserts:
                 rows.remove(row)
-    rows.append(
-        {
-            "insert": [
-                {
-                    "id": plugin_id,
-                    "name": "@deepseek-ai/dsh-hooks-claude-code",
-                    "config": {"configPath": str(config_path)},
-                }
-            ]
-        }
-    )
-    _merge(config_path, "dsh", "settings.json")
+    rows.append({"insert": [target]})
     _write_yaml(path, yaml, rows)
     return path
+
+
+def _dsh_hook(home: Path) -> Path:
+    _merge(dsh_hook_path(home), "dsh", "settings.json")
+    return mount_dsh_bridge(home)
 
 
 def _openclaw_hook(home: Path) -> Path:
@@ -346,9 +352,26 @@ def _owned_handler(handler: dict[str, JsonValue]) -> bool:
     )
 
 
+def zcode_hook_events(hooks: dict[str, JsonValue]) -> dict[str, JsonValue]:
+    """将早期 Weora 写入的顶层事件迁入 ZCode 原生 events 块。"""
+    events = as_object(hooks.setdefault("events", {}))
+    for name in EVENTS:
+        old = hooks.get(name)
+        if isinstance(old, list):
+            active = events.setdefault(name, [])
+            if not isinstance(active, list):
+                raise CollabError("RESOURCE_HOOK_INVALID", f"ZCode {name} 的钩子格式无效。")
+            active.extend(entry for entry in old if entry not in active)
+            del hooks[name]
+    hooks["enabled"] = True
+    return events
+
+
 def _merge(path: Path, runtime: str, shape: str) -> None:
     config = _settings(path)
     hooks = as_object(config.setdefault("hooks", {}))
+    if shape == "cli/config.json":
+        hooks = zcode_hook_events(hooks)
     for name, event in EVENTS.items():
         if shape == "cursor":
             name = CURSOR_EVENTS[name]

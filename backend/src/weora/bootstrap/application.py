@@ -88,6 +88,7 @@ from weora.modules.skills.api.routes import router as skills_router
 from weora.modules.skills.application.service import SkillRegistryService
 from weora.modules.skills.infrastructure.distribution import grant_cli_skill_sync
 from weora.modules.skills.infrastructure.unit_of_work import SqlAlchemySkillsUnitOfWork
+from weora.modules.team_resources.api import router as team_resources_router
 from weora.shared.api.request_id import RequestIdMiddleware
 from weora.shared.infrastructure.database import create_database
 from weora.shared.infrastructure.postgres_watch import PostgresWatch
@@ -430,6 +431,7 @@ def create_app(
     app.include_router(workspace_identity_router, prefix=resolved_settings.api_prefix)
     app.include_router(skills_router, prefix=resolved_settings.api_prefix)
     app.include_router(skill_distribution_router, prefix=resolved_settings.api_prefix)
+    app.include_router(team_resources_router, prefix=resolved_settings.api_prefix)
     app.include_router(agents_router, prefix=resolved_settings.api_prefix)
     app.include_router(runs_router, prefix=resolved_settings.api_prefix)
     app.include_router(tasks_router, prefix=resolved_settings.api_prefix)

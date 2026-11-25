@@ -22,6 +22,7 @@ import { useRef, useState, type FormEvent } from "react";
 import { Link, useNavigate } from "react-router-dom";
 
 import { useAuth } from "../auth/AuthProvider";
+import { skillsPath } from "../resources/routes";
 import {
   createSkill,
   listSkills,
@@ -55,7 +56,7 @@ export function SkillsPage() {
         queryKey: ["skills", workspaceId],
       });
       setUploadOpen(false);
-      navigate(`/skills/${skill.id}`);
+      navigate(`${skillsPath}/${skill.id}`);
     },
   });
 
@@ -71,7 +72,7 @@ export function SkillsPage() {
       title: "Skill",
       dataIndex: "display_name",
       render: (_: unknown, skill: SkillSummary) => (
-        <Link className="resource-cell" to={`/skills/${skill.id}`}>
+        <Link className="resource-cell" to={`${skillsPath}/${skill.id}`}>
           <SkillLogo />
           <span>
             <strong>{skill.display_name}</strong>
@@ -115,7 +116,7 @@ export function SkillsPage() {
       width: 106,
       render: (_: unknown, skill: SkillSummary) => (
         <AssetDetailsLink
-          to={`/skills/${skill.id}`}
+          to={`${skillsPath}/${skill.id}`}
           name={skill.display_name}
         />
       ),

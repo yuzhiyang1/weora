@@ -155,7 +155,7 @@ describe("Weora application shell", () => {
     expect(
       await screen.findByRole("heading", { name: "Skills" }),
     ).toBeInTheDocument();
-    expect(window.location.pathname).toBe("/skills");
+    expect(window.location.pathname).toBe("/resources/skills");
   });
 
   it("creates an account and its first workspace", async () => {

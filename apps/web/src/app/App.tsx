@@ -13,6 +13,7 @@ import { SettingsEnvironment } from "../features/settings/SettingsEnvironment";
 
 import { AuthProvider, useAuth } from "../features/auth/AuthProvider";
 import { GuestOnly, RequireAuth } from "../features/auth/AuthRoutes";
+import { skillsPath } from "../features/resources/routes";
 
 const AuthPage = lazy(() =>
   import("../features/auth/AuthPage").then((module) => ({
@@ -61,6 +62,15 @@ const SkillsPage = lazy(() =>
   import("../features/skills/SkillsPage").then((module) => ({
     default: module.SkillsPage,
   })),
+);
+const ResourcesLayout = lazy(() =>
+  import("../features/resources/ResourcesLayout").then((module) => ({ default: module.ResourcesLayout })),
+);
+const LegacySkillsRedirect = lazy(() =>
+  import("../features/resources/ResourcesLayout").then((module) => ({ default: module.LegacySkillsRedirect })),
+);
+const RulesPage = lazy(() =>
+  import("../features/resources/RulesPage").then((module) => ({ default: module.RulesPage })),
 );
 const AppShell = lazy(() =>
   import("./AppShell").then((module) => ({ default: module.AppShell })),
@@ -212,8 +222,14 @@ export function App() {
               <Route index element={<OverviewPage />} />
               <Route path="agents" element={<AgentsPage />} />
               <Route path="agents/:agentId" element={<AgentDetailPage />} />
-              <Route path="skills" element={<SkillsPage />} />
-              <Route path="skills/:skillId" element={<SkillDetailPage />} />
+              <Route path="resources" element={<ResourcesLayout />}>
+                <Route index element={<Navigate replace to={skillsPath} />} />
+                <Route path="skills" element={<SkillsPage />} />
+                <Route path="skills/:skillId" element={<SkillDetailPage />} />
+                <Route path="rules" element={<RulesPage />} />
+              </Route>
+              <Route path="skills" element={<LegacySkillsRedirect />} />
+              <Route path="skills/:skillId" element={<LegacySkillsRedirect />} />
               <Route
                 path="workflows"
                 element={

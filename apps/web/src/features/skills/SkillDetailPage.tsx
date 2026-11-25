@@ -33,6 +33,7 @@ import { useState, type FormEvent } from "react";
 import { useParams } from "react-router-dom";
 
 import { useAuth } from "../auth/AuthProvider";
+import { skillsPath } from "../resources/routes";
 import {
   getSkill,
   listSkillEvents,
@@ -109,7 +110,7 @@ function SkillDetailContent({
     onSuccess: async () =>
       invalidateSkillQueries(queryClient, workspaceId, skillId),
   });
-  const backLink = <AssetBackLink to="/skills" label="返回 Skills" />;
+  const backLink = <AssetBackLink to={skillsPath} label="返回 Skills" />;
 
   if (detailQuery.isPending) {
     return (

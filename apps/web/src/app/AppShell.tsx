@@ -11,6 +11,7 @@ import {
   ChevronsLeft,
   ChevronsRight,
   FolderGit2,
+  Files,
   Inbox,
   GitBranch,
   LayoutDashboard,
@@ -46,6 +47,7 @@ import {
 
 import { Button, Modal } from "../components/console";
 import { useAuth } from "../features/auth/AuthProvider";
+import { resourcesPath, rulesPath, skillsPath } from "../features/resources/routes";
 import { HealthBadge } from "../features/system/HealthBadge";
 import { BrandWordmark } from "../components/brand/BrandWordmark";
 import {
@@ -78,7 +80,7 @@ const sections: { label: string; items: NavigationItem[] }[] = [
     label: "团队能力",
     items: [
       { label: "Agent", path: "/agents", icon: Bot },
-      { label: "Skills", path: "/skills", icon: Puzzle },
+      { label: "资源", path: resourcesPath, icon: Files },
       { label: "飞书上下文", path: "/context", icon: Settings2 },
     ],
   },
@@ -96,6 +98,10 @@ const sections: { label: string; items: NavigationItem[] }[] = [
   },
 ];
 const navigation = sections.flatMap((section) => section.items);
+const resourcePages: NavigationItem[] = [
+  { label: "Skills", path: skillsPath, icon: Puzzle },
+  { label: "Rules", path: rulesPath, icon: Files },
+];
 const settingsSections: typeof sections = [
   {
     label: "设置",
@@ -227,13 +233,15 @@ export function AppShell() {
   if (location.pathname === "/") surfaceTitle = "工作台";
   else if (location.pathname === "/runs") surfaceTitle = "任务列表";
   else if (runDetailOpen) surfaceTitle = "任务详情";
-  else if (["/projects", "/agents", "/skills"].includes(current.path)) {
+  else if (current.path === resourcesPath) {
+    surfaceTitle = location.pathname.startsWith(`${skillsPath}/`)
+      ? "Skill 详情"
+      : location.pathname === rulesPath ? "Rules" : "Skills";
+  } else if (["/projects", "/agents"].includes(current.path)) {
     const detailTitle =
       current.path === "/projects"
         ? "项目详情"
-        : current.path === "/skills"
-          ? "Skill 详情"
-          : "Agent 详情";
+        : "Agent 详情";
     surfaceTitle =
       location.pathname === current.path ? current.label : detailTitle;
   }
@@ -502,7 +510,7 @@ export function AppShell() {
               !location.pathname.startsWith("/settings/") && (
                 <>
                   <span className="breadcrumb-divider">/</span>
-                  <span>详情</span>
+                  <span>{current.path === resourcesPath ? surfaceTitle : "详情"}</span>
                 </>
               )}
           </div>
@@ -565,7 +573,7 @@ export function AppShell() {
               <Plus />
               发起任务
             </ListBox.Item>
-            {[...navigation, ...settingsNavigation]
+            {[...navigation, ...resourcePages, ...settingsNavigation]
               .filter(
                 (item, index, items) =>
                   items.findIndex((other) => other.path === item.path) ===
