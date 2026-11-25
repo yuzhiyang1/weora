@@ -1,3 +1,5 @@
+import { skillsPath } from "../resources/routes";
+
 export type SkillFile = {
   path: string;
   size: number;
@@ -139,7 +141,7 @@ function projectQuery(path: string, projectId?: string): string {
 
 /** 列表和详情沿用同一个可分享的项目范围。 */
 export function skillPagePath(projectId?: string, skillId?: string): string {
-  const base = skillId ? `/skills/${encodeURIComponent(skillId)}` : "/skills";
+  const base = skillId ? `${skillsPath}/${encodeURIComponent(skillId)}` : skillsPath;
   return projectId ? `${base}?${new URLSearchParams({ project: projectId })}` : base;
 }
 

@@ -220,7 +220,8 @@ export function Tabs({
   onChange,
   children,
   className,
-}: ContentProps & { activeKey: string; onChange: (key: string) => void }) {
+  ariaLabel = "详情内容",
+}: ContentProps & { activeKey: string; onChange: (key: string) => void; ariaLabel?: string }) {
   const panes = Children.toArray(children).filter(isValidElement<TabPaneProps>);
   return (
     <HeroTabs
@@ -229,7 +230,7 @@ export function Tabs({
       className={className ?? ""}
     >
       <HeroTabs.ListContainer>
-        <HeroTabs.List aria-label="详情内容">
+        <HeroTabs.List aria-label={ariaLabel}>
           {panes.map((pane) => (
             <HeroTabs.Tab
               id={pane.props.itemKey}

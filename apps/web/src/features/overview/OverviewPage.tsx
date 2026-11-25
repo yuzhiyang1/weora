@@ -18,6 +18,7 @@ import { Card, Chip, Skeleton } from "@heroui/react";
 import { listAgents } from "../agents/api";
 import { useAuth } from "../auth/AuthProvider";
 import { listProjects } from "../projects/api";
+import { skillsPath } from "../resources/routes";
 import { listRuns } from "../runs/api";
 import { RunStatusTag } from "../runs/RunStatusTag";
 import { listSkills } from "../skills/api";
@@ -73,7 +74,7 @@ export function OverviewPage() {
       value: skills.data?.items.length,
       pending: skills.isPending,
       icon: Puzzle,
-      link: "/skills",
+      link: skillsPath,
       note: "已加载的能力资产",
     },
     {

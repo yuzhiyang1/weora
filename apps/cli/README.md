@@ -855,7 +855,7 @@ Swift 从同一默认 SwiftPM 目标定位可见的顶层函数、类型和静�
 {"ok":false,"error":{"code":"INVALID_ARGUMENT","message":"..."}}
 ```
 
-`commands` 的 `business_capabilities` 包含 `auth`、`collab` 和 `skill`。用各命令的 `--help` 查看操作和参数。原生 Hook 与 `skill launch` 使用宿主的输入输出协议。
+`commands` 的 `business_capabilities` 包含 `auth`、`collab`、`skill` 和 `team-resources`。用各命令的 `--help` 查看操作和参数。原生 Hook 与 `skill launch` 使用宿主的输入输出协议。
 
 ## 验证与构建
 
@@ -873,6 +873,59 @@ backend/.venv/Scripts/mypy --config-file apps/cli/pyproject.toml apps/cli/src ap
 ```
 
 架构与后续接入方式见 [CLI 与团队上下文接入方案](../../docs/architecture/weora-cli-and-team-context.md)。
+
+## 发布和同步团队 Rules
+
+登录对应的 Weora 工作空间。维护人在本地准备团队源，例如 `rules/backend/java-vo.md` 和 `manifest/projects.yaml`。规则文件写 Markdown，项目配置把 `hsk-java` 关联到 `backend` 命名空间。
+
+```yaml
+version: 1
+projects:
+  - id: hsk-java
+    name: HSK Java 后端
+    resources:
+      knowledge: [backend]
+```
+
+在一个已绑定的 Git 仓库中，用 `weora push --from-dir <团队源目录> --all` 发起合并请求。工作空间管理员在「资源 → Rules → 合并请求」查看差异、合并。默认同步只读取已合并版本。通过 `tags.yaml` 的 `rules` 映射按完整规则名称配置标签，例如 `backend/java-vo: [java]`。
+
+开发者在需要启用规则的 Git 仓库中运行以下命令。
+
+```powershell
+weora init --agent codex
+weora projects set hsk-java
+weora pull
+weora doctor
+codex
+```
+
+首次启动 Codex 时，在 `/hooks` 审核并信任 Weora 的启动钩子。从该仓库新开会话时，钩子加载当前项目、角色和标签匹配的本地规则。`weora status` 显示本机修订和筛选结果。需要固定试用修订时运行 `weora pull --team-ref <候选分支或修订 ID>`，用 `weora pull --team-ref main` 回到默认引用。
+
+同一检出可用逗号选择多个工具，例如 `weora init --agent codex,claude,cursor,opencode,pi`。`claude` 是 Claude Code 的工具标识。CLI 将规则写入各工具的原生规则位置，或使用该工具的会话钩子。全局规则使用 `weora init --scope user --agent <工具>` 和 `weora pull --scope user`。Hermes 和 OpenClaw 使用用户级规则。
+
+目录型规则使用 `rules/<命名空间>/<规则名>/RULE.md`，可同时提供 `RULE.<语言>.md` 和原始附件。正文用 `${TEAMAI_RULE_DIR}` 引用附件目录。附件随团队源修订一起发布，客户端按原始字节恢复。团队源最多 512 个文件、合计 2 MiB。
+
+### 从本机工具导入
+
+```powershell
+weora import --from-tools
+weora import --from-tools --all --output ./import-preview
+```
+
+CLI 读取各工具用户规则目录中的 Markdown，使用本机 Codex 分类为 Rule、Doc 或 Learning。每次分类提交文件路径和前 3000 字，分类为个人内容或回复无法解析的文件会跳过。默认逐条接受、改标题或跳过，`--all` 接受全部非个人条目。可用 `WEORA_RULE_IMPORT_CODEX` 指定 Codex 可执行文件。
+
+指定 `--output` 时，分类摘要只写到本地目录。直接导入需要工作空间管理员权限，确认的条目按类型写入团队源的默认修订。普通 `weora push` 仍发起合并请求。
+
+用户范围加 `--scope user`；Hermes 和 DeepSeek Harness 使用这个范围。Trae、Trae CN 安装后须在「设置 → Hooks」启用配置。Kiro 使用 CLI V3 的 Hook 文件格式。也可在打开客户端前手动同步，或用 `--executable` 指定客户端程序：
+
+```powershell
+weora skill pull --runtime trae
+weora skill launch --runtime trae --executable "C:\Path\To\Trae.exe" -- .
+```
+
+当前提供 21 个安装目标及原生事件适配。控制台「Skill 详情 → 使用统计」区分点名和确认加载，两种信号在同一轮合计一次使用。安装、下载和启动同步不计使用次数。各工具的实际采集能力取决于版本、Hook 是否启用，以及事件是否包含能确认的加载证据。
+
+当前分发范围为已授权设备所属的工作空间。角色、项目与标签分发策略见[完整设计](../../docs/product/skill-sharing-design.md)。
 
 ## 上传团队 Skill
 
