@@ -131,6 +131,10 @@ def main(argv: list[str] | None = None) -> int:
         # 不把异常文本或 traceback 暴露给调用 Agent，避免以后泄漏请求或凭据。
         emit({"ok": False, "error": {"code": "INTERNAL_ERROR", "message": "CLI 内部错误。"}}, error=True)
         return 1
+    if args.operation == "collab" and args.action == "mcp":
+        # stdio MCP 客户端只能收到 MCP 帧，退出时也不附加 CLI 响应。
+        return 0
+
     if args.operation != "pull" or not args.silent:
         emit({"ok": True, "data": data})
     if (
