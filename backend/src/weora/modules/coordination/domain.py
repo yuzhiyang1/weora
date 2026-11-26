@@ -9,6 +9,7 @@ Strength = Literal["explicit", "inferred"]
 Mode = Literal["off", "observe", "auto"]
 EffectKind = Literal["main", "worker", "poll", "code_poll", "reply", "cancel"]
 EffectState = Literal["pending", "running", "done", "cancelled", "blocked", "unknown"]
+ConsoleMode = Literal["continue", "steer", "retry", "resume"]
 # 平台权限/历史变化时安全关闭旧原生会话；有效原目标可在新 Run 继续，不重放未知外部写入。
 SESSION_RESTART_FAILURES = frozenset({"SESSION_POLICY_CHANGED", "SESSION_HISTORY_REVOKED"})
 
@@ -110,6 +111,11 @@ class Trigger:
     expires_at: str | None = None
     # 同一飞书话题的其他成员提供的证据，不能再进入新任务评估。
     peer_evidence: bool = False
+    # 控制台跟进绑定读取时的运行；插话还绑定本轮领取代次，防止重放到后续运行。
+    console_mode: ConsoleMode | Literal["stop"] | None = None
+    console_ticket_id: str | None = None
+    console_run_id: str | None = None
+    console_fence: int | None = None
 
 
 @dataclass
@@ -233,6 +239,8 @@ class Input:
     peer_evidence: bool = False
     # 停止是执行控制，不构成恢复后仍须实现的工作目标；恢复原文中的纠偏仍保留为目标。
     control_action: Literal["stop", "resume"] | None = None
+    # 控制台回执只在派发完成后关联实际接收这条指令的 Run。
+    console_dispatch_run_id: str | None = None
 
 
 @dataclass

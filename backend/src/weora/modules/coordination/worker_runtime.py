@@ -4,7 +4,7 @@ import asyncio
 import json
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from functools import partial
 from typing import Literal, cast
 
@@ -13,7 +13,7 @@ from jsonschema import Draft202012Validator
 from weora.modules.coordination.activities import RunActivities
 from weora.modules.coordination.domain import CoordinationError, Json, Report, State
 from weora.modules.coordination.engine import Engine, key
-from weora.modules.coordination.objectives import fully_read, objective_inputs
+from weora.modules.coordination.objectives import fully_read, has_deferred_console_input, objective_inputs
 from weora.modules.coordination.records import records
 from weora.modules.coordination.service import CoordinationService
 from weora.modules.coordination.tools import ID, TEXT, USER_REPLY_STYLE, object_schema
@@ -302,7 +302,9 @@ class CoordinatedRuntime:
                 check(current)
                 active = controller.ticket(ticket_id)
                 if name == "orchestrator_read":
-                    result = worker_facts(current, ticket_id, arguments)
+                    result = worker_facts(
+                        current, ticket_id, arguments, run_id=str(self.lease.run.id), fence=self.lease.fencing_token,
+                    )
                     for item, source in objective_inputs(active, controller.r.triggers):
                         if not item.read_at and fully_read(item, source):
                             controller.mark_input(ticket_id, assignment_id, item.id, read=True)
@@ -353,7 +355,11 @@ class CoordinatedRuntime:
                         if report.human_action or not report.summary.strip():
                             raise CoordinationError("REPORT_QUESTION_CONFLICT")
                         if report.state == "ready":
-                            controller.validate_objective_completion(active, report)
+                            if has_deferred_console_input(active, controller.r.triggers, str(self.lease.run.id)):
+                                # 本轮完成后仍有用户明确排到下一轮的原文，保留结果并续接同一个任务。
+                                report = replace(report, state="partial", remaining_work=("处理控制台排队的后续指令",))
+                            else:
+                                controller.validate_objective_completion(active, report)
                         # 校验失败的 ready 不能进入检查点，避免正常结束后被错误升级为完成。
                         current.checkpoints[f"report:{self.lease.run.id}"] = asdict(report)
                         return {"ok": True, "status": "pending_run_validation"}

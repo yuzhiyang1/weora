@@ -73,7 +73,7 @@ class Engine:
         return ticket
 
     def _task_reference(self, trigger: Trigger) -> tuple[str, str] | None:
-        if self.config.source_kind == "feishu" and trigger.human and trigger.addressed:
+        if self.config.source_kind == "feishu" and trigger.human and trigger.addressed and not trigger.console_mode:
             return task_reference(trigger.text)
         return None
 
@@ -228,7 +228,7 @@ class Engine:
         return True
 
     def _queue(self, trigger: Trigger) -> None:
-        if trigger.peer_evidence:
+        if trigger.peer_evidence or trigger.console_mode:
             return
         thread = self._thread(trigger.threads[0])
         if trigger.id not in thread.pending:
@@ -261,6 +261,8 @@ class Engine:
             ticket.ended_at = ticket.ended_by = ticket.outcome = None
             ticket.assignments.append(Assignment(key("assignment", ticket.id, trigger.id), self.now()))
         self.r.tickets.save(ticket)
+        if trigger.console_mode == "steer":
+            return  # 插话由绑定的原生领取轮次读取，不单独派发新的安排。
         self._wake(
             ticket,
             human=trigger.human
@@ -268,6 +270,24 @@ class Engine:
             and not item.peer_evidence
             and (trigger.id not in ticket.origin_ids or ticket.mandate.strength == "explicit"),
         )
+
+    def accept_console_input(self, ticket: Ticket, trigger: Trigger) -> None:
+        """复用协调域现有停止、恢复和重试规则，Web 显式操作无需再推断用户意图。"""
+        mode = trigger.console_mode
+        if mode is None or trigger.console_ticket_id != ticket.id or trigger.actor_id != ticket.mandate.actor_id:
+            raise CoordinationError("TASK_INPUT_UNAVAILABLE")
+        admission = gate(self.config, trigger)
+        if not admission.admitted or admission.strength != "explicit":
+            raise CoordinationError("EXPLICIT_REQUEST_REQUIRED")
+        self.r.triggers.save(trigger)
+        if mode in {"stop", "resume"}:
+            self.route(trigger.id, {"decision": mode, "ticket_id": ticket.id, "reason": "原发起人在控制台明确操作"})
+        else:
+            if mode == "retry":
+                self.retry(ticket.id, trigger.id)
+            self._input(ticket, trigger)
+            self.r.triggers.save(trigger)
+        self.record_notice("ticket.console_input", trigger.id, {"ticket_id": ticket.id, "mode": mode}, quiet=True)
 
     def _wake(self, ticket: Ticket, *, human: bool = False, continuation: bool = False) -> None:
         if self.config.paused or ticket.ended_by == "human" or not ticket.assignments:
@@ -642,6 +662,11 @@ class Engine:
             raise CoordinationError("TRIGGER_NOT_FOUND")
         if trigger.peer_evidence:
             raise CoordinationError("PEER_EVIDENCE_ONLY")
+        if trigger.console_mode and (
+            trigger.console_mode not in {"stop", "resume"} or result.get("decision") != trigger.console_mode
+            or result.get("ticket_id") != trigger.console_ticket_id
+        ):
+            raise CoordinationError("CONSOLE_INPUT_BOUND")
         reference = self._task_reference(trigger)
         if reference is not None:
             # 编号普通跟进已入 Worker；显式停止/恢复仍由 Main 控制，不能改为另建任务。
@@ -848,6 +873,8 @@ class Engine:
         ticket, trigger = self.ticket(ticket_id), self.r.triggers.get(trigger_id)
         if not trigger or not any(item.trigger_id == trigger_id for item in ticket.inputs):
             raise CoordinationError("INPUT_NOT_REACHED")
+        if trigger.console_mode:
+            raise CoordinationError("CONSOLE_INPUT_BOUND")
         if ticket_id in trigger.handbacks:
             raise CoordinationError("ALREADY_HANDED_BACK")
         if not reason.strip():
@@ -868,6 +895,8 @@ class Engine:
             raise CoordinationError("LEFT_TO_WORKER")
         if trigger.peer_evidence:
             raise CoordinationError("PEER_EVIDENCE_ONLY")
+        if trigger.console_mode:
+            raise CoordinationError("CONSOLE_INPUT_BOUND")
         if self._task_reference(trigger) is not None:
             raise CoordinationError("TASK_REFERENCE_ALREADY_HANDLED")
         self._queue(trigger)
@@ -903,6 +932,8 @@ class Engine:
         ticket, trigger = self.ticket(ticket_id), self.r.triggers.get(trigger_id)
         if not trigger or not trigger.human or trigger.actor_id != ticket.mandate.actor_id:
             raise CoordinationError("EXPLICIT_STOP_REQUIRED")
+        if trigger.console_mode and (trigger.console_mode != "stop" or trigger.console_ticket_id != ticket_id):
+            raise CoordinationError("CONSOLE_INPUT_BOUND")
         participating = any(item.trigger_id == trigger_id and not item.context_only for item in ticket.inputs)
         admission = gate(self.config, trigger, participating=participating)
         if not admission.admitted or admission.strength != "explicit":
@@ -931,6 +962,8 @@ class Engine:
             or trigger.actor_id != ticket.mandate.actor_id
         ):
             raise CoordinationError("EXPLICIT_RESUME_REQUIRED")
+        if trigger.console_mode and (trigger.console_mode != "resume" or trigger.console_ticket_id != ticket_id):
+            raise CoordinationError("CONSOLE_INPUT_BOUND")
         admission = gate(self.config, trigger)
         if (
             not admission.admitted or admission.strength != "explicit"
@@ -989,6 +1022,8 @@ class Engine:
             raise CoordinationError("HUMAN_STOPPED")
         if not trigger or not trigger.human or trigger.actor_id != ticket.mandate.actor_id:
             raise CoordinationError("EXPLICIT_RETRY_REQUIRED")
+        if trigger.console_mode and (trigger.console_mode != "retry" or trigger.console_ticket_id != ticket_id):
+            raise CoordinationError("CONSOLE_INPUT_BOUND")
         assignment_id = key("assignment", ticket.id, trigger.id)
         if any(item.id == assignment_id for item in ticket.assignments):
             return  # Main 重放同一条用户消息时复用已有重试安排。
@@ -1164,6 +1199,13 @@ class Engine:
                 continue
             trigger = self.r.triggers.get(item.trigger_id)
             if not trigger:
+                continue
+            if trigger.console_mode:
+                # 控制台指令只授权当前任务，不能释放给 Main 作为独立接单输入。
+                if not item.read_at and trigger.console_mode != "steer":
+                    item.delivered_to = item.delivered_at = None
+                    item.status = "pending"
+                    ticket.undelivered.append(item.id)
                 continue
             trigger.fanout = [identity for identity in trigger.fanout if identity != ticket.id]
             self.r.triggers.save(trigger)

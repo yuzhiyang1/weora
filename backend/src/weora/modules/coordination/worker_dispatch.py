@@ -69,6 +69,10 @@ class WorkerDispatcher:
             for item in ticket.inputs
             if not item.read_at
             and not item.context_only
+            and not (
+                (source := records(state).triggers.get(item.trigger_id or "")) is not None
+                and source.console_mode == "steer"
+            )
             and (not item.peer_evidence or not ticket.attention)
             and (item.id in ticket.undelivered or item.delivered_to == assignment.id)
         ][:8]
@@ -169,6 +173,11 @@ class WorkerDispatcher:
         # 一次冻结本轮输入与来源，包括优先级；提交后新消息不得改变原生请求摘要。
         goals = objective_inputs(ticket, records(state).triggers)
         refresh_retry = assignment.refresh_model and assignment.run_id is None
+        # 明确排入本轮的控制台跟进属于任务指令，不能被旧的只报状态请求覆盖。
+        status_only = assignment.status_only and not any(
+            (source := records(state).triggers.get(item.trigger_id or "")) is not None and source.console_mode
+            for item in pending
+        )
 
         def render_instruction(goal_preview: int, pending_preview: int) -> str:
             # 优先保留用户原文；路由摘要只能帮助定位，不能缩减输入中尚未完成的目标。
@@ -222,7 +231,7 @@ class WorkerDispatcher:
                     ],
                     ensure_ascii=False,
                 )
-            if assignment.status_only:
+            if status_only:
                 instruction = "本轮只报告状态，不实施新修改，不调用写工具。\n" + instruction
             return instruction
 
@@ -238,7 +247,7 @@ class WorkerDispatcher:
         # 正文只进入有统一清理路径的 Task 指令；来源元数据保留地址与授权引用。
         frozen_origin.pop("root_text", None)
         frozen_origin["coordination_priority"] = effect.priority
-        if assignment.status_only:
+        if status_only:
             frozen_origin["coordination_status_only"] = True
         batch_id = key(anchor_id or "initial", str(ticket.status_requests), *(item.id for item in pending))
         # Runs 的幂等键上限为 128；拼接多个摘要在 SQLite 可写、PostgreSQL 会拒绝。
@@ -351,6 +360,9 @@ class WorkerDispatcher:
             for item in active.inputs:
                 if item.id in previews:
                     item.delivered_chars = int(str(previews[item.id]))
+                    source = records(current).triggers.get(item.trigger_id or "")
+                    if source and source.console_mode and item.console_dispatch_run_id is None:
+                        item.console_dispatch_run_id = run_id
             records(current).tickets.save(active)
 
         await self.store.transact(workspace_id, scope_id, bind)

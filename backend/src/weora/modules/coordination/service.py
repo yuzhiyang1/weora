@@ -32,7 +32,7 @@ from weora.modules.coordination.engine import Engine, key, later
 from weora.modules.coordination.hosting import CodeEventReader
 from weora.modules.coordination.hosting_poll import CodePolling
 from weora.modules.coordination.main_session import MainSessionRunner
-from weora.modules.coordination.objectives import objective_inputs
+from weora.modules.coordination.objectives import has_deferred_console_input, objective_inputs
 from weora.modules.coordination.ports import CoordinationStore
 from weora.modules.coordination.records import Effects, records
 from weora.modules.coordination.repository_source import RepositoryIntake
@@ -1256,6 +1256,7 @@ class CoordinationService:
                 expected_run: str | None = assignment.run_id,
                 snapshot: Report = report,
                 observed_native_work: bool = native_work,
+                succeeded: bool = status == "SUCCEEDED",
             ) -> None:
                 # 模型回合成功不是目标完成；只有明确 ready 且原生验收通过才结束 Ticket。
                 if current.checkpoints.get(revision_key) != revision:
@@ -1292,6 +1293,11 @@ class CoordinationService:
                             )
                         else:
                             accepted = replace(snapshot, verified=True)
+                    elif snapshot.state == "waiting" and not snapshot.human_action and succeeded and (
+                        has_deferred_console_input(active, engine.r.triggers, expected_run)
+                    ):
+                        # 终态已提交时仍可接收后续指令，旧轮对账不能让它们留在待办中而无人派发。
+                        accepted = replace(snapshot, state="partial", remaining_work=("处理控制台排队的后续指令",))
                     if accepted.state == "partial" and not accepted.human_action:
                         # 对同一份未推进的结果仅续接有限次数；重放对账由 revision_key 保证不重复计数。
                         progress_key = f"partial-progress:{ticket_id}"

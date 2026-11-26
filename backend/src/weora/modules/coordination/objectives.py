@@ -15,10 +15,30 @@ def objective_inputs(ticket: Ticket, triggers: Repository[Trigger]) -> list[tupl
             and not item.context_only
             and not item.peer_evidence
             and item.control_action != "stop"
+            and (trigger.console_mode != "steer" or item.read_at is not None or fully_read(item, trigger))
             and (item.human or trigger.id in ticket.origin_ids)
         ):
             result.append((item, trigger))
     return result
+
+
+def console_input_visible(item: Input, trigger: Trigger | None, run_id: str, fence: int) -> bool:
+    """后续指令等到新一轮，未读插话只对原领取代次可见。"""
+    if not trigger or item.read_at:
+        return True
+    if trigger.console_mode == "steer":
+        return trigger.console_run_id == run_id and trigger.console_fence == fence
+    return trigger.console_mode != "continue" or trigger.console_run_id != run_id
+
+
+def has_deferred_console_input(ticket: Ticket, triggers: Repository[Trigger], run_id: str | None) -> bool:
+    """只有尚未交给后续运行的控制台补充会让当前轮保留续接待办。"""
+    return any(
+        not item.read_at and item.id in ticket.undelivered
+        and (trigger := triggers.get(item.trigger_id or "")) is not None and trigger.authorized
+        and trigger.console_mode == "continue" and trigger.console_run_id == run_id
+        for item in ticket.inputs
+    )
 
 
 def record_body_read(item: Input, start: int, end: int) -> None:

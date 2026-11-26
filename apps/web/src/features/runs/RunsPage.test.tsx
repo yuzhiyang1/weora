@@ -406,6 +406,41 @@ describe("Console 运行", () => {
     await waitFor(() => expect(screen.getByRole("textbox", { name: "补充指令" })).toHaveValue(""));
   }, 10000);
 
+  it.each([
+    { status: "FAILED", mode: "retry", label: "重试原任务" },
+    { status: "CANCELLED", mode: "resume", label: "恢复原任务" },
+  ])("飞书运行在 $status 时只提交 $mode 操作", async ({ status, mode, label }) => {
+    vi.stubGlobal("EventSource", TestEventSource);
+    window.history.replaceState({}, "", "/runs/run-1");
+    document.cookie = "weora_csrf=csrf-value; Path=/";
+    let submitted: unknown;
+    mockRunRequests((path, init) => {
+      if (path.endsWith("/runs/run-1")) return response({ ...run, status });
+      if (path.endsWith("/runs/run-1/conversation")) return response({
+        channel: "feishu",
+        can_send: true,
+        can_steer: false,
+        can_retry: mode === "retry",
+        can_resume: mode === "resume",
+        runs: [],
+        inputs: [{ id: "origin", instruction: "核对原始登录问题", created_at: run.created_at, mode: "continue", status: null }],
+      });
+      if (path.endsWith("/runs/run-1/continue")) {
+        submitted = JSON.parse(String(init?.body));
+        return response({ input_id: "console-input" }, 202);
+      }
+      return undefined;
+    });
+    const user = userEvent.setup();
+    render(<App />);
+    expect(await screen.findByText("任务结果会回传到原飞书话题。")).toBeInTheDocument();
+    expect(screen.getByText("核对原始登录问题")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "发送" })).not.toBeInTheDocument();
+    await user.type(screen.getByRole("textbox", { name: "补充指令" }), "检查登录日志");
+    await user.click(screen.getByRole("button", { name: label }));
+    expect(submitted).toEqual({ instruction: "检查登录日志", mode });
+  });
+
   it("成功终态轮换SSE后不轮询详情和事件，撤权仍清除正文缓存", async () => {
     vi.stubGlobal("EventSource", TestEventSource);
     window.history.replaceState({}, "", "/runs/run-1");

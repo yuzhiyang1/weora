@@ -29,9 +29,9 @@ const receipts = {
 } as const;
 
 function conversationEntries(conversation: RunConversation) {
-  const nextRuns = new Set(conversation.inputs.filter((input) => input.mode === "continue").map((input) => input.run_id));
+  const nextRuns = new Set(conversation.inputs.filter((input) => input.mode !== "steer").map((input) => input.run_id));
   const turns = conversation.runs.flatMap((turn) => [
-    ...(nextRuns.has(turn.id) ? [] : [{
+    ...(!turn.instruction || nextRuns.has(turn.id) ? [] : [{
       id: `request:${turn.id}`, text: turn.instruction, date: turn.created_at, author: null, input: null,
     }]),
     ...(turn.output ? [{
@@ -41,7 +41,7 @@ function conversationEntries(conversation: RunConversation) {
   return [
     ...turns,
     ...conversation.inputs.map((input) => ({
-      id: input.id, text: input.instruction, date: input.created_at, author: null, input,
+      id: input.id, text: input.instruction, date: input.created_at, author: input.author ?? null, input,
     })),
   ].sort((left, right) => Date.parse(left.date) - Date.parse(right.date));
 }
@@ -115,13 +115,12 @@ export function RunConversationPanel({ workspaceId, userId, run, composer, onAcc
     refetchInterval: (query) => query.state.data && (
       !isTerminal(run.status) ||
       query.state.data.runs.some((item) => !isTerminal(item.status)) ||
-      query.state.data.inputs.some((item) => ["STEERING", "PENDING"].includes(item.status))
+      query.state.data.inputs.some((item) => item.status === "STEERING" || item.status === "PENDING")
     ) ? 3000 : false,
     retry: false,
   });
   const data = conversation.data;
   const hasConversation = Boolean(data);
-  const mode = selection ?? (data?.can_steer ? "steer" : "continue");
   useEffect(() => {
     if (conversation.error instanceof ConsoleApiError && [401, 403, 404].includes(conversation.error.status)) {
       onAccessRevoked();
@@ -138,6 +137,8 @@ export function RunConversationPanel({ workspaceId, userId, run, composer, onAcc
   if (!data) return <Spin tip="正在读取 Agent 对话" />;
 
   const turns = conversationEntries(data);
+  const controlMode = data.can_resume ? "resume" : data.can_retry ? "retry" : null;
+  const mode = controlMode ?? selection ?? (data.can_steer ? "steer" : "continue");
   const invalidMode = mode === "steer" && !data.can_steer;
   const taskGoal = data.task_goal ?? run.instruction;
   return (
@@ -149,19 +150,19 @@ export function RunConversationPanel({ workspaceId, userId, run, composer, onAcc
           {turns.map((turn) => (
             <li className="run-conversation-message" key={turn.id}>
               <span className="run-conversation-avatar" aria-hidden="true">
-                {turn.author ? <Bot size={16} /> : <User size={16} />}
+                {!turn.input && turn.author ? <Bot size={16} /> : <User size={16} />}
               </span>
               <div className="run-conversation-entry">
                 <div className="run-conversation-meta">
                   <strong>{turn.author ?? "你"}</strong><time dateTime={turn.date}>{formatDate(turn.date)}</time>
                 </div>
                 <div className="run-conversation-bubble">
-                  {turn.author ? <MarkdownContent>{turn.text}</MarkdownContent> : <p>{turn.text}</p>}
+                  {!turn.input && turn.author ? <MarkdownContent>{turn.text}</MarkdownContent> : <p>{turn.text}</p>}
                 </div>
-                {turn.input && (
+                {turn.input?.status && (
                   <div className="run-conversation-receipt">
                     <Tag color={receipts[turn.input.status].color}>{receipts[turn.input.status].text}</Tag>
-                    {turn.input.mode === "continue" && turn.input.run_id && turn.input.run_id !== run.id && (
+                    {turn.input.mode !== "steer" && turn.input.run_id && turn.input.run_id !== run.id && (
                       <Link to={`/runs/${turn.input.run_id}`}>查看后续运行</Link>
                     )}
                     {turn.input.status === "MISSED" && data.can_send && !draft && (
@@ -177,6 +178,7 @@ export function RunConversationPanel({ workspaceId, userId, run, composer, onAcc
             </li>
           ))}
         </ol>
+        {data.attention && <Banner type="warning" title="任务等待处理" description={data.attention} />}
         {data.can_send && (
           <form className="run-conversation-composer" onSubmit={(event) => {
             event.preventDefault();
@@ -185,20 +187,23 @@ export function RunConversationPanel({ workspaceId, userId, run, composer, onAcc
             send(text, mode);
           }}>
             <label htmlFor={editorId}>补充指令</label>
+            {data.channel === "feishu" && <p>任务结果会回传到原飞书话题。</p>}
             <TextArea id={editorId} ref={editor} value={draft} placeholder="补充要求或追问…"
               rows={2} maxLength={16000} disabled={submit.isPending} onChange={(value) => {
                 if (!draft) setSelection(mode);
                 setDraft(value);
               }} />
             <div className="run-conversation-composer-actions">
-              <Select aria-label="发送方式" value={mode} disabled={submit.isPending}
+              {!controlMode && <Select aria-label="发送方式" value={mode} disabled={submit.isPending}
                 optionList={[
                   { label: "加入当前运行", value: "steer", disabled: !data.can_steer },
                   { label: isTerminal(run.status) ? "开始后续运行" : "本轮结束后继续", value: "continue" },
                 ]}
-                onChange={(value) => { if (value === "steer" || value === "continue") setSelection(value); }} />
+                onChange={(value) => { if (value === "steer" || value === "continue") setSelection(value); }} />}
               <Button type="primary" theme="solid" htmlType="submit" icon={<ArrowUp size={16} />} loading={submit.isPending}
-                disabled={!draft.trim() || invalidMode}>发送</Button>
+                disabled={!draft.trim() || invalidMode}>
+                {controlMode === "resume" ? "恢复原任务" : controlMode === "retry" ? "重试原任务" : "发送"}
+              </Button>
             </div>
             {invalidMode && <p role="status">本轮已无法接收消息，请选择后续运行。</p>}
             {submit.isError && <p role="alert">{errorMessage(submit.error)}</p>}

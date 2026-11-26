@@ -12,6 +12,9 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, R
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict
 
+from weora.modules.coordination.console import FeishuTaskConsole
+from weora.modules.coordination.domain import CoordinationError
+from weora.modules.coordination.service import CoordinationService
 from weora.modules.identity.api.dependencies import current_principal, write_principal
 from weora.modules.identity.application.ports import PrincipalRecord
 from weora.modules.projects.domain import ProjectActor
@@ -25,7 +28,7 @@ from weora.modules.runs.api.schemas import (
     RunListResponse,
     RunSummaryResponse,
 )
-from weora.modules.runs.application.ports import RunActor
+from weora.modules.runs.application.ports import RunActor, RunDetail
 from weora.modules.runs.application.service import RunService
 from weora.modules.runs.domain.errors import RunError, RunNotFoundError, RunVersionNotFoundError
 from weora.modules.runs.infrastructure.execution_store import SqlAlchemyExecutionStore
@@ -65,6 +68,30 @@ def _service(request: Request) -> RunService:
 
 def _actor(principal: PrincipalRecord) -> RunActor:
     return RunActor(principal.user_id, principal.workspace_id)
+
+
+def _feishu_console(request: Request, actor: RunActor, detail: RunDetail) -> FeishuTaskConsole | None:
+    origin = detail.task.origin_metadata or {}
+    service = cast(CoordinationService | None, getattr(request.app.state, "coordination_service", None))
+    if (
+        service and detail.task.origin == "feishu" and detail.run.collaboration_context is None
+        and origin.get("coordination_scope_id") and origin.get("coordination_ticket_id")
+    ):
+        return FeishuTaskConsole(service, actor, detail)
+    return None
+
+
+def _raise_coordination(error: CoordinationError) -> NoReturn:
+    if error.code in {"SCOPE_NOT_FOUND", "TICKET_NOT_FOUND", "ACCESS_REVOKED"}:
+        _raise_http(RunNotFoundError())
+    messages = {
+        "INPUT_KEY_CONFLICT": "这次请求已用于另一条指令，请刷新后重新提交。",
+        "TASK_INPUT_LIMIT": "待处理指令已达上限，请等现有指令处理后再发送。",
+        "CHANNEL_RECONCILIATION_REQUIRED": "请在原飞书话题确认消息投递状态后再试。",
+    }
+    raise HTTPException(409, detail={
+        "code": error.code, "message": messages.get(error.code, "当前无法操作该飞书任务，请刷新后查看任务状态。"),
+    }) from error
 
 
 def _raise_http(error: RunError) -> NoReturn:
@@ -142,15 +169,23 @@ async def continue_task(
 ) -> dict[str, object]:
     """202 仅代表跟进已持久接收；run_id 为空时仍在等待当前尝试结束。"""
     service = _service(request)
+    actor = _actor(principal)
     try:
-        await service.get(actor=_actor(principal), workspace_id=workspace_id, run_id=run_id)
+        detail = await service.get(actor=actor, workspace_id=workspace_id, run_id=run_id)
+        feishu = _feishu_console(request, actor, detail)
+        if feishu:
+            return await feishu.submit(payload.mode, payload.instruction, idempotency_key)
+        if payload.mode in {"retry", "resume"}:
+            raise HTTPException(409, detail={"code": "INPUT_MODE_UNAVAILABLE", "message": "请使用后续运行继续此任务。"})
         item = await service.continue_task(
-            actor=_actor(principal), run_id=run_id, instruction=payload.instruction,
+            actor=actor, run_id=run_id, instruction=payload.instruction,
             idempotency_key=idempotency_key, request_id=get_request_id() or "unknown",
             steer=payload.mode == "steer",
         )
     except RunError as error:
         _raise_http(error)
+    except CoordinationError as error:
+        _raise_coordination(error)
     return {"input_id": str(item.id), "task_id": str(item.task_id), "status": item.status,
             "sequence": item.sequence, "run_id": str(item.run_id) if item.run_id else None}
 
@@ -178,9 +213,15 @@ async def run_conversation(
     """正文只随当前会话权限返回，浏览器和代理均不得缓存。"""
     response.headers["Cache-Control"] = "no-store"
     try:
-        return await _service(request).conversation(_actor(principal), workspace_id, run_id)
+        service = _service(request)
+        actor = _actor(principal)
+        detail = await service.get(actor=actor, workspace_id=workspace_id, run_id=run_id)
+        feishu = _feishu_console(request, actor, detail)
+        return await feishu.conversation() if feishu else await service.conversation(actor, workspace_id, run_id)
     except RunError as error:
         _raise_http(error)
+    except CoordinationError as error:
+        _raise_coordination(error)
 
 
 @router.get("/{run_id}", response_model=RunDetailResponse)
@@ -350,14 +391,22 @@ async def cancel_run(
 ) -> RunDetailResponse:
     """排队任务直接取消；执行中只登记取消请求，等待 Worker 确认。"""
     try:
-        detail = await _service(request).cancel(
-            actor=_actor(principal),
+        service = _service(request)
+        actor = _actor(principal)
+        detail = await service.get(actor=actor, workspace_id=workspace_id, run_id=run_id)
+        feishu = _feishu_console(request, actor, detail)
+        if feishu:
+            await feishu.stop()
+        detail = await service.cancel(
+            actor=actor,
             workspace_id=workspace_id,
             run_id=run_id,
             request_id=get_request_id() or "unknown",
         )
     except RunError as exc:
         _raise_http(exc)
+    except CoordinationError as error:
+        _raise_coordination(error)
     return RunDetailResponse.from_detail(detail)
 
 
