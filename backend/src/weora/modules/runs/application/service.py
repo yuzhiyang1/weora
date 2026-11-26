@@ -295,7 +295,7 @@ class RunService:
                         fence = None
                         if steer:
                             current = await uow.store.get_private(actor=actor, run_id=run_id, lock=True)
-                            if not current or not self._can_steer(current):
+                            if not current or not self.accepts_live_input(current):
                                 raise RunSteeringUnavailableError
                             fence = current.fencing_token
                             pending = await uow.tasks.steering_inputs(
@@ -348,7 +348,7 @@ class RunService:
         return await self.task_input(actor, item.id)
 
     @staticmethod
-    def _can_steer(run: RunRecord) -> bool:
+    def accepts_live_input(run: RunRecord) -> bool:
         return (
             run.status == "RUNNING"
             and run.cancellation_requested_at is None
@@ -374,7 +374,7 @@ class RunService:
                     current, task = await self._authorized_run(uow, actor, run.id)
                 except RunNotFoundError:
                     raise RuntimeFailure("ACCESS_REVOKED") from None
-                if task.audience != "private" or not self._can_steer(current) or (
+                if task.audience != "private" or not self.accepts_live_input(current) or (
                     current.fencing_token != lease.fencing_token
                 ):
                     return []
@@ -389,7 +389,7 @@ class RunService:
                 if not consumed:
                     return
                 current = await uow.store.get_private(actor=actor, run_id=run.id, lock=True)
-                if current and self._can_steer(current) and current.fencing_token == lease.fencing_token:
+                if current and self.accepts_live_input(current) and current.fencing_token == lease.fencing_token:
                     for item in consumed:
                         await uow.tasks.mark_input_read(item)
                     await uow.commit()
@@ -449,7 +449,7 @@ class RunService:
                 status = item.status
                 target = visible.get(item.anchor_run_id)
                 if status == "STEERING" and (
-                    not target or not self._can_steer(target) or target.fencing_token != item.steer_fence
+                    not target or not self.accepts_live_input(target) or target.fencing_token != item.steer_fence
                 ):
                     status = "MISSED"
                 messages.append({
@@ -462,7 +462,7 @@ class RunService:
                 })
             return {
                 "runs": history, "inputs": messages, "can_send": can_send,
-                "can_steer": can_send and self._can_steer(run),
+                "can_steer": can_send and self.accepts_live_input(run),
                 "task_goal": task_goal,
             }
 

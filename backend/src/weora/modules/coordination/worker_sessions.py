@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 from weora.modules.coordination.domain import Activity, Json, Session, State
 from weora.modules.coordination.engine import Engine
+from weora.modules.coordination.objectives import console_input_visible
 from weora.modules.coordination.records import records
 from weora.modules.runs.application.execution import RunLease, RuntimeFailure, RuntimeSession
 from weora.modules.runs.application.harness import NATIVE_RUNTIMES, PI_RUNTIME
@@ -126,6 +127,10 @@ class WorkerSession:
                 continue
             trigger = records(state).triggers.get(item.trigger_id) if item.trigger_id else None
             if trigger and not trigger.authorized:
+                continue
+            if not console_input_visible(
+                item, trigger, str(self.binding.lease.run.id), self.binding.lease.fencing_token,
+            ):
                 continue
             needs_author = Engine.waits_for_person(ticket) or ticket.attention
             if needs_author and (not item.human or item.context_only or item.peer_evidence):
