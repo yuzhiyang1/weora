@@ -1,11 +1,12 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Copy, FileText, GitPullRequest, Search, Terminal } from "lucide-react";
+import { Copy, FileText, GitPullRequest, Plus, Search, Terminal } from "lucide-react";
 import { useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { Banner, Button, Card, Empty, Input, Modal, Select, Spin, Table, Tag } from "../../components/console";
 import type { TableColumn } from "../../components/console/data-table";
 import { useAuth } from "../auth/AuthProvider";
 import { getChange, getSnapshot, listChanges, mergeChange, type ResourceSnapshot, type TeamRule } from "./api";
+import { RuleChangeDialog, type RuleOperation } from "./RuleChangeDialog";
 
 type RuleRow = TeamRule & { excluded: string | null };
 
@@ -29,6 +30,7 @@ function preview(snapshot: ResourceSnapshot, namespaces: ReadonlySet<string>, ta
 export function RulesPage() {
   const { principal } = useAuth();
   const workspace = principal?.workspace.id ?? "";
+  const client = useQueryClient();
   const [params, setParams] = useSearchParams();
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState("all");
@@ -36,7 +38,8 @@ export function RulesPage() {
   const [rule, setRule] = useState<RuleRow | null>(null);
   const [localOpen, setLocalOpen] = useState(false);
   const [copied, setCopied] = useState(false);
-  const [reviewOpen, setReviewOpen] = useState(false);
+  const [review, setReview] = useState<{ workspace: string; changeId: string } | null>(null);
+  const [draft, setDraft] = useState<{ workspace: string; snapshot: ResourceSnapshot; operation: RuleOperation } | null>(null);
   const query = useQuery({
     queryKey: ["team-resources", workspace], queryFn: ({ signal }) => getSnapshot(workspace, signal), enabled: !!workspace,
   });
@@ -52,6 +55,14 @@ export function RulesPage() {
     `${row.name} ${row.path} ${row.description}`.toLocaleLowerCase().includes(term));
   const commands = ["weora init --agent codex", ...(project ? [`weora projects set ${project.id}`] : []), "weora pull", "codex"]
     .join("\n");
+
+  function startChange(operation: RuleOperation) {
+    if (!snapshot || query.isError) return;
+    // 固定打开时的默认修订，避免编辑期间刷新列表后无意覆盖并发修改。
+    setDraft({ workspace, snapshot, operation });
+    setRule(null);
+  }
+  const openRule = snapshot?.rules.find((entry) => entry.path === rule?.path);
   const columns: TableColumn<RuleRow>[] = [
     { title: "规则", dataIndex: "name", width: 320, render: (name, row) => (
       <button className="resource-rule-link" type="button" onClick={() => setRule(row)}>
@@ -73,10 +84,12 @@ export function RulesPage() {
       <header className="page-header">
         <div><h1>Rules</h1><p>查看团队规则，以及选定项目会收到哪些规则。</p></div>
         <div className="resource-actions">
-          <Button theme="light" icon={<GitPullRequest size={16} />} onClick={() => setReviewOpen(true)}>合并请求</Button>
-          <Button theme="solid" type="primary" icon={<Terminal size={16} />} onClick={() => { setCopied(false); setLocalOpen(true); }}>
+          <Button theme="light" icon={<GitPullRequest size={16} />} onClick={() => setReview({ workspace, changeId: "" })}>合并请求</Button>
+          <Button theme="light" icon={<Terminal size={16} />} onClick={() => { setCopied(false); setLocalOpen(true); }}>
             在本地使用
           </Button>
+          <Button theme="solid" type="primary" icon={<Plus size={16} />} disabled={!snapshot || query.isError}
+            onClick={() => startChange({ kind: "create" })}>新增规则</Button>
         </div>
       </header>
       {query.isPending ? <Spin /> : query.isError ? (
@@ -109,7 +122,7 @@ export function RulesPage() {
           }>
             {displayed.length ? <Table columns={columns} dataSource={displayed} rowKey="path" /> : (
               <Empty title={rows.length ? "没有符合条件的规则" : "团队尚未发布规则"}
-                description={rows.length ? "调整搜索词或下发状态。" : "在团队源中提交规则。候选分支合并后，规则会出现在这里。"} />
+                description={rows.length ? "调整搜索词或下发状态。" : "新增规则后，工作空间管理员合并请求即可发布。"} />
             )}
           </Card>
         </>
@@ -126,17 +139,30 @@ export function RulesPage() {
         {rule && <div className="resource-dialog"><code>{rule.path}</code>
           {rule.paths.length > 0 && <p>适用路径 <code>{rule.paths.join(", ")}</code></p>}
           {rule.tags.length > 0 && <div className="resource-tags">{rule.tags.map((tag) => <Tag key={tag}>{tag}</Tag>)}</div>}
-          {rule.excluded && <p>{rule.excluded}</p>}<pre>{rule.body}</pre></div>}
+          {rule.excluded && <p>{rule.excluded}</p>}<pre>{rule.body}</pre>
+          {openRule && <div className="resource-actions">
+            <Button theme="borderless" type="danger" onClick={() => startChange({ kind: "delete", rule: openRule })}>删除规则</Button>
+            <Button theme="solid" type="primary" onClick={() => startChange({ kind: "edit", rule: openRule })}>修改规则</Button>
+          </div>}
+        </div>}
       </Modal>
-      {reviewOpen && <ChangeReview workspace={workspace} canMerge={principal?.workspace.role === "owner" || principal?.workspace.role === "admin"}
-        onClose={() => setReviewOpen(false)} />}
+      {draft?.workspace === workspace && <RuleChangeDialog {...draft} onClose={() => setDraft(null)} onSubmitted={(change) => {
+        void client.invalidateQueries({ queryKey: ["resource-changes", draft.workspace] });
+        setDraft(null);
+        setReview({ workspace: draft.workspace, changeId: change.id });
+      }} />}
+      {review?.workspace === workspace && <ChangeReview workspace={workspace} initialChangeId={review.changeId}
+        canMerge={principal?.workspace.role === "owner" || principal?.workspace.role === "admin"}
+        onClose={() => setReview(null)} />}
     </div>
   );
 }
 
-function ChangeReview({ workspace, canMerge, onClose }: { workspace: string; canMerge: boolean; onClose: () => void }) {
+function ChangeReview({ workspace, initialChangeId, canMerge, onClose }: {
+  workspace: string; initialChangeId: string; canMerge: boolean; onClose: () => void;
+}) {
   const client = useQueryClient();
-  const [selected, setSelected] = useState("");
+  const [selected, setSelected] = useState(initialChangeId);
   const list = useQuery({ queryKey: ["resource-changes", workspace], queryFn: () => listChanges(workspace) });
   const detail = useQuery({ queryKey: ["resource-change", workspace, selected], queryFn: () => getChange(workspace, selected), enabled: !!selected });
   const merge = useMutation({ mutationFn: () => mergeChange(workspace, detail.data!), onSuccess: () => {
@@ -146,6 +172,7 @@ function ChangeReview({ workspace, canMerge, onClose }: { workspace: string; can
   } });
   return <Modal title="团队源合并请求" visible onCancel={onClose} maskClosable={!merge.isPending} closeOnEsc={!merge.isPending}>
     <div className="resource-dialog">
+      {initialChangeId && !merge.isSuccess && <Banner type="success" title="已提交合并请求，合并后生效" />}
       {list.isPending ? <Spin /> : list.isError ? <Banner type="danger" title={list.error.message} /> : list.data?.items.length ? (
         <Select aria-label="候选分支" placeholder="选择候选分支" value={selected}
           optionList={list.data.items.map(({ id, branch }) => ({ value: id, label: branch }))}

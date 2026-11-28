@@ -17,6 +17,8 @@
 .resource-dialog { display: grid; gap: .75rem; }
 .resource-dialog pre { background: var(--surface-secondary); padding: .75rem; white-space: pre-wrap; overflow-wrap: anywhere; }
 .resource-dialog .resource-actions { justify-content: end; }
+.resource-rule-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .75rem; }
+.resource-rule-path { overflow-wrap: anywhere; }
 .resource-diff { display: grid; grid-template-columns: 1fr 1fr; gap: .5rem; }
 .resource-diff > strong { grid-column: 1 / -1; overflow-wrap: anywhere; }
 .resource-diff > div { min-width: 0; }
@@ -34,4 +36,5 @@
   .resource-rule-link { overflow-wrap: anywhere; }
   .resource-rule-link code, .resource-rule-result small { white-space: normal; }
   .resource-diff { grid-template-columns: 1fr; }
+  .resource-rule-fields { grid-template-columns: 1fr; }
 }
